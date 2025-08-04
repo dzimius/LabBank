@@ -13,16 +13,16 @@ df_bs_struct = pd.read_excel('input_data/bank_data_only_dep.xlsx', sheet_name='b
 
 df_client_t = pd.read_excel('dictionaries/client_type.xlsx')
 df_bs_struct['balance_amt'] = full_balance_amt * df_bs_struct['bs_percentage'] / 100
-
+df_bs_struct['amort_type'] = df_bs_struct['amort_type'].astype('Int64')
 df_result = df_bs_struct.merge(df_client_t, on='client_type_id', how='left')
 
 product_objects = {}
 
-for _, row in df_result.iterrows():
+for i, row in df_result.iterrows():
     product = ProductFactory.create(row)
     df = product.build_result_df()
-    product_objects[row['prod_id']] = df
-    df.to_excel(f'output_data/{row["prod_id"]}_transactions.xlsx', index=False)
+    product_objects[row['product_name']] = df
+    df.to_excel(f'output_data/{i}_transactions.xlsx', index=False)
 
 # for i, row in df_result.iterrows():
 #     try:
