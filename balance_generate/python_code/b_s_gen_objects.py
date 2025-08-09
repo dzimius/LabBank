@@ -32,23 +32,35 @@ def outstanding_constant_amort(initial_notional, maturity_months, months_passed)
 def generate_loan_current_balance_amt(init_b_amt, amort_type, start_date, report_date, maturity, int_rate):
     start_date = pd.Timestamp(start_date)
     report_date = pd.Timestamp(report_date)
-    n_of_months_passed = get_num_of_months(maturity)
-    n_of_months = (report_date.year - start_date.year) * 12 + (report_date.month - start_date.month)
+    n_of_months = get_num_of_months(maturity)
+    n_of_months_passed = (report_date.year - start_date.year) * 12 + (report_date.month - start_date.month)
     if amort_type == 1:
         c_balance_amt = outstanding_annuity(init_b_amt, n_of_months, n_of_months_passed, int_rate)
     elif amort_type == 2:
         c_balance_amt = outstanding_constant_amort(init_b_amt, n_of_months, n_of_months_passed)
     return c_balance_amt
 
-def generate_truncated_normal(mean, std_dev, lower_bound, upper_bound, n=1, rounding=False, round_n=1000):
+def generate_truncated_normal(mean, std_dev, lower_bound, upper_bound, n=1, rounding=False, round_to=1000):
     a, b = (lower_bound - mean) / std_dev, (upper_bound - mean) / std_dev
     trunc_dist = truncnorm(a, b, loc=mean, scale=std_dev)
     samples = trunc_dist.rvs(n)
     if rounding:
-        result = np.ceil(samples / round_n) * round_n
+        result = np.ceil(samples / round_to) * round_to
     else:
         result = np.round(samples, 2)
     return result
+
+def generate_balances(full_balance_amt, mean, std_dev, lower_bound, upper_bound):
+    n_estimated = int(full_balance_amt / mean * 1.15)
+    b_amounts = generate_truncated_normal(mean, std_dev, lower_bound, upper_bound,
+                                          n=n_estimated, rounding=True, round_to=5000)
+    cumsum = np.cumsum(b_amounts)
+    idx = np.searchsorted(cumsum, full_balance_amt)
+    balances = list(b_amounts[:idx])
+    last_value = full_balance_amt - sum(balances)
+    if last_value > 0:
+        balances.append(last_value)
+    return balances
 
 def generate_random_dates(start_date, end_date, n, seed=None):
     start = pd.to_datetime(start_date)
@@ -66,7 +78,8 @@ def ql_date_to_pd_date(ql_date):
 
 # === Abstrakcyjna klasa bazowa ===
 class ProductGen(ABC):
-    def __init__(self, product_code, bs_side, balance_amt, currency, client_type_id, rate_type):
+    def __init__(self, product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type):
+        self.product_name = product_name
         self.product_code = product_code
         self.bs_side = bs_side
         self.balance_amt = balance_amt
@@ -99,162 +112,180 @@ class ProductGen(ABC):
 
 # === NMD classes ===
 class SavingAccountsGen(ProductGen):
-    stats_dict = config.s_acc_stats_dict
 
-    def __init__(self, product_code, bs_side, balance_amt, currency, client_type_id, rate_type, current_rate):
-        super().__init__(product_code, bs_side, balance_amt, currency, client_type_id, rate_type)
-        self.current_rate = current_rate
+    def __init__(self, product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type):
+        super().__init__(product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type)
 
     def gen_set_of_transactions(self):
-        stats = self.stats_dict[self.client_type_id]
-        mean = stats['mean']
-        std_dev = stats['std_dev']
-        lower_bound = stats['lower_bound']
-        upper_bound = stats['upper_bound']
-        n_estimated = int(self.balance_amt / mean * 1.15)
-        b_amounts = generate_truncated_normal(mean, std_dev, lower_bound, upper_bound, n=n_estimated)
-        cumsum = np.cumsum(b_amounts)
-        idx = np.searchsorted(cumsum, self.balance_amt)
-        balances = list(b_amounts[:idx])
-        last_value = self.balance_amt - sum(balances)
-        if last_value > 0:
-            balances.append(last_value)
-
+        stats = config.stats_dict[self.product_name][self.client_type_id]
+        balances = generate_balances(self.balance_amt, stats['mean'], stats['std_dev'],
+                                     stats['lower_bound'], stats['upper_bound'])
         return pd.DataFrame({'balance_amt': balances})
     
     def add_parameters(self, set_of_transactions):
         array_of_ids = self.add_ids(len(set_of_transactions))
-        array_of_rate_types = np.full(len(set_of_transactions), self.rate_type)
-        array_of_c_rates = np.full(len(set_of_transactions), self.current_rate)
-        array_of_currencies = np.full(len(set_of_transactions), self.currency)
-        array_of_client_types = np.full(len(set_of_transactions), self.client_type_id)
         return pd.DataFrame({
-            'id': array_of_ids,
+            'transaction_id': array_of_ids,
+            'product_name': self.product_name,
             'product_code': self.product_code,
             'bs_side': self.bs_side,
             'balance_amt': set_of_transactions['balance_amt'],
-            'currency': array_of_currencies,
-            'client_type_id': array_of_client_types,
-            'rate_type': array_of_rate_types,
-            'current_rate': array_of_c_rates
+            'currency': self.currency,
+            'client_type_id': self.client_type_id,
+            'rate_type': self.rate_type
             })
     
 
     @classmethod
     def create_from_row(cls, row):
         return cls(
+            product_name=row["product_name"],
             product_code=row["product_code"],
             bs_side=row["bs_side"],
             balance_amt=row["balance_amt"],
             currency=row["currency"],
             client_type_id=row["client_type_id"],
-            rate_type=row["rate_type"],
-            current_rate=row["current_rate"]
+            rate_type=row["rate_type"]
         )
 
  
 class CurrentAccountsGen(ProductGen):
-    stats_dict = config.c_acc_stats_dict
 
-    def __init__(self, product_code, bs_side, balance_amt, currency, client_type_id, rate_type, current_rate):
-        super().__init__(product_code, bs_side, balance_amt, currency, client_type_id, rate_type)
-        self.current_rate = current_rate
+    def __init__(self, product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type):
+        super().__init__(product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type)
 
     def gen_set_of_transactions(self):
-        stats = self.stats_dict[self.client_type_id]
-        mean = stats['mean']
-        std_dev = stats['std_dev']
-        lower_bound = stats['lower_bound']
-        upper_bound = stats['upper_bound']
-        n_estimated = int(self.balance_amt / mean * 1.15)
-        b_amounts = generate_truncated_normal(mean, std_dev, lower_bound, upper_bound, n=n_estimated)
-        cumsum = np.cumsum(b_amounts)
-        idx = np.searchsorted(cumsum, self.balance_amt)
-        balances = list(b_amounts[:idx])
-        last_value = self.balance_amt - sum(balances)
-        if last_value > 0:
-            balances.append(last_value)
+        stats = config.stats_dict[self.product_name][self.client_type_id]
+        balances = generate_balances(self.balance_amt, stats['mean'], stats['std_dev'],
+                                     stats['lower_bound'], stats['upper_bound'])
         return pd.DataFrame({'balance_amt': balances})
     
     def add_parameters(self, set_of_transactions):
-        array_of_c_rates = np.full(len(set_of_transactions), self.current_rate)
+        array_of_ids = self.add_ids(len(set_of_transactions))
         array_of_currencies = np.full(len(set_of_transactions), self.currency)
         array_of_client_types = np.full(len(set_of_transactions), self.client_type_id)
         return pd.DataFrame({
+            'transaction_id': array_of_ids,
+            'product_name': self.product_name,
             'product_code': self.product_code,
             'bs_side': self.bs_side,
             'balance_amt': set_of_transactions['balance_amt'],
             'currency': array_of_currencies,
             'client_type_id': array_of_client_types,
-            'rate_type': self.rate_type,
-            'current_rate': array_of_c_rates
+            'rate_type': self.rate_type
             })
 
     @classmethod
     def create_from_row(cls, row):
         return cls(
+            product_name=row["product_name"],
             product_code=row["product_code"],
             bs_side=row["bs_side"],
             balance_amt=row["balance_amt"],
             currency=row["currency"],
             client_type_id=row["client_type_id"],
-            rate_type=row["rate_type"],
-            current_rate=row["current_rate"]
+            rate_type=row["rate_type"]
         )
     
 
 # === Class TermDeposit ===
 class TermDepositsGen(ProductGen):
-    stats_dict = config.t_dep_stats_dict
-
-    def __init__(self,product_code, bs_side, balance_amt, currency, client_type_id, rate_type, maturity, current_rate):
-        super().__init__(product_code, bs_side, balance_amt, currency, client_type_id, rate_type)
+    def __init__(self, product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type, maturity):
+        super().__init__(product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type)
         self.maturity = maturity
-        self.current_rate = current_rate
 
     def gen_set_of_transactions(self):
-        stats = self.stats_dict[self.client_type_id]
-        mean = stats['mean']
-        std_dev = stats['std_dev']
-        lower_bound = stats['lower_bound']
-        upper_bound = stats['upper_bound']
-        n_estimated = int(self.balance_amt / mean * 1.15)
-        b_amounts = generate_truncated_normal(mean, std_dev, lower_bound, upper_bound, n=n_estimated,
-                                              rounding = True, round_n = 500)
-        cumsum = np.cumsum(b_amounts)
-        idx = np.searchsorted(cumsum, self.balance_amt)
-        balances = list(b_amounts[:idx])
-        last_value = self.balance_amt - sum(balances)
-        if last_value > 0:
-            balances.append(last_value)
+        stats = config.stats_dict[self.product_name][self.client_type_id]
+        balances = generate_balances(self.balance_amt, stats['mean'], stats['std_dev'],
+                                     stats['lower_bound'], stats['upper_bound'])
         starting_dates = generate_random_dates(config.report_date,
                                                         ql_date_to_pd_date(ql.Date.from_date(config.report_date) - ql.Period(self.maturity)),
                                                         len(balances))
         return pd.DataFrame({'balance_amt': balances, 'starting_date': starting_dates})
     
     def add_parameters(self, set_of_transactions):
-        array_of_c_rates = np.full(len(set_of_transactions), self.current_rate)
-        array_of_currencies = np.full(len(set_of_transactions), self.currency)
-        array_of_client_types = np.full(len(set_of_transactions), self.client_type_id)
-        array_of_maturities = np.full(len(set_of_transactions), self.maturity)
+        array_of_ids = self.add_ids(len(set_of_transactions))
         array_of_starting_dates = generate_random_dates(config.report_date,
                                                         ql_date_to_pd_date(ql.Date.from_date(config.report_date) - ql.Period(self.maturity)),
                                                         len(set_of_transactions))
         return pd.DataFrame({
+            'transaction_id': array_of_ids,
+            'product_name': self.product_name,
             'product_code': self.product_code,
             'bs_side': self.bs_side,
             'balance_amt': set_of_transactions['balance_amt'],
-            'currency': array_of_currencies,
-            'client_type_id': array_of_client_types,
+            'currency': self.currency,
+            'client_type_id': self.client_type_id,
             'rate_type': self.rate_type,
-            'maturity': array_of_maturities,
-            'starting_date': array_of_starting_dates,
-            'current_rate': array_of_c_rates,
+            'maturity': self.maturity,
+            'starting_date': array_of_starting_dates
             })
 
     @classmethod
     def create_from_row(cls, row):
         return cls(
+            product_name=row["product_name"],
+            product_code=row["product_code"],
+            bs_side=row["bs_side"],
+            balance_amt=row["balance_amt"],
+            currency=row["currency"],
+            client_type_id=row["client_type_id"],
+            rate_type=row["rate_type"],
+            maturity=row["maturity"]
+        )
+
+
+# === Loan Classes ===
+class LoansFixedGen(ProductGen):
+
+    def __init__(self, product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type, maturity, amort_type):
+        super().__init__(product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type)
+        self.maturity = maturity
+        self.amort_type = amort_type
+
+    def gen_set_of_transactions(self):
+        stats = config.stats_dict[self.product_name][self.client_type_id]
+        init_balances = generate_balances(self.balance_amt, stats['mean'], stats['std_dev'],
+                                     stats['lower_bound'], stats['upper_bound'])
+        starting_dates = generate_random_dates(config.report_date,
+                                ql_date_to_pd_date(ql.Date.from_date(config.report_date) - ql.Period(self.maturity)),
+                                len(init_balances))
+        margin_dict = config.margin_map.get(self.product_name)
+        margins = generate_truncated_normal(margin_dict['mean'], margin_dict['std_dev'],
+                                            margin_dict['lower_bound'], margin_dict['upper_bound'],
+                                            n=len(init_balances), rounding=True, round_to=0.05 / 100)
+        avg_rate = config.avg_rate_map.get(self.product_name, 3) / 100
+        if self.amort_type == 0:
+            balances = init_balances
+        else:
+            balances = [generate_loan_current_balance_amt(
+                i_balance, self.amort_type, s_dates, config.report_date, self.maturity, avg_rate)
+                    for (i_balance, s_dates) in zip(init_balances, starting_dates)]
+        return pd.DataFrame({'balance_amt': balances, 'init_balance_amt': init_balances,
+                             'starting_date': starting_dates, 'margin': margins})
+    
+    def add_parameters(self, set_of_transactions):
+        array_of_ids = self.add_ids(len(set_of_transactions))
+        return pd.DataFrame({
+            'transaction_id': array_of_ids,
+            'product_name': self.product_name,
+            'product_code': self.product_code,
+            'bs_side': self.bs_side,
+            'balance_amt': set_of_transactions['balance_amt'],
+            'currency': self.currency,
+            'client_type_id': self.client_type_id,
+            'rate_type': self.rate_type,
+            'maturity': self.maturity,
+            'starting_date': set_of_transactions['starting_date'],
+            'init_balance_amt': set_of_transactions['init_balance_amt'],
+            'margin': set_of_transactions['margin']
+            })
+
+
+    @classmethod
+    def create_from_row(cls, row):
+        return cls(
+            product_name=row["product_name"],
             product_code=row["product_code"],
             bs_side=row["bs_side"],
             balance_amt=row["balance_amt"],
@@ -262,53 +293,49 @@ class TermDepositsGen(ProductGen):
             client_type_id=row["client_type_id"],
             rate_type=row["rate_type"],
             maturity=row["maturity"],
-            current_rate=row["current_rate"]
+            amort_type=row["amort_type"]
         )
 
 
-# === Loan Classes ===
-class LoansFixedGen(ProductGen):
-    stats_dict = config.t_dep_stats_dict
-
-    def __init__(self,product_code, bs_side, balance_amt, currency, client_type_id, rate_type, maturity, current_rate, amort_type):
-        super().__init__(product_code, bs_side, balance_amt, currency, client_type_id, rate_type)
+class LoansFloatGen(ProductGen):
+    def __init__(self, product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type, maturity,
+                 rate_index, amort_type):
+        super().__init__(product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type)
         self.maturity = maturity
-        self.current_rate = current_rate
+        self.rate_index = rate_index
         self.amort_type = amort_type
 
     def gen_set_of_transactions(self):
-        stats = self.stats_dict[self.client_type_id]
-        mean = stats['mean']
-        std_dev = stats['std_dev']
-        lower_bound = stats['lower_bound']
-        upper_bound = stats['upper_bound']
-        n_estimated = int(self.balance_amt / mean * 1.15)
-        b_amounts = generate_truncated_normal(mean, std_dev, lower_bound, upper_bound,
-                                            n=n_estimated, rounding = True, round_n = 5000)
-        cumsum = np.cumsum(b_amounts)
-        idx = np.searchsorted(cumsum, self.balance_amt)
-        balances = list(b_amounts[:idx])
-        last_value = self.balance_amt - sum(balances)
-        if last_value > 0:
-            balances.append(last_value)
+        stats = config.stats_dict[self.product_name][self.client_type_id]
+        balances = generate_balances(self.balance_amt, stats['mean'], stats['std_dev'],
+                                     stats['lower_bound'], stats['upper_bound'])
         starting_dates = generate_random_dates(config.report_date,
-                                ql_date_to_pd_date(ql.Date.from_date(config.report_date) - ql.Period(self.maturity)),
-                                len(balances))
+                                               ql_date_to_pd_date(
+                                                   ql.Date.from_date(config.report_date) - ql.Period(self.maturity)),
+                                               len(balances))
+        margin_dict = config.margin_map.get(self.product_name)
+        margins = generate_truncated_normal(margin_dict['mean'], margin_dict['std_dev'],
+                                            margin_dict['lower_bound'], margin_dict['upper_bound'],
+                                            n=len(balances), rounding=True, round_to=0.05 / 100)
+        avg_rate = config.avg_rate_map.get(self.product_name, 3)/100
         if self.amort_type == 0:
             init_balances = balances
         else:
             init_balances = [generate_loan_current_balance_amt(
-                i_balance, self.amort_type, s_dates, config.report_date, self.maturity, self.current_rate)
-                    for (i_balance, s_dates) in zip(balances, starting_dates)]
-        return pd.DataFrame({'balance_amt': balances,
-                             'init_balance_amt': init_balances, 'starting_date': starting_dates})
-    
+                i_balance, self.amort_type, s_dates, config.report_date, self.maturity, avg_rate)
+                for (i_balance, s_dates) in zip(balances, starting_dates)]
+        return pd.DataFrame({'balance_amt': balances, 'init_balance_amt': init_balances,
+                             'starting_date': starting_dates, 'margin': margins})
+
     def add_parameters(self, set_of_transactions):
-        array_of_c_rates = np.full(len(set_of_transactions), self.current_rate)
+        array_of_ids = self.add_ids(len(set_of_transactions))
         array_of_currencies = np.full(len(set_of_transactions), self.currency)
         array_of_client_types = np.full(len(set_of_transactions), self.client_type_id)
         array_of_maturities = np.full(len(set_of_transactions), self.maturity)
+        array_of_indexes = np.full(len(set_of_transactions), self.rate_index)
         return pd.DataFrame({
+            'transaction_id': array_of_ids,
+            'product_name': self.product_name,
             'product_code': self.product_code,
             'bs_side': self.bs_side,
             'balance_amt': set_of_transactions['balance_amt'],
@@ -317,14 +344,15 @@ class LoansFixedGen(ProductGen):
             'rate_type': self.rate_type,
             'maturity': array_of_maturities,
             'starting_date': set_of_transactions['starting_date'],
-            'current_rate': array_of_c_rates,
-            'init_balance_amt': set_of_transactions['init_balance_amt']
-            })
-
+            'rate_index': array_of_indexes,
+            'init_balance_amt': set_of_transactions['init_balance_amt'],
+            'margin': set_of_transactions['margin']
+        })
 
     @classmethod
     def create_from_row(cls, row):
         return cls(
+            product_name=row["product_name"],
             product_code=row["product_code"],
             bs_side=row["bs_side"],
             balance_amt=row["balance_amt"],
@@ -332,63 +360,142 @@ class LoansFixedGen(ProductGen):
             client_type_id=row["client_type_id"],
             rate_type=row["rate_type"],
             maturity=row["maturity"],
-            current_rate=row["current_rate"],
-            amort_type=row["amort_type"]
-        )
-
-
-class LoansFloatGen(ProductGen):
-    def __init__(self, balance_amt, margin, maturity):
-        super().__init__(balance_amt)
-        self.margin = margin
-        self.maturity = maturity
-
-    def gen_set_of_transactions(self):
-        return self.balance_amt * self.margin * self.maturity
-
-    @classmethod
-    def create_from_row(cls, row):
-        return cls(
-            balance_amt=row["balance_amt"],
-            margin=row["margin"],
-            maturity=row["maturity"]
+            amort_type=row["amort_type"],
+            rate_index=row["rate_index"]
         )
 
 
 class BondsFixedGen(ProductGen):
-    def __init__(self, balance_amt, margin, maturity):
-        super().__init__(balance_amt)
-        self.margin = margin
+    def __init__(self, product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type, maturity):
+        super().__init__(product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type)
         self.maturity = maturity
 
     def gen_set_of_transactions(self):
-        return self.balance_amt * self.margin * self.maturity
+        stats = config.stats_dict[self.product_name][self.client_type_id]
+        balances = generate_balances(self.balance_amt, stats['mean'], stats['std_dev'],
+                                     stats['lower_bound'], stats['upper_bound'])
+        return pd.DataFrame({'balance_amt': balances})
+
+    def add_parameters(self, set_of_transactions):
+        array_of_ids = self.add_ids(len(set_of_transactions))
+        return pd.DataFrame({
+            'transaction_id': array_of_ids,
+            'product_name': self.product_name,
+            'product_code': self.product_code,
+            'bs_side': self.bs_side,
+            'balance_amt': set_of_transactions['balance_amt'],
+            'currency': self.currency,
+            'client_type_id': self.client_type_id,
+            'rate_type': self.rate_type,
+            'maturity': self.maturity
+        })
 
     @classmethod
     def create_from_row(cls, row):
         return cls(
+            product_name=row["product_name"],
+            product_code=row["product_code"],
+            bs_side=row["bs_side"],
             balance_amt=row["balance_amt"],
-            margin=row["margin"],
+            currency=row["currency"],
+            client_type_id=row["client_type_id"],
+            rate_type=row["rate_type"],
             maturity=row["maturity"]
         )
 
 
 class BondsFloatGen(ProductGen):
-    def __init__(self, balance_amt, margin, maturity):
-        super().__init__(balance_amt)
-        self.margin = margin
+    def __init__(self, product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type, maturity,
+                 rate_index):
+        super().__init__(product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type)
         self.maturity = maturity
+        self.rate_index = rate_index
 
     def gen_set_of_transactions(self):
-        return self.balance_amt * self.margin * self.maturity
+        stats = config.stats_dict[self.product_name][self.client_type_id]
+        balances = generate_balances(self.balance_amt, stats['mean'], stats['std_dev'],
+                                     stats['lower_bound'], stats['upper_bound'])
+        return pd.DataFrame({'balance_amt': balances})
+
+    def add_parameters(self, set_of_transactions):
+        array_of_ids = self.add_ids(len(set_of_transactions))
+        return pd.DataFrame({
+            'transaction_id': array_of_ids,
+            'product_name': self.product_name,
+            'product_code': self.product_code,
+            'bs_side': self.bs_side,
+            'balance_amt': set_of_transactions['balance_amt'],
+            'currency': self.currency,
+            'client_type_id': self.client_type_id,
+            'rate_type': self.rate_type,
+            'maturity': self.maturity,
+            'rate_index': self.rate_index
+        })
 
     @classmethod
     def create_from_row(cls, row):
         return cls(
+            product_name=row["product_name"],
+            product_code=row["product_code"],
+            bs_side=row["bs_side"],
             balance_amt=row["balance_amt"],
-            margin=row["margin"],
-            maturity=row["maturity"]
+            currency=row["currency"],
+            client_type_id=row["client_type_id"],
+            rate_type=row["rate_type"],
+            maturity=row["maturity"],
+            rate_index=row["rate_index"]
         )
+#
+# class LettersOfCreditGen(ProductGen):
+#     def __init__(self, balance_amt, margin, maturity):
+#         super().__init__(balance_amt)
+#         self.margin = margin
+#         self.maturity = maturity
+#
+#     def gen_set_of_transactions(self):
+#         return self.balance_amt * self.margin * self.maturity
+#
+#     @classmethod
+#     def create_from_row(cls, row):
+#         return cls(
+#             balance_amt=row["balance_amt"],
+#             margin=row["margin"],
+#             maturity=row["maturity"]
+#         )
+#
+# class LoanCommitmentsGen(ProductGen):
+#     def __init__(self, balance_amt, margin, maturity):
+#         super().__init__(balance_amt)
+#         self.margin = margin
+#         self.maturity = maturity
+#
+#     def gen_set_of_transactions(self):
+#         return self.balance_amt * self.margin * self.maturity
+#
+#     @classmethod
+#     def create_from_row(cls, row):
+#         return cls(
+#             balance_amt=row["balance_amt"],
+#             margin=row["margin"],
+#             maturity=row["maturity"]
+#         )
+#
+# class GuaranteesGen(ProductGen):
+#     def __init__(self, balance_amt, margin, maturity):
+#         super().__init__(balance_amt)
+#         self.margin = margin
+#         self.maturity = maturity
+#
+#     def gen_set_of_transactions(self):
+#         return self.balance_amt * self.margin * self.maturity
+#
+#     @classmethod
+#     def create_from_row(cls, row):
+#         return cls(
+#             balance_amt=row["balance_amt"],
+#             margin=row["margin"],
+#             maturity=row["maturity"]
+#         )
 
 
 class IssuedBondsGen(ProductGen):
@@ -428,35 +535,50 @@ class IssuedStocksGen(ProductGen):
 
 
 class OneRowDummyProductGen(ProductGen):
-    def __init__(self, balance_amt, currency, client_type_id, interest_rate=None, term=None, margin=None, maturity=None):
-        self.balance_amt = balance_amt
-        self.currency = currency
-        self.client_type_id = client_type_id
-        self.interest_rate = interest_rate
-        self.term = term
-        self.margin = margin
-        self.maturity = maturity
+    def __init__(self, product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type):
+        super().__init__(product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type)
+
+    def gen_set_of_transactions(self):
+        balances = [self.balance_amt]
+        return pd.DataFrame({'balance_amt': balances})
+
+    def add_parameters(self, set_of_transactions):
+        array_of_ids = self.add_ids(len(set_of_transactions))
+        array_of_currencies = np.full(len(set_of_transactions), self.currency)
+        array_of_client_types = np.full(len(set_of_transactions), self.client_type_id)
+        return pd.DataFrame({
+            'transaction_id': array_of_ids,
+            'product_name': self.product_name,
+            'product_code': self.product_code,
+            'bs_side': self.bs_side,
+            'balance_amt': set_of_transactions['balance_amt'],
+            'currency': array_of_currencies,
+            'client_type_id': array_of_client_types,
+            'rate_type': self.rate_type
+        })
 
     @classmethod
     def create_from_row(cls, row):
         return cls(
+            product_name=row["product_name"],
+            product_code=row["product_code"],
+            bs_side=row["bs_side"],
             balance_amt=row["balance_amt"],
             currency=row["currency"],
             client_type_id=row["client_type_id"],
-            interest_rate=row("interest_rate"),
-            term=row.get("term"),
-            margin=row.get("margin"),
-            maturity=row.get("maturity")
+            rate_type=row["rate_type"]
         )
     
 
 # === Factory Class ===
 class ProductFactory:
-    registry = {
+    class_registry = {
         "mortgage_fixed": LoansFixedGen,
         "mortgage_float": LoansFloatGen,
         "cash_loan_fixed": LoansFixedGen,
         "cash_loan_float": LoansFloatGen,
+        "investment_loan_fixed": LoansFixedGen,
+        "investment_loan_float": LoansFloatGen,
         "bond_fixed": BondsFixedGen,
         "bond_float": BondsFloatGen,
         "issued_bonds": IssuedBondsGen,
@@ -466,11 +588,22 @@ class ProductFactory:
         "term_deposit": TermDepositsGen,
         "retained_earnings": OneRowDummyProductGen,
     }
+    table_registry = {
+        LoansFixedGen: "loans",
+        LoansFloatGen: "loans",
+        SavingAccountsGen: "deposits",
+        CurrentAccountsGen: "deposits",
+        TermDepositsGen: "deposits",
+        BondsFixedGen: "financial_instruments",
+        BondsFloatGen: "financial_instruments",
+        IssuedBondsGen: "equity",
+        IssuedStocksGen: "equity"
+    }
 
     @classmethod
     def create(cls, row):
         ptype = row["product_name"]
-        product_class = cls.registry[ptype]
+        product_class = cls.class_registry[ptype]
         return product_class.create_from_row(row)
 
     # @classmethod

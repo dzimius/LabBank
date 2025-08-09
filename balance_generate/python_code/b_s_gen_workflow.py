@@ -22,7 +22,8 @@ for i, row in df_result.iterrows():
     product = ProductFactory.create(row)
     df = product.build_result_df()
     product_objects[row['product_name']] = df
-    df.to_excel(f'output_data/{i}_transactions.xlsx', index=False)
+    code = str(row['product_code'])
+    df.to_excel(f'output_data/{code}_transactions.xlsx', index=False)
 
 # for i, row in df_result.iterrows():
 #     try:
