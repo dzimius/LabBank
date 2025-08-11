@@ -22,8 +22,8 @@ def outstanding_annuity(initial_notional, maturity_months, months_passed, annual
     m = months_passed
     if r == 0:
         # Degenerates to equal principal
-        return max(initial_notional * (M - m) / M, 0)
-    return initial_notional * ((1+r)**M - (1+r)**m) / ((1+r)**M - 1)
+        return round(max(initial_notional * (M - m) / M, 0), 2)
+    return round(initial_notional * ((1+r)**M - (1+r)**m) / ((1+r)**M - 1), 2)
 
 def outstanding_constant_amort(initial_notional, maturity_months, months_passed):
     monthly_principal = initial_notional / maturity_months
