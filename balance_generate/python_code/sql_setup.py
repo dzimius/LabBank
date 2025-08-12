@@ -1,17 +1,7 @@
 from sqlalchemy import create_engine, MetaData, Table, Column
-from sqlalchemy import Integer, String, DateTime, Date, Boolean
+from sqlalchemy import Integer, String, ForeignKey
 from sqlalchemy.dialects.mssql import DECIMAL
 import pandas as pd
-import urllib.parse
-#
-# params = urllib.parse.quote_plus(
-#     "DRIVER=ODBC Driver 17 for SQL Server;"
-#     "SERVER=maciek_d;"              # albo maciek_d\\SQLEXPRESS
-#     "DATABASE=bank_gen;"
-#     "Trusted_Connection=Yes;"
-# )
-# engine = create_engine(f"mssql+pyodbc:///?odbc_connect={params}",
-#                        fast_executemany=True, future=True)
 
 engine = create_engine(
     "mssql+pyodbc://maciek_d/bank_gen"
@@ -26,13 +16,18 @@ metadata = MetaData(schema=None)   # np. schema="dbo" jeśli używasz
 
 Transactions = Table(
     "transactions", metadata,
-    Column("transaction_id", String(13), nullable=False),
-    Column("balance_amt", DECIMAL(18, 2), nullable=True),
+    Column("transaction_id", String(13), primary_key=True, nullable=False),
+    Column("product_code", String(4), nullable=False),
+    Column("product_name", String(64), nullable=False),
+    Column("bs_side", String(1), nullable=False),
+    Column("balance_amt", DECIMAL(18, 2), nullable=False),
+    Column("currency", String(3), nullable=False),
+    Column("client_type_id", Integer, nullable=False)
 )
 
 Loans = Table(
     "loans", metadata,
-    Column("transaction_id", String(13), nullable=False),
+    Column("transaction_id", String(13), ForeignKey('transactions.transaction_id'), nullable=False),
     Column("product_code", String(4), nullable=False),
     Column("product_name", String(64), nullable=False),
     Column("bs_side", String(1), nullable=False),
@@ -49,7 +44,7 @@ Loans = Table(
 
 Deposits = Table(
     "deposits", metadata,
-    Column("transaction_id",String(13), nullable=False),
+    Column("transaction_id", String(13), ForeignKey('transactions.transaction_id'), nullable=False),
     Column("product_code", String(4), nullable=False),
     Column("product_name", String(64), nullable=False),
     Column("bs_side", String(1), nullable=False),
@@ -62,7 +57,7 @@ Deposits = Table(
 
 FinancialInstruments = Table(
     "financial_instruments", metadata,
-    Column("transaction_id", String(13), nullable=False),
+    Column("transaction_id", String(13), ForeignKey('transactions.transaction_id'), nullable=False),
     Column("product_code", String(4), nullable=False),
     Column("product_name", String(64), nullable=False),
     Column("balance_amt", DECIMAL(18, 2), nullable=False),
@@ -74,7 +69,7 @@ FinancialInstruments = Table(
 
 Equity = Table(
     "equity", metadata,
-    Column("transaction_id", String(13), nullable=False),
+    Column("transaction_id", String(13), ForeignKey('transactions.transaction_id'), nullable=False),
     Column("product_code", String(4), nullable=False),
     Column("product_name", String(64), nullable=False),
     Column("balance_amt", DECIMAL(18, 2), nullable=False),
@@ -119,10 +114,9 @@ def append_df_to_table(df: pd.DataFrame, table_name: str):
 # ------------------------------------------------------------
 # (A) Zbiorcza 'transactions' — tylko id i balance_amt
 def append_transactions(df):
-    needed = ["transaction_id", "balance_amt"]
+    needed = ["transaction_id", "product_code", "product_name", "bs_side", "balance_amt", "currency", "client_type_id"]
     missing = [c for c in needed if c not in df.columns]
     if missing:
-        # jeśli w jakimś df brakuje którejś z tych kolumn, dokładamy je jako NULL
         for c in missing:
             df[c] = pd.NA
     append_df_to_table(df[needed], "transactions")

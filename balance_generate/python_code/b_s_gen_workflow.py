@@ -13,7 +13,7 @@ config.report_date = pd.to_datetime('2024-12-31')  # Set the report date
 full_balance_amt = 50_000_000_000
 
 with sql_setup.engine.begin() as conn:
-    for t in ["transactions", "loans", "deposits", "financial_instruments", "equity"]:
+    for t in ["loans", "deposits", "financial_instruments", "equity"] + ["transactions"]:
         conn.execute(text(f"IF OBJECT_ID('dbo.{t}', 'U') IS NOT NULL DROP TABLE dbo.{t};"))
     # tu kluczowe:
     sql_setup.metadata.create_all(bind=conn, checkfirst=False)

@@ -50,10 +50,14 @@ def generate_truncated_normal(mean, std_dev, lower_bound, upper_bound, n=1, roun
         result = np.round(samples, 2)
     return result
 
-def generate_balances(full_balance_amt, mean, std_dev, lower_bound, upper_bound):
+def generate_balances(full_balance_amt, mean, std_dev, lower_bound, upper_bound, round = None):
     n_estimated = int(full_balance_amt / mean * 1.15)
-    b_amounts = generate_truncated_normal(mean, std_dev, lower_bound, upper_bound,
-                                          n=n_estimated, rounding=True, round_to=5000)
+    if not round:
+        b_amounts = generate_truncated_normal(mean, std_dev, lower_bound, upper_bound,
+                                          n=n_estimated)
+    else:
+        b_amounts = generate_truncated_normal(mean, std_dev, lower_bound, upper_bound,
+                                          n=n_estimated, rounding=True, round_to=round)
     cumsum = np.cumsum(b_amounts)
     idx = np.searchsorted(cumsum, full_balance_amt)
     balances = list(b_amounts[:idx])
@@ -74,6 +78,48 @@ def generate_random_dates(start_date, end_date, n, seed=None):
 
 def ql_date_to_pd_date(ql_date):
     return pd.Timestamp(ql_date.year(), ql_date.month(), ql_date.dayOfMonth())
+
+def _rescale_curr_and_init(balances, init_balances, target_sum):
+    b = np.asarray(balances, dtype=float)
+    i = np.asarray(init_balances, dtype=float)
+    bsum = float(b.sum())
+    if bsum <= 0:
+        raise ValueError("Suma currentów <= 0 — nie ma czego skalować")
+    s = float(target_sum) / bsum           # <-- kluczowe: target / sum(current)
+    b *= s                                 # przeskaluj currenty
+    i *= s                                 # TYM SAMYM S przeskaluj initiale
+    # mikro-korekta sumy (numeryka)
+    diff = float(target_sum) - float(b.sum())
+    if abs(diff) > 1e-6 and len(b) > 0:
+        b[-1] += diff
+        i[-1] += diff * (i[-1] / b[-1])    # zachowaj proporcję initial/current na ostatniej pozycji
+    return i.tolist(), b.tolist()
+
+def initial_from_current(curr_amt, amort_type, start_date, report_date, maturity, annual_rate):
+    """Wyznacz initial z current (bullet=0, annuity=1, constant=2)."""
+    start_date = pd.Timestamp(start_date)
+    report_date = pd.Timestamp(report_date)
+    M = get_num_of_months(maturity)
+    m = (report_date.year - start_date.year) * 12 + (report_date.month - start_date.month)
+    m = max(0, min(m, M))  # clamp do [0,M]
+
+    if amort_type == 0:  # bullet
+        return float(curr_amt)
+
+    if amort_type == 2:  # stała amortyzacja
+        k = (M - m) / M if M > 0 else 0.0
+    else:  # annuity == 1
+        r = annual_rate / 12.0
+        if r == 0:
+            k = (M - m) / M if M > 0 else 0.0
+        else:
+            num = (1 + r) ** M - (1 + r) ** m
+            den = (1 + r) ** M - 1.0
+            k = num / den if den != 0 else 0.0
+
+    if k <= 0:
+        return float(curr_amt)  # fallback, żeby nie dzielić przez 0
+    return float(curr_amt) / k
 
 
 # === Abstrakcyjna klasa bazowa ===
@@ -197,7 +243,7 @@ class TermDepositsGen(ProductGen):
     def gen_set_of_transactions(self):
         stats = config.stats_dict[self.product_name][self.client_type_id]
         balances = generate_balances(self.balance_amt, stats['mean'], stats['std_dev'],
-                                     stats['lower_bound'], stats['upper_bound'])
+                                     stats['lower_bound'], stats['upper_bound'], round=500)
         starting_dates = generate_random_dates(config.report_date,
                                                         ql_date_to_pd_date(ql.Date.from_date(config.report_date) - ql.Period(self.maturity)),
                                                         len(balances))
@@ -245,22 +291,23 @@ class LoansFixedGen(ProductGen):
 
     def gen_set_of_transactions(self):
         stats = config.stats_dict[self.product_name][self.client_type_id]
-        init_balances = generate_balances(self.balance_amt, stats['mean'], stats['std_dev'],
+        balances = generate_balances(self.balance_amt, stats['mean'], stats['std_dev'],
                                      stats['lower_bound'], stats['upper_bound'])
         starting_dates = generate_random_dates(config.report_date,
                                 ql_date_to_pd_date(ql.Date.from_date(config.report_date) - ql.Period(self.maturity)),
-                                len(init_balances))
+                                len(balances))
         margin_dict = config.margin_map.get(self.product_name)
         margins = generate_truncated_normal(margin_dict['mean'], margin_dict['std_dev'],
                                             margin_dict['lower_bound'], margin_dict['upper_bound'],
-                                            n=len(init_balances), rounding=True, round_to=0.05 / 100)
+                                            n=len(balances), rounding=True, round_to=0.05 / 100)
         avg_rate = config.avg_rate_map.get(self.product_name, 3) / 100
-        if self.amort_type == 0:
-            balances = init_balances
-        else:
-            balances = [generate_loan_current_balance_amt(
-                i_balance, self.amort_type, s_dates, config.report_date, self.maturity, avg_rate)
-                    for (i_balance, s_dates) in zip(init_balances, starting_dates)]
+        initials_raw = [
+            initial_from_current(cur, self.amort_type, sdt, config.report_date, self.maturity, avg_rate)
+            for cur, sdt in zip(balances, starting_dates)
+        ]
+
+        # 5) ZAOKRĄGLENIE initial *W GÓRĘ* do 5000
+        init_balances = (np.ceil(np.asarray(initials_raw, dtype=float) / 5000.0) * 5000.0).astype(float).tolist()
         return pd.DataFrame({'balance_amt': balances, 'init_balance_amt': init_balances,
                              'starting_date': starting_dates, 'margin': margins})
     
@@ -318,12 +365,14 @@ class LoansFloatGen(ProductGen):
                                             margin_dict['lower_bound'], margin_dict['upper_bound'],
                                             n=len(balances), rounding=True, round_to=0.05 / 100)
         avg_rate = config.avg_rate_map.get(self.product_name, 3)/100
-        if self.amort_type == 0:
-            init_balances = balances
-        else:
-            init_balances = [generate_loan_current_balance_amt(
-                i_balance, self.amort_type, s_dates, config.report_date, self.maturity, avg_rate)
-                for (i_balance, s_dates) in zip(balances, starting_dates)]
+        initials_raw = [
+            initial_from_current(cur, self.amort_type, sdt, config.report_date, self.maturity, avg_rate)
+            for cur, sdt in zip(balances, starting_dates)
+        ]
+
+        # 5) ZAOKRĄGLENIE initial *W GÓRĘ* do 5000
+        init_balances = (np.ceil(np.asarray(initials_raw, dtype=float) / 5000.0) * 5000.0).astype(float).tolist()
+
         return pd.DataFrame({'balance_amt': balances, 'init_balance_amt': init_balances,
                              'starting_date': starting_dates, 'margin': margins})
 
@@ -373,7 +422,7 @@ class BondsFixedGen(ProductGen):
     def gen_set_of_transactions(self):
         stats = config.stats_dict[self.product_name][self.client_type_id]
         balances = generate_balances(self.balance_amt, stats['mean'], stats['std_dev'],
-                                     stats['lower_bound'], stats['upper_bound'])
+                                     stats['lower_bound'], stats['upper_bound'], round=5000)
         return pd.DataFrame({'balance_amt': balances})
 
     def add_parameters(self, set_of_transactions):
@@ -414,7 +463,7 @@ class BondsFloatGen(ProductGen):
     def gen_set_of_transactions(self):
         stats = config.stats_dict[self.product_name][self.client_type_id]
         balances = generate_balances(self.balance_amt, stats['mean'], stats['std_dev'],
-                                     stats['lower_bound'], stats['upper_bound'])
+                                     stats['lower_bound'], stats['upper_bound'], round=5000)
         return pd.DataFrame({'balance_amt': balances})
 
     def add_parameters(self, set_of_transactions):
