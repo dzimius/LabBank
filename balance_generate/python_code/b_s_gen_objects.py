@@ -247,7 +247,7 @@ class TermDepositsGen(ProductGen):
         starting_dates = generate_random_dates(config.report_date,
                                                         ql_date_to_pd_date(ql.Date.from_date(config.report_date) - ql.Period(self.maturity)),
                                                         len(balances))
-        return pd.DataFrame({'balance_amt': balances, 'starting_date': starting_dates})
+        return pd.DataFrame({'balance_amt': balances, 'start_date': starting_dates})
     
     def add_parameters(self, set_of_transactions):
         array_of_ids = self.add_ids(len(set_of_transactions))
@@ -264,7 +264,7 @@ class TermDepositsGen(ProductGen):
             'client_type_id': self.client_type_id,
             'rate_type': self.rate_type,
             'maturity': self.maturity,
-            'starting_date': array_of_starting_dates
+            'start_date': array_of_starting_dates
             })
 
     @classmethod
@@ -309,7 +309,7 @@ class LoansFixedGen(ProductGen):
         # 5) ZAOKRĄGLENIE initial *W GÓRĘ* do 5000
         init_balances = (np.ceil(np.asarray(initials_raw, dtype=float) / 5000.0) * 5000.0).astype(float).tolist()
         return pd.DataFrame({'balance_amt': balances, 'init_balance_amt': init_balances,
-                             'starting_date': starting_dates, 'margin': margins})
+                             'start_date': starting_dates, 'margin': margins})
     
     def add_parameters(self, set_of_transactions):
         array_of_ids = self.add_ids(len(set_of_transactions))
@@ -323,7 +323,7 @@ class LoansFixedGen(ProductGen):
             'client_type_id': self.client_type_id,
             'rate_type': self.rate_type,
             'maturity': self.maturity,
-            'starting_date': set_of_transactions['starting_date'],
+            'start_date': set_of_transactions['start_date'],
             'init_balance_amt': set_of_transactions['init_balance_amt'],
             'margin': set_of_transactions['margin']
             })
@@ -374,7 +374,7 @@ class LoansFloatGen(ProductGen):
         init_balances = (np.ceil(np.asarray(initials_raw, dtype=float) / 5000.0) * 5000.0).astype(float).tolist()
 
         return pd.DataFrame({'balance_amt': balances, 'init_balance_amt': init_balances,
-                             'starting_date': starting_dates, 'margin': margins})
+                             'start_date': starting_dates, 'margin': margins})
 
     def add_parameters(self, set_of_transactions):
         array_of_ids = self.add_ids(len(set_of_transactions))
@@ -392,7 +392,7 @@ class LoansFloatGen(ProductGen):
             'client_type_id': array_of_client_types,
             'rate_type': self.rate_type,
             'maturity': array_of_maturities,
-            'starting_date': set_of_transactions['starting_date'],
+            'start_date': set_of_transactions['start_date'],
             'rate_index': array_of_indexes,
             'init_balance_amt': set_of_transactions['init_balance_amt'],
             'margin': set_of_transactions['margin']
