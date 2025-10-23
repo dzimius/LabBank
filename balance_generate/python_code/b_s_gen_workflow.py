@@ -9,8 +9,10 @@ from sqlalchemy import text
 BASE_DIR = "C:/Users/dzimi/Documents/data_engineering/data_projects/git_hub_projects/bank_project/balance_generate"
 os.chdir(BASE_DIR)
 
+
 config.report_date = pd.to_datetime('2024-12-31')  # Set the report date
-full_balance_amt = 50_000_000_000
+config.balance_start_date = pd.to_datetime('2010-01-01')
+full_balance_amt = 85_000_000_000 #assets + liabilities+equity = 2*assets
 
 with sql_setup.engine.begin() as conn:
     for t in ["loans", "deposits", "financial_instruments", "equity", "clients"] + ["transactions"]:

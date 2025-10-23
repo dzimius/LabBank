@@ -1,4 +1,5 @@
 report_date = None
+balance_start_date = None
 bs_side_map = {"E": "0","A": "1", "L": "2", "O": "3"}
 rate_type_map = {"":"0", "F": "1", "V": "2", "A": "3"}
 avg_rate_map = {"mortgage_fixed": 6,
@@ -44,11 +45,11 @@ stats_dict = {
                 6: {'mean': 30_000,  'std_dev': 40_000,  'lower_bound': 0, 'upper_bound': 15_000_000}
                 },
         "cash_loan_fixed": {
-                4: {'mean': 100_000,  'std_dev': 40_000,  'lower_bound': 0, 'upper_bound': 15_000_000},
+                4: {'mean': 60_000,  'std_dev': 40_000,  'lower_bound': 0, 'upper_bound': 15_000_000},
                 6: {'mean': 30_000,  'std_dev': 40_000,  'lower_bound': 0, 'upper_bound': 15_000_000}
                 },
         "cash_loan_float": {
-                4: {'mean': 100_000,  'std_dev': 40_000,  'lower_bound': 0, 'upper_bound': 15_000_000},
+                4: {'mean': 60_000,  'std_dev': 40_000,  'lower_bound': 0, 'upper_bound': 15_000_000},
                 6: {'mean': 30_000,  'std_dev': 40_000,  'lower_bound': 0, 'upper_bound': 15_000_000}
                 },
         "investment_loan_fixed": {
