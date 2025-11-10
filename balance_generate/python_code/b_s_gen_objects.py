@@ -95,7 +95,7 @@ def gen_init_bal_loan(mean, std_dev, lower_bound, upper_bound, round = None):
 #                                     replace=True)  # bez zmiany funkcjonalności (duplikaty dozwolone)
 #     return pd.Index(random_dates).to_numpy(dtype="datetime64[D]")
 
-def generate_random_dates(start_date, end_date, n, annual_growth=0.15, seed=None):
+def generate_random_dates(start_date, end_date, n, annual_growth=0.35, seed=None):
     start = pd.to_datetime(start_date)
     end = pd.to_datetime(end_date)
     if seed is not None:
@@ -104,7 +104,7 @@ def generate_random_dates(start_date, end_date, n, annual_growth=0.15, seed=None
     business_days = pd.date_range(start, end, freq='B')  # bez weekendów
     total_years = (end - start).days / 365.25
 
-    # Wagi rosnące co roku o 5%
+    # Wagi rosnące co roku o 35%
     days_since_start = (business_days - start).days
     years_since_start = days_since_start / 365.25
     weights = (1 + annual_growth) ** years_since_start
@@ -172,7 +172,7 @@ def current_from_initial(init_amt, amort_type, start_date, report_date, maturity
     m = max(0, min(m, M))  # clamp do [0, M]
 
     if amort_type == 0:  # bullet — cały kapitał spłacany na końcu
-        return float(init_amt)
+        return round(float(init_amt),2)
 
     if amort_type == 2:  # stała amortyzacja (równe raty kapitałowe)
         k = (M - m) / M if M > 0 else 0.0
@@ -186,7 +186,7 @@ def current_from_initial(init_amt, amort_type, start_date, report_date, maturity
             den = (1 + r) ** M - 1.0
             k = num / den if den != 0 else 0.0
 
-    return float(init_amt) * k
+    return round(float(init_amt) * k, 2)
 
 # === Abstrakcyjna klasa bazowa ===
 class ProductGen(ABC):
@@ -352,9 +352,142 @@ class TermDepositsGen(ProductGen):
 # === Loan Classes ===
 class LoansFixedGen(ProductGen):
 
-    def __init__(self, product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type, maturity, amort_type):
+    def __init__(self, product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type, maturity,
+                 rate_index, amort_type, fixing_freq, payment_freq):
         super().__init__(product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type)
         self.maturity = maturity
+        self.amort_type = amort_type
+        self.rate_index = rate_index
+        self.fixing_freq = fixing_freq
+        self.payment_freq = payment_freq
+        self.cal = get_calendar_from_currency(self.currency)
+
+    def gen_set_of_transactions(self):
+        stats = config.stats_dict[self.product_name][self.client_type_id]
+        avg_rate = config.avg_rate_map.get(self.product_name, 3) / 100
+        overfill = 1.95
+        init_balances_raw = generate_balances(
+            full_balance_amt=self.balance_amt,
+            mean=stats['mean'],
+            std_dev=stats['std_dev'],
+            lower_bound=stats['lower_bound'],
+            upper_bound=stats['upper_bound'],
+            overfill_factor=overfill,
+            round=5000
+        )
+
+        starting_dates_raw = generate_random_dates(
+            max(config.balance_start_date,
+                ql_date_to_pd_date(ql.Date.from_date(config.report_date) - ql.Period(self.maturity))),
+            config.report_date,
+            len(init_balances_raw)
+        )
+
+        current_balances_raw = np.array([
+            current_from_initial(init, self.amort_type, sdt, config.report_date,
+                                 self.maturity, avg_rate)
+            for init, sdt in zip(init_balances_raw, starting_dates_raw)
+        ])
+
+        cumsum = np.cumsum(current_balances_raw)
+        idx = np.searchsorted(cumsum, self.balance_amt)
+        init_balances = list(init_balances_raw[:idx])
+        starting_dates = list(starting_dates_raw[:idx])
+        last_current = self.balance_amt - sum(current_balances_raw[:idx])
+        if last_current > 0:
+            last_init = initial_from_current(last_current, self.amort_type, config.report_date,
+                                             config.report_date, self.maturity, avg_rate)
+            init_balances.append(last_init)
+            starting_dates.append(config.report_date)
+
+        maturity_dates = [
+            ql_date_to_pd_date(self.cal.advance(ql.Date.from_date(pd.Timestamp(s_dt).date()),
+                                                ql.Period(self.maturity),
+                                                ql.ModifiedFollowing))
+            for s_dt in starting_dates
+        ]
+
+        margin_dict = config.margin_map.get(self.product_name)
+        margins = generate_truncated_normal(
+            margin_dict['mean'], margin_dict['std_dev'],
+            margin_dict['lower_bound'], margin_dict['upper_bound'],
+            n=len(init_balances),
+            rounding=True,
+            round_to=0.05 / 100
+        )
+
+        balances = [
+            current_from_initial(init, self.amort_type, sdt, config.report_date,
+                                 self.maturity, avg_rate)
+            for init, sdt in zip(init_balances, starting_dates)
+        ]
+        init_balances = (np.ceil(np.asarray(init_balances, dtype=float) / 5000.0) * 5000.0).astype(float).tolist()
+        total = sum(balances)
+        diff = float(self.balance_amt - total)
+        if abs(diff) > 1e-6 and len(balances) > 0:
+            balances[-1] += diff
+
+        return pd.DataFrame({
+            'balance_amt': balances,
+            'init_balance_amt': init_balances,
+            'start_date': starting_dates,
+            'maturity_date': maturity_dates,
+            'margin': margins
+        })
+    
+    def add_parameters(self, set_of_transactions):
+        array_of_ids = self.add_ids(len(set_of_transactions))
+        array_of_indexes = np.full(len(set_of_transactions), self.rate_index)
+        array_of_fixing_freq = np.full(len(set_of_transactions), self.fixing_freq)
+        array_of_payment_freq = np.full(len(set_of_transactions), self.payment_freq)
+        array_of_amort_types = np.full(len(set_of_transactions), self.amort_type)
+        return pd.DataFrame({
+            'transaction_id': array_of_ids,
+            'product_name': self.product_name,
+            'product_code': self.product_code,
+            'bs_side': self.bs_side,
+            'balance_amt': set_of_transactions['balance_amt'],
+            'currency': self.currency,
+            'client_type_id': self.client_type_id,
+            'rate_type': self.rate_type,
+            'maturity': self.maturity,
+            'start_date': set_of_transactions['start_date'],
+            'maturity_date': set_of_transactions['maturity_date'],
+            'rate_index': array_of_indexes,
+            'fixing_freq': array_of_fixing_freq,
+            'payment_freq': array_of_payment_freq,
+            'amort_type': array_of_amort_types,
+            'init_balance_amt': set_of_transactions['init_balance_amt'],
+            'margin': set_of_transactions['margin']
+            })
+
+
+    @classmethod
+    def create_from_row(cls, row):
+        return cls(
+            product_name=row["product_name"],
+            product_code=row["product_code"],
+            bs_side=row["bs_side"],
+            balance_amt=row["balance_amt"],
+            currency=row["currency"],
+            client_type_id=row["client_type_id"],
+            rate_type=row["rate_type"],
+            maturity=row["maturity"],
+            fixing_freq=row["fixing_freq"],
+            payment_freq=row["payment_freq"],
+            rate_index=row["rate_index"],
+            amort_type=row["amort_type"]
+        )
+
+
+class LoansFloatGen(ProductGen):
+    def __init__(self, product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type, maturity,
+                 rate_index, amort_type, fixing_freq, payment_freq):
+        super().__init__(product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type)
+        self.maturity = maturity
+        self.rate_index = rate_index
+        self.fixing_freq = fixing_freq
+        self.payment_freq = payment_freq
         self.amort_type = amort_type
         self.cal = get_calendar_from_currency(self.currency)
 
@@ -417,8 +550,11 @@ class LoansFixedGen(ProductGen):
                                  self.maturity, avg_rate)
             for init, sdt in zip(init_balances, starting_dates)
         ]
-
         init_balances = (np.ceil(np.asarray(init_balances, dtype=float) / 5000.0) * 5000.0).astype(float).tolist()
+        total = sum(balances)
+        diff = float(self.balance_amt - total)
+        if abs(diff) > 1e-6 and len(balances) > 0:
+            balances[-1] += diff
 
         return pd.DataFrame({
             'balance_amt': balances,
@@ -427,83 +563,16 @@ class LoansFixedGen(ProductGen):
             'maturity_date': maturity_dates,
             'margin': margins
         })
-    
-    def add_parameters(self, set_of_transactions):
-        array_of_ids = self.add_ids(len(set_of_transactions))
-        return pd.DataFrame({
-            'transaction_id': array_of_ids,
-            'product_name': self.product_name,
-            'product_code': self.product_code,
-            'bs_side': self.bs_side,
-            'balance_amt': set_of_transactions['balance_amt'],
-            'currency': self.currency,
-            'client_type_id': self.client_type_id,
-            'rate_type': self.rate_type,
-            'maturity': self.maturity,
-            'start_date': set_of_transactions['start_date'],
-            'maturity_date': set_of_transactions['maturity_date'],
-            'init_balance_amt': set_of_transactions['init_balance_amt'],
-            'margin': set_of_transactions['margin']
-            })
-
-
-    @classmethod
-    def create_from_row(cls, row):
-        return cls(
-            product_name=row["product_name"],
-            product_code=row["product_code"],
-            bs_side=row["bs_side"],
-            balance_amt=row["balance_amt"],
-            currency=row["currency"],
-            client_type_id=row["client_type_id"],
-            rate_type=row["rate_type"],
-            maturity=row["maturity"],
-            amort_type=row["amort_type"]
-        )
-
-
-class LoansFloatGen(ProductGen):
-    def __init__(self, product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type, maturity,
-                 rate_index, amort_type):
-        super().__init__(product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type)
-        self.maturity = maturity
-        self.rate_index = rate_index
-        self.amort_type = amort_type
-        self.cal = get_calendar_from_currency(self.currency)
-
-    def gen_set_of_transactions(self):
-        stats = config.stats_dict[self.product_name][self.client_type_id]
-        balances = generate_balances(self.balance_amt, stats['mean'], stats['std_dev'],
-                                     stats['lower_bound'], stats['upper_bound'])
-        starting_dates = generate_random_dates(max(config.balance_start_date,
-            ql_date_to_pd_date(ql.Date.from_date(config.report_date) - ql.Period(self.maturity))),
-            config.report_date,
-            len(balances))
-        maturity_dates = [ql_date_to_pd_date(self.cal.advance(ql.Date.from_date(pd.Timestamp(s_dt).date()),
-                                                              ql.Period(self.maturity), ql.ModifiedFollowing)) for s_dt in
-                          starting_dates]
-        margin_dict = config.margin_map.get(self.product_name)
-        margins = generate_truncated_normal(margin_dict['mean'], margin_dict['std_dev'],
-                                            margin_dict['lower_bound'], margin_dict['upper_bound'],
-                                            n=len(balances), rounding=True, round_to=0.05 / 100)
-        avg_rate = config.avg_rate_map.get(self.product_name, 3)/100
-        initials_raw = [
-            initial_from_current(cur, self.amort_type, sdt, config.report_date, self.maturity, avg_rate)
-            for cur, sdt in zip(balances, starting_dates)
-        ]
-
-        # 5) ZAOKRĄGLENIE initial *W GÓRĘ* do 5000
-        init_balances = (np.ceil(np.asarray(initials_raw, dtype=float) / 5000.0) * 5000.0).astype(float).tolist()
-
-        return pd.DataFrame({'balance_amt': balances, 'init_balance_amt': init_balances,
-                             'start_date': starting_dates,'maturity_date': maturity_dates, 'margin': margins})
 
     def add_parameters(self, set_of_transactions):
         array_of_ids = self.add_ids(len(set_of_transactions))
         array_of_currencies = np.full(len(set_of_transactions), self.currency)
+        array_of_fixing_freq = np.full(len(set_of_transactions), self.fixing_freq)
+        array_of_payment_freq = np.full(len(set_of_transactions), self.payment_freq)
         array_of_client_types = np.full(len(set_of_transactions), self.client_type_id)
         array_of_maturities = np.full(len(set_of_transactions), self.maturity)
         array_of_indexes = np.full(len(set_of_transactions), self.rate_index)
+        array_of_amort_types = np.full(len(set_of_transactions), self.amort_type)
         return pd.DataFrame({
             'transaction_id': array_of_ids,
             'product_name': self.product_name,
@@ -517,6 +586,9 @@ class LoansFloatGen(ProductGen):
             'start_date': set_of_transactions['start_date'],
             'maturity_date': set_of_transactions['maturity_date'],
             'rate_index': array_of_indexes,
+            'fixing_freq': array_of_fixing_freq,
+            'payment_freq': array_of_payment_freq,
+            'amort_type':array_of_amort_types,
             'init_balance_amt': set_of_transactions['init_balance_amt'],
             'margin': set_of_transactions['margin']
         })
@@ -532,6 +604,8 @@ class LoansFloatGen(ProductGen):
             client_type_id=row["client_type_id"],
             rate_type=row["rate_type"],
             maturity=row["maturity"],
+            fixing_freq=row["fixing_freq"],
+            payment_freq=row["payment_freq"],
             amort_type=row["amort_type"],
             rate_index=row["rate_index"]
         )

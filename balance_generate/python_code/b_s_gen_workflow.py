@@ -12,7 +12,7 @@ os.chdir(BASE_DIR)
 
 config.report_date = pd.to_datetime('2024-12-31')  # Set the report date
 config.balance_start_date = pd.to_datetime('2010-01-01')
-full_balance_amt = 85_000_000_000 #assets + liabilities+equity = 2*assets
+full_balance_amt = 100_000_000_000 #assets + liabilities+equity = 2*assets
 
 with sql_setup.engine.begin() as conn:
     for t in ["loans", "deposits", "financial_instruments", "equity", "clients"] + ["transactions"]:

@@ -1,6 +1,6 @@
 import numpy as np
 from sqlalchemy import create_engine, MetaData, Table, Column
-from sqlalchemy import Integer, String, ForeignKey
+from sqlalchemy import Integer, String, ForeignKey, Date
 from sqlalchemy.dialects.mssql import DECIMAL
 import pandas as pd
 import re
@@ -18,16 +18,16 @@ metadata = MetaData(schema=None)   # np. schema="dbo" jeśli używasz
 
 Curves = Table(
     "curves", metadata,
-    Column("curve_date", String(13), primary_key=True, nullable=False),
-    Column("product_code", String(4), nullable=False),
-    Column("product_name", String(64), nullable=False),
-    Column("bs_side", String(1), nullable=False),
-    Column("balance_amt", DECIMAL(18, 2), nullable=False),
-    Column("currency", String(3), nullable=False),
-    Column("client_id", Integer, nullable=False),
-    Column("client_type_id", Integer, nullable=False)
-curve_date,tenor,year_frac,mat_date,int_rate
+    Column("curve_date", Date, nullable=False),
+    Column("tenor", String(4), nullable=False),
+    Column("year_frac", DECIMAL(18, 2), nullable=False),
+    Column("mat_date", Date, nullable=False),
+    Column("int_rate", DECIMAL(18, 2), nullable=False)
 )
+
+TABLES = {
+    "curves": Curves,
+}
 
 def append_df_to_table(df: pd.DataFrame, table_name: str):
     """Dopasuj df do schematu tabeli i wykonaj append. Brakujące kolumny -> NULL."""
