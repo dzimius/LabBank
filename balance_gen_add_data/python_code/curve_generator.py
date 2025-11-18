@@ -116,25 +116,26 @@ def simulate_hw_curves_quantlib(
 
     return result_curves
 
-def curve_generation_job(df, report_date):
-    unique_dates = df['date'].unique()
-    unique_dates = unique_dates[(unique_dates<=report_date) & (unique_dates>'2020-01-01')]
-    count = 1
-    for dt in list(unique_dates):
-        sub_df = df[df['date'] == dt]
-        out = simulate_hw_curves_quantlib(sub_df)
-        if count == 1:
-            output_df = out
-        else:
-            output_df = pd.concat([output_df, out])
-        count = 0
-    return output_df
+# def curve_generation_job(df, report_date):
+#     unique_dates = df['date'].unique()
+#     unique_dates = unique_dates[(unique_dates<=report_date) & (unique_dates>'2020-01-01')]
+#     count = 1
+#     for dt in list(unique_dates):
+#         sub_df = df[df['date'] == dt]
+#         out = simulate_hw_curves_quantlib(sub_df)
+#         if count == 1:
+#             output_df = out
+#         else:
+#             output_df = pd.concat([output_df, out])
+#         count = 0
+#     return output_df
 
 def _worker_simulate(record: dict) -> pd.DataFrame:
     subdf = pd.DataFrame([record])
     return simulate_hw_curves_quantlib(subdf)
 
-def curve_generation_job(df, report_date, min_date='2020-01-01', max_workers=None):
+def curve_generation_job(file_name, report_date, min_date='2020-01-01', max_workers=None):
+    df = pd.read_excel(file_name)
     report_date = pd.to_datetime(report_date)
     min_date = pd.to_datetime(min_date)
     dates = pd.to_datetime(df['date'].unique())

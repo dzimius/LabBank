@@ -1,5 +1,5 @@
 import numpy as np
-from sqlalchemy import create_engine, MetaData, Table, Column
+from sqlalchemy import create_engine, MetaData, Table, Column, text
 from sqlalchemy import Integer, String, ForeignKey, Date
 from sqlalchemy.dialects.mssql import DECIMAL
 import pandas as pd
@@ -18,6 +18,7 @@ metadata = MetaData(schema=None)   # np. schema="dbo" jeśli używasz
 
 Transactions = Table(
     "transactions", metadata,
+Column("report_date", Date, nullable=False),
     Column("transaction_id", String(13), primary_key=True, nullable=False),
     Column("product_code", String(4), nullable=False),
     Column("product_name", String(64), nullable=False),
@@ -30,6 +31,7 @@ Transactions = Table(
 
 Loans = Table(
     "loans", metadata,
+Column("report_date", Date, nullable=False),
     Column("transaction_id", String(13), ForeignKey('transactions.transaction_id'), nullable=False),
     Column("product_code", String(4), nullable=False),
     Column("product_name", String(64), nullable=False),
@@ -51,6 +53,7 @@ Loans = Table(
 
 Deposits = Table(
     "deposits", metadata,
+Column("report_date", Date, nullable=False),
     Column("transaction_id", String(13), ForeignKey('transactions.transaction_id'), nullable=False),
     Column("product_code", String(4), nullable=False),
     Column("product_name", String(64), nullable=False),
@@ -66,6 +69,7 @@ Deposits = Table(
 
 FinancialInstruments = Table(
     "financial_instruments", metadata,
+Column("report_date", Date, nullable=False),
     Column("transaction_id", String(13), ForeignKey('transactions.transaction_id'), nullable=False),
     Column("product_code", String(4), nullable=False),
     Column("product_name", String(64), nullable=False),
@@ -79,6 +83,7 @@ FinancialInstruments = Table(
 
 Equity = Table(
     "equity", metadata,
+Column("report_date", Date, nullable=False),
     Column("transaction_id", String(13), ForeignKey('transactions.transaction_id'), nullable=False),
     Column("product_code", String(4), nullable=False),
     Column("product_name", String(64), nullable=False),
@@ -235,3 +240,39 @@ def assign_client_ids(transactions_df: pd.DataFrame, seed:None) -> pd.DataFrame:
         df.loc[chosen_idx, 'product_name'] = pd.Series(new_products, index=chosen_idx)
 
     return df
+
+def reset_data(mode: int, report_date: str) -> None:
+    """
+    mode=0 -> drop + recreate tabele
+    mode=1 -> DELETE dla danego report_date ze wszystkich tabel
+    """
+    tables = [
+        "loans",
+        "deposits",
+        "financial_instruments",
+        "equity",
+        "transactions",
+    ]
+
+    with engine.begin() as conn:
+        if mode == 0:
+            for t in tables:
+                conn.execute(
+                    text(
+                        f"IF OBJECT_ID('dbo.{t}', 'U') IS NOT NULL "
+                        f"DROP TABLE dbo.{t};"
+                    )
+                )
+            metadata.create_all(bind=conn, checkfirst=False)
+
+        elif mode == 1:
+            if report_date is None:
+                raise ValueError("For mode=1 report_date is needed")
+
+            for t in tables:
+                conn.execute(
+                    text(f"DELETE FROM dbo.{t} WHERE report_date = :rd"),
+                    {"rd": report_date},
+                )
+        else:
+            raise ValueError("Nieznany mode, oczekiwane 0 lub 1")

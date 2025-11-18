@@ -14,11 +14,13 @@ config.report_date = pd.to_datetime('2024-12-31')  # Set the report date
 config.balance_start_date = pd.to_datetime('2010-01-01')
 full_balance_amt = 100_000_000_000 #assets + liabilities+equity = 2*assets
 
-with sql_setup.engine.begin() as conn:
-    for t in ["loans", "deposits", "financial_instruments", "equity", "clients"] + ["transactions"]:
-        conn.execute(text(f"IF OBJECT_ID('dbo.{t}', 'U') IS NOT NULL DROP TABLE dbo.{t};"))
-    # tu kluczowe:
-    sql_setup.metadata.create_all(bind=conn, checkfirst=False)
+mode = 1
+sql_setup.reset_data(mode, config.report_date)
+# with sql_setup.engine.begin() as conn:
+#     for t in ["loans", "deposits", "financial_instruments", "equity", "clients"] + ["transactions"]:
+#         conn.execute(text(f"IF OBJECT_ID('dbo.{t}', 'U') IS NOT NULL DROP TABLE dbo.{t};"))
+#     # tu kluczowe:
+#     sql_setup.metadata.create_all(bind=conn, checkfirst=False)
 
 df_bs_struct = pd.read_excel('input_data/bank_data_only_dep.xlsx', sheet_name='bs_structure')
 

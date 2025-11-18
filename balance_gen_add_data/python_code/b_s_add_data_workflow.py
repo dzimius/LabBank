@@ -1,16 +1,26 @@
 import pandas as pd
 import os
-import curve_generator
+import curve_generator, insert_beh_models
 import sql_setup
 import matplotlib.pyplot as plt
 
 if __name__ == "__main__":
+    report_date = pd.to_datetime('2024-12-31')
     BASE_DIR = "C:/Users/dzimi/Documents/data_engineering/data_projects/git_hub_projects/bank_project/balance_gen_add_data"
     os.chdir(BASE_DIR)
-    curves_df = pd.read_excel('input/curve_input.xlsx')
-    report_date = pd.to_datetime('2024-12-31')
-    curves_df = curve_generator.curve_generation_job(curves_df, report_date, min_date='2024-01-01')
+    curve_file_name = 'input/curve_input.xlsx'
+    depo_file_name = 'input/dep_beh_models.xlsx'
+
+###curve generation
+###################
+    curves_df = curve_generator.curve_generation_job(curve_file_name, report_date, min_date='2024-01-01')
     sql_setup.append_df_to_table(curves_df, 'curves')
+###depo beh models
+######################
+    df_depo_beh = insert_beh_models.depo_beh_models_job(depo_file_name, report_date)
+    sql_setup.append_df_to_table(df_depo_beh, 'models_deposit')
+
+
 
 
 ### !!!!! zrob curves job jako funkcja

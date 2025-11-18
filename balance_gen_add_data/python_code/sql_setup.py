@@ -25,8 +25,19 @@ Curves = Table(
     Column("int_rate", DECIMAL(18, 2), nullable=False)
 )
 
+Depo = Table(
+    "models_deposit", metadata,
+    Column("report_date", Date, nullable=False),
+    Column("product_code", String(4), nullable=False),
+    Column("tenor", String(4), nullable=False),
+    Column("outstanding", DECIMAL(18, 2), nullable=False)
+)
+
+
+
 TABLES = {
     "curves": Curves,
+    "models_deposit": Depo
 }
 
 def append_df_to_table(df: pd.DataFrame, table_name: str):

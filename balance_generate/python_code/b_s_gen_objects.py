@@ -237,6 +237,7 @@ class SavingAccountsGen(ProductGen):
     def add_parameters(self, set_of_transactions):
         array_of_ids = self.add_ids(len(set_of_transactions))
         return pd.DataFrame({
+            'report_date': config.report_date,
             'transaction_id': array_of_ids,
             'product_name': self.product_name,
             'product_code': self.product_code,
@@ -277,6 +278,7 @@ class CurrentAccountsGen(ProductGen):
         array_of_currencies = np.full(len(set_of_transactions), self.currency)
         array_of_client_types = np.full(len(set_of_transactions), self.client_type_id)
         return pd.DataFrame({
+            'report_date': config.report_date,
             'transaction_id': array_of_ids,
             'product_name': self.product_name,
             'product_code': self.product_code,
@@ -322,6 +324,7 @@ class TermDepositsGen(ProductGen):
     def add_parameters(self, set_of_transactions):
         array_of_ids = self.add_ids(len(set_of_transactions))
         return pd.DataFrame({
+            'report_date': config.report_date,
             'transaction_id': array_of_ids,
             'product_name': self.product_name,
             'product_code': self.product_code,
@@ -442,6 +445,7 @@ class LoansFixedGen(ProductGen):
         array_of_payment_freq = np.full(len(set_of_transactions), self.payment_freq)
         array_of_amort_types = np.full(len(set_of_transactions), self.amort_type)
         return pd.DataFrame({
+            'report_date': config.report_date,
             'transaction_id': array_of_ids,
             'product_name': self.product_name,
             'product_code': self.product_code,
@@ -574,6 +578,7 @@ class LoansFloatGen(ProductGen):
         array_of_indexes = np.full(len(set_of_transactions), self.rate_index)
         array_of_amort_types = np.full(len(set_of_transactions), self.amort_type)
         return pd.DataFrame({
+            'report_date': config.report_date,
             'transaction_id': array_of_ids,
             'product_name': self.product_name,
             'product_code': self.product_code,
@@ -625,6 +630,7 @@ class BondsFixedGen(ProductGen):
     def add_parameters(self, set_of_transactions):
         array_of_ids = self.add_ids(len(set_of_transactions))
         return pd.DataFrame({
+            'report_date': config.report_date,
             'transaction_id': array_of_ids,
             'product_name': self.product_name,
             'product_code': self.product_code,
@@ -666,6 +672,7 @@ class BondsFloatGen(ProductGen):
     def add_parameters(self, set_of_transactions):
         array_of_ids = self.add_ids(len(set_of_transactions))
         return pd.DataFrame({
+            'report_date': config.report_date,
             'transaction_id': array_of_ids,
             'product_name': self.product_name,
             'product_code': self.product_code,
@@ -793,6 +800,7 @@ class OneRowDummyProductGen(ProductGen):
         array_of_currencies = np.full(len(set_of_transactions), self.currency)
         array_of_client_types = np.full(len(set_of_transactions), self.client_type_id)
         return pd.DataFrame({
+            'report_date': config.report_date,
             'transaction_id': array_of_ids,
             'product_name': self.product_name,
             'product_code': self.product_code,
