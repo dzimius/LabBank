@@ -4,6 +4,7 @@ from scipy.stats import truncnorm
 import QuantLib as ql
 import numpy as np
 import config
+import datetime as dt
 
 ##### pozniej mozna przy zwyklym kodzie dodac context i tam krzywe, report date itp, to chat pokazywal jako ustawienie
 ##### w klasach
@@ -14,6 +15,21 @@ def get_num_of_months(period):
     elif period[-1] == 'M':
         months = period[:-1]
     return int(months)
+
+def _as_py_datetimes(x):
+    idx = pd.DatetimeIndex(x)
+    return [d.to_pydatetime().replace(tzinfo=None) for d in idx]
+
+def as_datetime(x) -> dt.datetime:
+    if isinstance(x, pd.Timestamp):
+        return x.to_pydatetime().replace(tzinfo=None)
+    if isinstance(x, np.datetime64):
+        return pd.Timestamp(x).to_pydatetime().replace(tzinfo=None)
+    if isinstance(x, dt.date) and not isinstance(x, dt.datetime):
+        return dt.datetime.combine(x, dt.time())
+    if isinstance(x, dt.datetime):
+        return x.replace(tzinfo=None)
+    return pd.to_datetime(x).to_pydatetime().replace(tzinfo=None)
 
 def get_calendar_from_currency(curr:str) -> object:
     currency_to_calendar = {
@@ -95,7 +111,7 @@ def gen_init_bal_loan(mean, std_dev, lower_bound, upper_bound, round = None):
 #                                     replace=True)  # bez zmiany funkcjonalności (duplikaty dozwolone)
 #     return pd.Index(random_dates).to_numpy(dtype="datetime64[D]")
 
-def generate_random_dates(start_date, end_date, n, annual_growth=0.35, seed=None):
+def generate_random_dates(start_date, end_date, n, annual_growth=0.15, seed=None):
     start = pd.to_datetime(start_date)
     end = pd.to_datetime(end_date)
     if seed is not None:
@@ -115,6 +131,33 @@ def generate_random_dates(start_date, end_date, n, annual_growth=0.35, seed=None
 
     random_dates = np.random.choice(business_days, size=n, replace=True, p=weights)
     return pd.Index(random_dates).to_numpy(dtype="datetime64[D]")
+
+def generate_random_bond_dates(start_date, end_date, n, freq="6M", annual_growth=0.15, seed=None):
+    start = pd.to_datetime(start_date)
+    end = pd.to_datetime(end_date)
+
+    raw_dates = pd.date_range(start, end, freq=freq)
+
+    if len(raw_dates) == 0:
+        raise ValueError("There is no dates to generate - first_issue_date not properly chosen.")
+
+    def to_next_business_day(d):
+        while d.weekday() >= 5:
+            d += pd.Timedelta(days=1)
+        return d
+
+    adjusted = [to_next_business_day(d) for d in raw_dates]
+    adjusted_dates = pd.DatetimeIndex(adjusted)
+    adjusted_dates = adjusted_dates[adjusted_dates <= end]
+
+    days_since_start = (adjusted_dates - start).days
+    years_since_start = days_since_start / 365.25
+    weights = (1 + annual_growth) ** years_since_start
+    weights = np.asarray(weights, dtype=float)
+    weights /= weights.sum()
+
+    random_dates = np.random.choice(adjusted_dates, size=n, replace=True, p=weights)
+    return _as_py_datetimes(random_dates)
 
 def ql_date_to_pd_date(ql_date):
     return pd.Timestamp(ql_date.year(), ql_date.month(), ql_date.dayOfMonth())
@@ -617,15 +660,29 @@ class LoansFloatGen(ProductGen):
 
 
 class BondsFixedGen(ProductGen):
-    def __init__(self, product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type, maturity):
+    def __init__(self, product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type,
+                 amort_type, rate_index, payment_freq, maturity):
         super().__init__(product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type)
         self.maturity = maturity
+        self.payment_freq = payment_freq
+        self.rate_index = rate_index
+        self.amort_type = amort_type
+        self.cal = get_calendar_from_currency(self.currency)
 
     def gen_set_of_transactions(self):
         stats = config.stats_dict[self.product_name][self.client_type_id]
         balances = generate_balances(self.balance_amt, stats['mean'], stats['std_dev'],
                                      stats['lower_bound'], stats['upper_bound'], round=5000)
-        return pd.DataFrame({'balance_amt': balances})
+        starting_dates = generate_random_bond_dates(max(config.balance_start_date,
+                                                   ql_date_to_pd_date(ql.Date.from_date(config.report_date) - ql.Period(
+                                                       self.maturity))),
+                                               config.report_date,
+                                               len(balances))
+        starting_dates = [as_datetime(d) for d in starting_dates]
+        maturity_dates = [ql_date_to_pd_date(self.cal.advance(ql.Date.from_date(pd.Timestamp(s_dt).date()),
+                                                              ql.Period(self.maturity), ql.ModifiedFollowing)) for s_dt
+                          in starting_dates]
+        return pd.DataFrame({'balance_amt': balances, 'start_date': starting_dates, 'maturity_date': maturity_dates})
 
     def add_parameters(self, set_of_transactions):
         array_of_ids = self.add_ids(len(set_of_transactions))
@@ -639,7 +696,11 @@ class BondsFixedGen(ProductGen):
             'currency': self.currency,
             'client_type_id': self.client_type_id,
             'rate_type': self.rate_type,
-            'maturity': self.maturity
+            'start_date': set_of_transactions['start_date'],
+            'maturity_date': set_of_transactions['maturity_date'],
+            'maturity': self.maturity,
+            'amort_type': self.amort_type,
+            'rate_index': self.rate_index
         })
 
     @classmethod
@@ -652,22 +713,37 @@ class BondsFixedGen(ProductGen):
             currency=row["currency"],
             client_type_id=row["client_type_id"],
             rate_type=row["rate_type"],
-            maturity=row["maturity"]
+            payment_freq=row["payment_freq"],
+            maturity=row["maturity"],
+            amort_type=row["amort_type"],
+            rate_index=row["rate_index"]
         )
 
 
 class BondsFloatGen(ProductGen):
     def __init__(self, product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type, maturity,
-                 rate_index):
+                 amort_type, rate_index):
         super().__init__(product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type)
         self.maturity = maturity
         self.rate_index = rate_index
+        self.amort_type = amort_type
+        self.cal = get_calendar_from_currency(self.currency)
 
     def gen_set_of_transactions(self):
         stats = config.stats_dict[self.product_name][self.client_type_id]
         balances = generate_balances(self.balance_amt, stats['mean'], stats['std_dev'],
                                      stats['lower_bound'], stats['upper_bound'], round=5000)
-        return pd.DataFrame({'balance_amt': balances})
+        starting_dates = generate_random_bond_dates(max(config.balance_start_date,
+                                                        ql_date_to_pd_date(
+                                                            ql.Date.from_date(config.report_date) - ql.Period(
+                                                                self.maturity))),
+                                                    config.report_date,
+                                                    len(balances))
+        starting_dates = [as_datetime(d) for d in starting_dates]
+        maturity_dates = [ql_date_to_pd_date(self.cal.advance(ql.Date.from_date(pd.Timestamp(s_dt).date()),
+                                                              ql.Period(self.maturity), ql.ModifiedFollowing)) for s_dt
+                          in starting_dates]
+        return pd.DataFrame({'balance_amt': balances,'start_date': starting_dates, 'maturity_date': maturity_dates})
 
     def add_parameters(self, set_of_transactions):
         array_of_ids = self.add_ids(len(set_of_transactions))
@@ -680,8 +756,11 @@ class BondsFloatGen(ProductGen):
             'balance_amt': set_of_transactions['balance_amt'],
             'currency': self.currency,
             'client_type_id': self.client_type_id,
+            'start_date': set_of_transactions['start_date'],
+            'maturity_date': set_of_transactions['maturity_date'],
             'rate_type': self.rate_type,
             'maturity': self.maturity,
+            'amort_type': self.amort_type,
             'rate_index': self.rate_index
         })
 
@@ -696,6 +775,7 @@ class BondsFloatGen(ProductGen):
             client_type_id=row["client_type_id"],
             rate_type=row["rate_type"],
             maturity=row["maturity"],
+            amort_type=row["amort_type"],
             rate_index=row["rate_index"]
         )
 #

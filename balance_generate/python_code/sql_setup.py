@@ -75,8 +75,11 @@ Column("report_date", Date, nullable=False),
     Column("product_name", String(64), nullable=False),
     Column("bs_side", String(1), nullable=False),
     Column("balance_amt", DECIMAL(18, 2), nullable=False),
+    Column("start_date", Date, nullable=True),
+    Column("maturity_date", Date, nullable=True),
     Column("currency", String(3), nullable=False),
     Column("maturity", String(4), nullable=True),
+    Column("amort_type", String(1), nullable=True),
     Column("rate_type", String(1), nullable=True),
     Column("rate_index", String(8), nullable=True)
 )
@@ -244,7 +247,7 @@ def assign_client_ids(transactions_df: pd.DataFrame, seed:None) -> pd.DataFrame:
 def reset_data(mode: int, report_date: str) -> None:
     """
     mode=0 -> drop + recreate tabele
-    mode=1 -> DELETE dla danego report_date ze wszystkich tabel
+    mode=1 -> DELETE specific report_date data
     """
     tables = [
         "loans",
@@ -275,4 +278,4 @@ def reset_data(mode: int, report_date: str) -> None:
                     {"rd": report_date},
                 )
         else:
-            raise ValueError("Nieznany mode, oczekiwane 0 lub 1")
+            raise ValueError("Mode should be 0 or 1")
