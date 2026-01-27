@@ -24,9 +24,18 @@ Curves = Table(
     Column("mat_date", Date, nullable=False),
     Column("int_rate", DECIMAL(18, 6), nullable=False),
     Column("currency", String(3), nullable=False),
-    Column("curve_type", String(20), nullable=False),
+    Column("curve_name", String(20), nullable=False),
 
 
+)
+
+Fixing = Table(
+    "fixings", metadata,
+    Column("fixing_date", Date, nullable=False),
+    Column("ir_type", String(8), nullable=False),
+    Column("tenor", String(4), nullable=False),
+    Column("rate", DECIMAL(18, 6), nullable=False),
+    Column("currency", String(3), nullable=False)
 )
 
 Loan = Table(
@@ -49,6 +58,7 @@ Depo = Table(
 
 TABLES = {
     "curves": Curves,
+    "fixings": Fixing,
     "models_loan":Loan,
     "models_deposit": Depo
 }
@@ -84,6 +94,7 @@ def reset_data(mode: int, report_date: str) -> None:
     """
     tables = [
         "curves",
+        "fixings",
         "models_loan",
         "models_deposit"
     ]

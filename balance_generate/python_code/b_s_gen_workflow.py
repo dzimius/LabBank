@@ -14,13 +14,8 @@ config.report_date = pd.to_datetime('2024-12-31')  # Set the report date
 config.balance_start_date = pd.to_datetime('2015-01-01')
 full_balance_amt = 100_000_000_000 #assets + liabilities+equity = 2*assets
 
-mode = 0 # 0 -- create new tables and remove old 1 -- only delete rows without creating new schema of table
+mode = 0 # 0 -- create new tables and remove old , 1 -- only delete rows without creating new schema of table
 sql_setup.reset_data(mode, config.report_date)
-# with sql_setup.engine.begin() as conn:
-#     for t in ["loans", "deposits", "financial_instruments", "equity", "clients"] + ["transactions"]:
-#         conn.execute(text(f"IF OBJECT_ID('dbo.{t}', 'U') IS NOT NULL DROP TABLE dbo.{t};"))
-#     # tu kluczowe:
-#     sql_setup.metadata.create_all(bind=conn, checkfirst=False)
 
 df_bs_struct = pd.read_excel('input_data/bank_data_only_dep.xlsx', sheet_name='bs_structure')
 
@@ -31,18 +26,6 @@ df_result = df_bs_struct.merge(df_client_t, on='client_type_id', how='left')
 
 product_objects = {}
 
-
-# for _, row in df_result.iterrows():
-#     product = ProductFactory.create(row)
-#     df = product.build_result_df()
-#
-#     # 1) transactions
-#     sql_setup.append_transactions(df)
-#
-#     # 2) tabela specyficzna
-#     dest = ProductFactory.table_registry.get(type(product))
-#     if dest:
-#         sql_setup.append_df_to_table(df, dest)
 
 parts = []
 for _, row in df_result.iterrows():

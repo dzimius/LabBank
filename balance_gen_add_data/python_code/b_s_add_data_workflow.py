@@ -19,6 +19,12 @@ if __name__ == "__main__":
     curves_df = curve_generator.curve_generation_job(curve_file_name, report_date, mode, min_date='2024-01-01')
     sql_setup.append_df_to_table(curves_df, 'curves')
 
+#####
+##
+    fixing_hst = pd.read_excel(curve_file_name)
+    fixing_df =  fixing_hst[['date', 'ir_type', 'tenor', 'currency', 'rate']].rename(columns={'date': 'fixing_date'})
+    fixing_df = fixing_df.sort_values(by=['fixing_date'])
+    sql_setup.append_df_to_table(fixing_df, 'fixings')
 
 ###depo beh models
 ######################

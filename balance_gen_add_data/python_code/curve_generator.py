@@ -15,10 +15,10 @@ def build_curve_ql(valuation_date: ql.Date, quotes: dict) -> ql.YieldTermStructu
     bdc = ql.ModifiedFollowing
     eom = False
 
-    def helper(rate, months):
+    def helper(rate, period):
         return ql.DepositRateHelper(
             ql.QuoteHandle(ql.SimpleQuote(rate)),
-            ql.Period(months, ql.Months),
+            period,
             fixing_days,
             calendar,
             bdc,
@@ -27,10 +27,11 @@ def build_curve_ql(valuation_date: ql.Date, quotes: dict) -> ql.YieldTermStructu
         )
 
     helpers = [
-        helper(quotes["1M"], 1),
-        helper(quotes["3M"], 3),
-        helper(quotes["6M"], 6),
-        helper(quotes["1Y"], 12),
+        helper(quotes["1D"], ql.Period(1, ql.Days)),
+        helper(quotes["1M"], ql.Period(1, ql.Months)),
+        helper(quotes["3M"], ql.Period(3, ql.Months)),
+        helper(quotes["6M"], ql.Period(6, ql.Months)),
+        helper(quotes["1Y"], ql.Period(12, ql.Months)),
     ]
 
     settlement_date = calendar.advance(valuation_date, fixing_days, ql.Days)
@@ -52,69 +53,18 @@ def sample_hw_state_at(horizon_time: float, a: float, sigma: float, n_paths: int
 
 def ten2period(s: str) -> ql.Period:
     s = s.upper()
-    return ql.Period(int(s[:-1]), ql.Months) if s.endswith("M") else ql.Period(int(s[:-1]), ql.Years)
+    n = int(s[:-1])
+    u = s[-1]
+    if u == "D":
+        return ql.Period(n, ql.Days)
+    if u == "W":
+        return ql.Period(n, ql.Weeks)
+    if u == "M":
+        return ql.Period(n, ql.Months)
+    if u == "Y":
+        return ql.Period(n, ql.Years)
+    raise ValueError(f"Nieznany tenor: {s}")
 
-
-# def simulate_hw_curves_quantlib(
-#     subdf,
-#     a: float = 0.10,
-#     sigma: float = 0.01,
-#     n_paths: int = 100,
-#     horizon: ql.Period = ql.Period(1, ql.Years),
-#     output_tenors = tuple([f"{i}M" for i in range(1, 12*30+1)]),
-#     rng_seed: int = 123
-# ):
-#     curve_date = pd.to_datetime(subdf['date'].values[0])
-#     ql_valuation = ql.Date.from_date(curve_date)
-#     cal = ql.Poland()
-#     dc = ql.Actual365Fixed()
-#
-#     quotes = {
-#         '1M': subdf['WIB1M'].values[0] / 100.0,
-#         '3M': subdf['WIB3M'].values[0] / 100.0,
-#         '6M': subdf['WIB6M'].values[0] / 100.0,
-#         '1Y': subdf['WIB1Y'].values[0] / 100.0
-#     }
-#
-#     yts = build_curve_ql(ql_valuation, quotes)
-#     model = ql.HullWhite(yts, a, sigma)
-#
-#     horizon_date = cal.advance(ql_valuation, horizon)
-#     t_h = dc.yearFraction(ql_valuation, horizon_date)
-#
-#     x_h = sample_hw_state_at(horizon_time=t_h, a=a, sigma=sigma,
-#                              n_paths=n_paths, seed=rng_seed)
-#
-#     targets = [cal.advance(ql_valuation, ten2period(tk)) for tk in output_tenors]
-#     t_targets = [dc.yearFraction(ql_valuation, dT) for dT in targets]
-#     taus_today = [dc.yearFraction(ql_valuation, dT) for dT in targets]
-#     taus_forward = [dc.yearFraction(horizon_date, dT) for dT in targets]
-#
-#     cols = [tk.upper() for tk in output_tenors]
-#
-#     # Liczymy od razu średnią dla każdego tenora, bez przechowywania wszystkich ścieżek
-#     avg_rates = np.empty(len(cols))
-#     for j in range(len(cols)):
-#         if targets[j] <= horizon_date:
-#             P0T = yts.discount(t_targets[j])
-#             avg_rates[j] = -np.log(P0T) / max(taus_today[j], 1e-12)
-#         else:
-#             # policz y dla każdej ścieżki i zrób średnią
-#             y_samples = np.empty(n_paths)
-#             for i, x in enumerate(x_h):
-#                 P = model.discountBond(t_h, t_targets[j], float(x))
-#                 y_samples[i] = -np.log(P) / max(taus_forward[j], 1e-12)
-#             avg_rates[j] = y_samples.mean()
-#
-#     result_curves = pd.DataFrame({
-#         "curve_date": curve_date.date(),
-#         "tenor": cols,
-#         "year_frac": [dc.yearFraction(ql_valuation, tgt) for tgt in targets],
-#         "mat_date": [pd.Timestamp(tgt.to_date()) for tgt in targets],
-#         "int_rate": avg_rates
-#     })
-#
-#     return result_curves
 
 def simulate_hw_curves_quantlib(
     subdf,
@@ -122,19 +72,21 @@ def simulate_hw_curves_quantlib(
     sigma: float = 0.01,
     n_paths: int = 100,
     horizon: ql.Period = ql.Period(1, ql.Years),
-    output_tenors = tuple([f"{i}M" for i in range(1, 12*30+1)]),
+    output_tenors = tuple([f"{i}M" for i in range(0, 12*30+1)]),
     rng_seed: int = 123
 ):
     curve_date = pd.to_datetime(subdf['date'].values[0])
+
     ql_valuation = ql.Date.from_date(curve_date)
     cal = ql.Poland()
     dc = ql.Actual365Fixed()
 
     quotes = {
-        '1M': subdf['ASK_1M'].values[0] / 100.0,
-        '3M': subdf['ASK_3M'].values[0] / 100.0,
-        '6M': subdf['ASK_6M'].values[0] / 100.0,
-        '1Y': subdf['ASK_1Y'].values[0] / 100.0
+        '1D': subdf.loc[subdf['tenor'] == '1D', 'rate'].values[0] / 100.0,
+        '1M': subdf.loc[subdf['tenor'] == '1M', 'rate'].values[0] / 100.0,
+        '3M': subdf.loc[subdf['tenor'] == '3M', 'rate'].values[0] / 100.0,
+        '6M': subdf.loc[subdf['tenor'] == '6M', 'rate'].values[0] / 100.0,
+        '1Y': subdf.loc[subdf['tenor'] == '1Y', 'rate'].values[0] / 100.0
     }
     ccy = subdf['currency'].values[0]
 
@@ -143,6 +95,10 @@ def simulate_hw_curves_quantlib(
 
     horizon_date = cal.advance(ql_valuation, horizon)
     t_h = dc.yearFraction(ql_valuation, horizon_date)
+
+    # 1D data / year_frac (do outputu)
+    spot_1d_date = cal.advance(ql_valuation, ql.Period(1, ql.Days))
+    spot_1d_year_frac = dc.yearFraction(ql_valuation, spot_1d_date)
 
     # --- użyj HullWhiteProcess zamiast własnej OU-ki ---
     time_steps = 1
@@ -163,7 +119,12 @@ def simulate_hw_curves_quantlib(
     taus_today = [dc.yearFraction(ql_valuation, dT) for dT in targets]
     taus_forward = [dc.yearFraction(horizon_date, dT) for dT in targets]
 
-    cols = [tk.upper() for tk in output_tenors]
+    # oryginalne tenory (żeby znaleźć pozycję 0M)
+    orig_cols = [tk.upper() for tk in output_tenors]
+    idx0 = orig_cols.index("0M") if "0M" in orig_cols else None
+
+    # output: zamieniamy nazwę 0M -> 1D
+    cols = ["1D" if tk.upper() == "0M" else tk.upper() for tk in output_tenors]
 
     avg_rates = np.empty(len(cols))
     for j in range(len(cols)):
@@ -177,6 +138,13 @@ def simulate_hw_curves_quantlib(
                 y_samples[i] = -np.log(P) / max(taus_forward[j], 1e-12)
             avg_rates[j] = y_samples.mean()
 
+    # nadpisz "dawne 0M" stopą z 1D (teraz będzie w output jako tenor=1D)
+    if idx0 is not None:
+        avg_rates[idx0] = quotes["1D"]
+
+        # i popraw daty targetów dla tej pozycji na +1D, żeby year_frac/mat_date nie były 0
+        targets[idx0] = spot_1d_date
+
     result_curves_disc = pd.DataFrame({
         "curve_date": curve_date.date(),
         "tenor": cols,
@@ -184,7 +152,7 @@ def simulate_hw_curves_quantlib(
         "mat_date": [pd.Timestamp(tgt.to_date()) for tgt in targets],
         "int_rate": avg_rates,
         "currency": ccy,
-        "curve_type": 'disc_curve'
+        "curve_name": ccy + '_disc_curve'
     })
     result_curves_fwd = pd.DataFrame({
         "curve_date": curve_date.date(),
@@ -193,28 +161,22 @@ def simulate_hw_curves_quantlib(
         "mat_date": [pd.Timestamp(tgt.to_date()) for tgt in targets],
         "int_rate": avg_rates,
         "currency": ccy,
-        "curve_type": 'fwd_curve'
+        "curve_name": ccy + '_fwd_curve'
     })
-    result_curves = pd.concat([result_curves_disc, result_curves_fwd])
+
+    result_curves = pd.concat([result_curves_disc, result_curves_fwd], ignore_index=True)
+
+    # finalnie wymuś spójne year_frac/mat_date dla tenor=1D (na wszelki wypadek)
+    mask_1d = result_curves["tenor"] == "1D"
+    result_curves.loc[mask_1d, "mat_date"] = pd.Timestamp(spot_1d_date.to_date())
+    result_curves.loc[mask_1d, "year_frac"] = spot_1d_year_frac
+
     return result_curves
 
-# def curve_generation_job(df, report_date):
-#     unique_dates = df['date'].unique()
-#     unique_dates = unique_dates[(unique_dates<=report_date) & (unique_dates>'2020-01-01')]
-#     count = 1
-#     for dt in list(unique_dates):
-#         sub_df = df[df['date'] == dt]
-#         out = simulate_hw_curves_quantlib(sub_df)
-#         if count == 1:
-#             output_df = out
-#         else:
-#             output_df = pd.concat([output_df, out])
-#         count = 0
-#     return output_df
 
 def _worker_simulate(record: dict) -> pd.DataFrame:
-    subdf = pd.DataFrame([record])
-    return simulate_hw_curves_quantlib(subdf)
+    #subdf = pd.DataFrame([record])
+    return simulate_hw_curves_quantlib(record)
 
 def curve_generation_job(file_name, report_date, mode, min_date='2020-01-01', max_workers=None):
     df = pd.read_excel(file_name)
@@ -227,7 +189,8 @@ def curve_generation_job(file_name, report_date, mode, min_date='2020-01-01', ma
     dates = dates[mask]
 
     for ccy in df['currency'].unique():
-        records = [df.loc[(df['date'] == dt) & (df['currency'] == ccy)].iloc[0].to_dict() for dt in dates]
+        records = [df.loc[(df['date'] == dt) & (df['currency'] == ccy)] for dt in dates]
+        #records = [df.loc[(df['date'] == dt) & (df['currency'] == ccy)].iloc[0].to_dict() for dt in dates]
         if len(records) == 0:
             return pd.DataFrame(columns=["curve_date","tenor","year_frac","mat_date","int_rate"])
         with ProcessPoolExecutor(max_workers=max_workers) as ex:

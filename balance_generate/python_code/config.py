@@ -75,10 +75,10 @@ stats_dict = {
 }
 
 margin_map = {
-        "mortgage_fixed": {'mean': 2/100,  'std_dev': 0.5/100,  'lower_bound': 0.25/100, 'upper_bound': 4.5/100},
-        "mortgage_float": {'mean': 2/100,  'std_dev': 0.5/100,  'lower_bound': 0.25/100, 'upper_bound': 4.5/100},
-        "cash_loan_fixed": {'mean': 4/100,  'std_dev': 0.7/100,  'lower_bound': 0.5/100, 'upper_bound': 6/100},
-        "cash_loan_float": {'mean': 4/100,  'std_dev': 0.7/100,  'lower_bound': 0.5/100, 'upper_bound': 6/100},
+        "mortgage_fixed": {'mean': 2/100,  'std_dev': 0.5/100,  'lower_bound': 0.25/100, 'upper_bound': 4/100},
+        "mortgage_float": {'mean': 2/100,  'std_dev': 0.5/100,  'lower_bound': 0.25/100, 'upper_bound': 4/100},
+        "cash_loan_fixed": {'mean': 4.5/100,  'std_dev': 0.5/100,  'lower_bound': 3/100, 'upper_bound': 7/100},
+        "cash_loan_float": {'mean': 4.5/100,  'std_dev': 0.5/100,  'lower_bound': 3/100, 'upper_bound': 7/100},
         "investment_loan_fixed": {'mean': 1/100, 'std_dev': 1/100, 'lower_bound': 0.5/100, 'upper_bound': 5/100},
         "investment_loan_float": {'mean': 1/100, 'std_dev': 1/100, 'lower_bound': 0.5/100, 'upper_bound': 5/100}
         }

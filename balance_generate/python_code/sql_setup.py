@@ -49,6 +49,8 @@ Column("report_date", Date, nullable=False),
     Column("amort_type", String(1), nullable=True),
     Column("init_balance_amt", DECIMAL(18, 2), nullable=True),
     Column("margin", DECIMAL(6, 4), nullable=True),
+    Column("disc_curve", String(20), nullable=True),
+    Column("fwd_curve", String(20), nullable=True)
 )
 
 Deposits = Table(
@@ -64,7 +66,9 @@ Column("report_date", Date, nullable=False),
     Column("currency", String(3), nullable=False),
     Column("client_type_id", Integer, nullable=False),
     Column("maturity", String(4), nullable=True),
-    Column("rate_type", String(1), nullable=True)
+    Column("rate_type", String(1), nullable=True),
+    Column("disc_curve", String(20), nullable=True),
+    Column("fwd_curve", String(20), nullable=True)
 )
 
 FinancialInstruments = Table(
@@ -81,7 +85,9 @@ Column("report_date", Date, nullable=False),
     Column("maturity", String(4), nullable=True),
     Column("amort_type", String(1), nullable=True),
     Column("rate_type", String(1), nullable=True),
-    Column("rate_index", String(8), nullable=True)
+    Column("rate_index", String(8), nullable=True),
+    Column("disc_curve", String(20), nullable=True),
+    Column("fwd_curve", String(20), nullable=True)
 )
 
 Equity = Table(
@@ -199,7 +205,7 @@ def add_client_id(transactions_df: pd.DataFrame, seed:None, pct: float = 0.4) ->
     return df
 
 def append_transactions(transactions_df):
-    needed = ["transaction_id", "product_code", "product_name", "bs_side", "balance_amt", "currency" ,
+    needed = ["transaction_id", "product_code", "product_name", "bs_side", "balance_amt", "currency",
               "client_id", "client_type_id"]
     missing = [c for c in needed if c not in transactions_df.columns]
     if missing:
