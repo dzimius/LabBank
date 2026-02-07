@@ -1,6 +1,6 @@
 import pandas as pd
 import os
-import curve_generator, insert_beh_models
+import b_s_add_data_objects as bs_objs
 import sql_setup
 
 if __name__ == "__main__":
@@ -10,36 +10,43 @@ if __name__ == "__main__":
     curve_file_name = 'input/curve_input.xlsx'
     depo_file_name = 'input/dep_beh_models.xlsx'
     loan_file_name = 'input/loan_beh_models.xlsx'
+    tables = ['loans']
 
     mode = 0
-    sql_setup.reset_data(mode, report_date)
+    sql_setup.reset_data_models(mode, report_date, ['models_loan', 'models_deposit'])
+
+    sql_setup.reset_data_remove_always(["curves", "fixings", "loans_sched_id", "fin_inst_sched_id"])
 
 ###curve generation
 ###################
-    curves_df = curve_generator.curve_generation_job(curve_file_name, report_date, mode, min_date='2024-01-01')
-    sql_setup.append_df_to_table(curves_df, 'curves')
+    df_curves = bs_objs.curve_generation_job(curve_file_name, report_date, mode, min_date='2024-01-01')
+    sql_setup.append_df_to_table(df_curves, 'curves')
 
 #####
-##
-    fixing_hst = pd.read_excel(curve_file_name)
-    fixing_df =  fixing_hst[['date', 'ir_type', 'tenor', 'currency', 'rate']].rename(columns={'date': 'fixing_date'})
-    fixing_df = fixing_df.sort_values(by=['fixing_date'])
-    sql_setup.append_df_to_table(fixing_df, 'fixings')
+## load fixing history
+    df_fixing = bs_objs.load_historical_fixings(curve_file_name)
+    sql_setup.append_df_to_table(df_fixing, 'fixings')
 
 ###depo beh models
 ######################
-    df_depo_beh = insert_beh_models.depo_beh_models_job(depo_file_name, report_date)
+    df_depo_beh = bs_objs.depo_beh_models_job(depo_file_name)
     sql_setup.append_df_to_table(df_depo_beh, 'models_deposit')
 
-    df_loan_beh = insert_beh_models.loan_beh_models_job(loan_file_name, report_date)
+    df_loan_beh = bs_objs.loan_beh_models_job(loan_file_name)
     sql_setup.append_df_to_table(df_loan_beh, 'models_loan')
 
 
+#### create sched id tables
+    for table in bs_objs.dict_tbl_sched_id.keys():
+        sql_setup.create_sched_id_tbl_sql(
+            sql_setup.engine,
+            source_table=table,
+            target_table=bs_objs.dict_tbl_sched_id[table],
+            columns=bs_objs.dict_tbl_sched_id_cols[table],
+            schema="dbo"
+        )
 
 
-### !!!!! zrob curves job jako funkcja
-### dalej zrob behaviorals models jobs gdzie wrzucasz te excele do baz danych
-#### dalej podpipanie krzywych discount i forward pod każdy produkt ( w SQL lub python chyba musi byc krzywa doscunt i forward w danych wejściowych)
 ### dalej wrzucanie modeli pod product code, że jest jeszcze nazwa modelu (SQL lub python)
 
 

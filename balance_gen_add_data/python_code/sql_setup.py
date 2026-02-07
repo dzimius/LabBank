@@ -87,18 +87,11 @@ def append_df_to_table(df: pd.DataFrame, table_name: str):
         method=None,
     )
 
-def reset_data(mode: int, report_date: str) -> None:
+def reset_data_models(mode: int, report_date: str, tables: list) -> None:
     """
     mode=0 -> drop + recreate tabele
     mode=1 -> DELETE specific report_date data
     """
-    tables = [
-        "curves",
-        "fixings",
-        "models_loan",
-        "models_deposit"
-    ]
-
     with engine.begin() as conn:
         if mode == 0:
             for t in tables:
@@ -108,11 +101,11 @@ def reset_data(mode: int, report_date: str) -> None:
                         f"DROP TABLE dbo.{t};"
                     )
                 )
-            metadata.create_all(bind=conn, checkfirst=False)
+            metadata.create_all(bind=conn, checkfirst=True)
 
         elif mode == 1:
             if report_date is None:
-                raise ValueError("For mode=1 report_date is needed")
+                raise ValueError("Report_date is needed")
 
             for t in tables:
                 conn.execute(
@@ -121,3 +114,42 @@ def reset_data(mode: int, report_date: str) -> None:
                 )
         else:
             raise ValueError("Mode should be 0 or 1")
+
+
+def reset_data_remove_always(tables) -> None:
+    with engine.begin() as conn:
+        for t in tables:
+            conn.execute(
+                text(
+                    f"DROP TABLE IF EXISTS dbo.{t};"
+                )
+            )
+
+def create_sched_id_tbl_sql(engine, source_table, target_table, columns, schema="dbo"):
+    cols_sql = ", ".join(columns)
+    order_by_sql = ", ".join(columns)
+
+    sql = f"""
+    DROP TABLE IF EXISTS {schema}.{target_table};
+
+    WITH grp AS (
+        SELECT {cols_sql}
+        FROM {schema}.{source_table}
+        GROUP BY {cols_sql}
+    ),
+    grp_id AS (
+        SELECT
+            DENSE_RANK() OVER (ORDER BY {order_by_sql}) AS schedule_id,
+            {cols_sql}
+        FROM grp
+    )
+    SELECT
+        schedule_id,
+        {cols_sql}
+    INTO {schema}.{target_table}
+    FROM grp_id;
+    """
+
+    with engine.begin() as conn:
+        conn.execute(text(sql))
+

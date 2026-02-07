@@ -234,7 +234,7 @@ def current_from_initial(init_amt, amort_type, start_date, report_date, maturity
 # === Abstrakcyjna klasa bazowa ===
 class ProductGen(ABC):
     def __init__(self, product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type,
-                 disc_curve, fwd_curve):
+                 basis, b_day_conv, disc_curve, fwd_curve):
         self.product_name = product_name
         self.product_code = product_code
         self.bs_side = bs_side
@@ -242,6 +242,8 @@ class ProductGen(ABC):
         self.currency = currency
         self.client_type_id = client_type_id
         self.rate_type = rate_type
+        self.basis = basis
+        self.b_day_conv = b_day_conv
         self.disc_curve = disc_curve
         self.fwd_curve = fwd_curve
 
@@ -272,9 +274,9 @@ class ProductGen(ABC):
 class SavingAccountsGen(ProductGen):
 
     def __init__(self, product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type,
-                 disc_curve, fwd_curve):
+                 basis, b_day_conv, disc_curve, fwd_curve):
         super().__init__(product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type,
-                 disc_curve, fwd_curve)
+                 basis, b_day_conv, disc_curve, fwd_curve)
 
     def gen_set_of_transactions(self):
         stats = config.stats_dict[self.product_name][self.client_type_id]
@@ -294,6 +296,8 @@ class SavingAccountsGen(ProductGen):
             'currency': self.currency,
             'client_type_id': self.client_type_id,
             'rate_type': self.rate_type,
+            'basis': self.basis,
+            'b_day_conv': self.b_day_conv,
             'disc_curve': self.disc_curve,
             'fwd_curve': self.fwd_curve
             })
@@ -309,6 +313,8 @@ class SavingAccountsGen(ProductGen):
             currency=row["currency"],
             client_type_id=row["client_type_id"],
             rate_type=row["rate_type"],
+            basis= row["basis"],
+            b_day_conv= row["b_day_conv"],
             disc_curve=row["disc_curve"],
             fwd_curve=row["fwd_curve"],
         )
@@ -317,9 +323,9 @@ class SavingAccountsGen(ProductGen):
 class CurrentAccountsGen(ProductGen):
 
     def __init__(self, product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type,
-                 disc_curve, fwd_curve):
+                 basis, b_day_conv, disc_curve, fwd_curve):
         super().__init__(product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type,
-                 disc_curve, fwd_curve)
+                 basis, b_day_conv, disc_curve, fwd_curve)
 
     def gen_set_of_transactions(self):
         stats = config.stats_dict[self.product_name][self.client_type_id]
@@ -341,6 +347,8 @@ class CurrentAccountsGen(ProductGen):
             'currency': array_of_currencies,
             'client_type_id': array_of_client_types,
             'rate_type': self.rate_type,
+            'basis': self.basis,
+            'b_day_conv': self.b_day_conv,
             'disc_curve': self.disc_curve,
             'fwd_curve': self.fwd_curve
             })
@@ -355,6 +363,8 @@ class CurrentAccountsGen(ProductGen):
             currency=row["currency"],
             client_type_id=row["client_type_id"],
             rate_type=row["rate_type"],
+            basis=row["basis"],
+            b_day_conv=row["b_day_conv"],
             disc_curve=row["disc_curve"],
             fwd_curve=row["fwd_curve"],
 
@@ -364,9 +374,9 @@ class CurrentAccountsGen(ProductGen):
 # === Class TermDeposit ===
 class TermDepositsGen(ProductGen):
     def __init__(self, product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type, maturity,
-                 disc_curve, fwd_curve):
+                 basis, b_day_conv, disc_curve, fwd_curve):
         super().__init__(product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type,
-                 disc_curve, fwd_curve)
+                 basis, b_day_conv, disc_curve, fwd_curve)
         self.maturity = maturity
         self.cal = get_calendar_from_currency(self.currency)
 
@@ -397,6 +407,8 @@ class TermDepositsGen(ProductGen):
             'maturity': self.maturity,
             'start_date': set_of_transactions['start_date'],
             'maturity_date': set_of_transactions['maturity_date'],
+            'basis': self.basis,
+            'b_day_conv': self.b_day_conv,
             'disc_curve': self.disc_curve,
             'fwd_curve': self.fwd_curve
             })
@@ -412,6 +424,8 @@ class TermDepositsGen(ProductGen):
             client_type_id=row["client_type_id"],
             rate_type=row["rate_type"],
             maturity=row["maturity"],
+            basis=row["basis"],
+            b_day_conv=row["b_day_conv"],
             disc_curve=row["disc_curve"],
             fwd_curve=row["fwd_curve"],
         )
@@ -421,9 +435,9 @@ class TermDepositsGen(ProductGen):
 class LoansFixedGen(ProductGen):
 
     def __init__(self, product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type, maturity,
-                 rate_index, amort_type, fixing_freq, payment_freq, disc_curve, fwd_curve):
+                 rate_index, amort_type, fixing_freq, payment_freq, basis, b_day_conv,  disc_curve, fwd_curve):
         super().__init__(product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type,
-                 disc_curve, fwd_curve)
+                 basis, b_day_conv, disc_curve, fwd_curve)
         self.maturity = maturity
         self.amort_type = amort_type
         self.rate_index = rate_index
@@ -529,6 +543,8 @@ class LoansFixedGen(ProductGen):
             'amort_type': array_of_amort_types,
             'init_balance_amt': set_of_transactions['init_balance_amt'],
             'margin': set_of_transactions['margin'],
+            'basis': self.basis,
+            'b_day_conv': self.b_day_conv,
             'disc_curve': self.disc_curve,
             'fwd_curve': self.fwd_curve
             })
@@ -549,6 +565,8 @@ class LoansFixedGen(ProductGen):
             payment_freq=row["payment_freq"],
             rate_index=row["rate_index"],
             amort_type=row["amort_type"],
+            basis=row["basis"],
+            b_day_conv=row["b_day_conv"],
             disc_curve=row["disc_curve"],
             fwd_curve=row["fwd_curve"],
         )
@@ -557,9 +575,9 @@ class LoansFixedGen(ProductGen):
 class LoansFloatGen(ProductGen):
     def __init__(self, product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type, maturity,
                  rate_index, amort_type, fixing_freq, payment_freq,
-                 disc_curve, fwd_curve):
+                 basis, b_day_conv, disc_curve, fwd_curve):
         super().__init__(product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type,
-                 disc_curve, fwd_curve)
+                 basis, b_day_conv, disc_curve, fwd_curve)
         self.maturity = maturity
         self.rate_index = rate_index
         self.fixing_freq = fixing_freq
@@ -668,6 +686,8 @@ class LoansFloatGen(ProductGen):
             'amort_type':array_of_amort_types,
             'init_balance_amt': set_of_transactions['init_balance_amt'],
             'margin': set_of_transactions['margin'],
+            'basis': self.basis,
+            'b_day_conv': self.b_day_conv,
             'disc_curve': self.disc_curve,
             'fwd_curve': self.fwd_curve
         })
@@ -687,6 +707,8 @@ class LoansFloatGen(ProductGen):
             payment_freq=row["payment_freq"],
             amort_type=row["amort_type"],
             rate_index=row["rate_index"],
+            basis=row["basis"],
+            b_day_conv=row["b_day_conv"],
             disc_curve=row["disc_curve"],
             fwd_curve=row["fwd_curve"],
         )
@@ -694,12 +716,13 @@ class LoansFloatGen(ProductGen):
 
 class BondsFixedGen(ProductGen):
     def __init__(self, product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type,
-                 amort_type, rate_index, payment_freq, maturity,
-                 disc_curve, fwd_curve):
+                 amort_type, rate_index, payment_freq, fixing_freq, maturity,
+                 basis, b_day_conv, disc_curve, fwd_curve):
         super().__init__(product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type,
-                 disc_curve, fwd_curve)
+                 basis, b_day_conv, disc_curve, fwd_curve)
         self.maturity = maturity
         self.payment_freq = payment_freq
+        self.fixing_freq = fixing_freq
         self.rate_index = rate_index
         self.amort_type = amort_type
         self.cal = get_calendar_from_currency(self.currency)
@@ -736,6 +759,10 @@ class BondsFixedGen(ProductGen):
             'maturity': self.maturity,
             'amort_type': self.amort_type,
             'rate_index': self.rate_index,
+            'basis': self.basis,
+            'fixing_freq': self.fixing_freq,
+            'payment_freq': self.payment_freq,
+            'b_day_conv': self.b_day_conv,
             'disc_curve': self.disc_curve,
             'fwd_curve': self.fwd_curve
         })
@@ -750,10 +777,13 @@ class BondsFixedGen(ProductGen):
             currency=row["currency"],
             client_type_id=row["client_type_id"],
             rate_type=row["rate_type"],
-            payment_freq=row["payment_freq"],
             maturity=row["maturity"],
             amort_type=row["amort_type"],
             rate_index=row["rate_index"],
+            basis=row["basis"],
+            fixing_freq=row["fixing_freq"],
+            payment_freq=row["payment_freq"],
+            b_day_conv=row["b_day_conv"],
             disc_curve=row["disc_curve"],
             fwd_curve=row["fwd_curve"],
         )
@@ -761,13 +791,15 @@ class BondsFixedGen(ProductGen):
 
 class BondsFloatGen(ProductGen):
     def __init__(self, product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type, maturity,
-                 amort_type, rate_index,
-                 disc_curve, fwd_curve):
+                 amort_type, rate_index,fixing_freq, payment_freq,
+                 basis, b_day_conv, disc_curve, fwd_curve):
         super().__init__(product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type,
-                 disc_curve, fwd_curve)
+                 basis, b_day_conv, disc_curve, fwd_curve)
         self.maturity = maturity
         self.rate_index = rate_index
         self.amort_type = amort_type
+        self.fixing_freq = fixing_freq
+        self.payment_freq = payment_freq
         self.cal = get_calendar_from_currency(self.currency)
 
     def gen_set_of_transactions(self):
@@ -802,7 +834,11 @@ class BondsFloatGen(ProductGen):
             'rate_type': self.rate_type,
             'maturity': self.maturity,
             'amort_type': self.amort_type,
+            'fixing_freq':self.fixing_freq,
+            'payment_freq':self.payment_freq,
             'rate_index': self.rate_index,
+            'basis': self.basis,
+            'b_day_conv': self.b_day_conv,
             'disc_curve': self.disc_curve,
             'fwd_curve': self.fwd_curve
         })
@@ -820,6 +856,10 @@ class BondsFloatGen(ProductGen):
             maturity=row["maturity"],
             amort_type=row["amort_type"],
             rate_index=row["rate_index"],
+            basis=row["basis"],
+            fixing_freq=row["fixing_freq"],
+            payment_freq=row["payment_freq"],
+            b_day_conv=row["b_day_conv"],
             disc_curve=row["disc_curve"],
             fwd_curve=row["fwd_curve"],
         )
@@ -914,9 +954,9 @@ class IssuedStocksGen(ProductGen):
 
 class OneRowDummyProductGen(ProductGen):
     def __init__(self, product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type,
-                 disc_curve, fwd_curve):
+                 basis, b_day_conv,disc_curve, fwd_curve):
         super().__init__(product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type,
-                 disc_curve, fwd_curve)
+                 basis, b_day_conv,disc_curve, fwd_curve)
 
     def gen_set_of_transactions(self):
         balances = [self.balance_amt]
@@ -936,6 +976,8 @@ class OneRowDummyProductGen(ProductGen):
             'currency': array_of_currencies,
             'client_type_id': array_of_client_types,
             'rate_type': self.rate_type,
+            'basis': self.basis,
+            'b_day_conv': self.b_day_conv,
             'disc_curve': self.disc_curve,
             'fwd_curve': self.fwd_curve
         })
@@ -950,6 +992,8 @@ class OneRowDummyProductGen(ProductGen):
             currency=row["currency"],
             client_type_id=row["client_type_id"],
             rate_type=row["rate_type"],
+            basis=row["basis"],
+            b_day_conv=row["b_day_conv"],
             disc_curve=row["disc_curve"],
             fwd_curve=row["fwd_curve"],
         )
