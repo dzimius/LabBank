@@ -8,6 +8,7 @@ if __name__ == "__main__":
     BASE_DIR = "C:/Users/dzimi/Documents/data_engineering/data_projects/git_hub_projects/bank_project/balance_gen_add_data"
     os.chdir(BASE_DIR)
     curve_file_name = 'input/curve_input.xlsx'
+    fixing_file_name = 'input/fixing_input.xlsx'
     depo_file_name = 'input/dep_beh_models.xlsx'
     loan_file_name = 'input/loan_beh_models.xlsx'
     tables = ['loans']
@@ -24,7 +25,7 @@ if __name__ == "__main__":
 
 #####
 ## load fixing history
-    df_fixing = bs_objs.load_historical_fixings(curve_file_name)
+    df_fixing = bs_objs.load_historical_fixings(fixing_file_name)
     sql_setup.append_df_to_table(df_fixing, 'fixings')
 
 ###depo beh models
@@ -42,6 +43,14 @@ if __name__ == "__main__":
             sql_setup.engine,
             source_table=table,
             target_table=bs_objs.dict_tbl_sched_id[table],
+            columns=bs_objs.dict_tbl_sched_id_cols[table],
+            sum_cols=bs_objs.dict_tbl_sched_sum_cols[table],
+            schema="dbo"
+        )
+        sql_setup.update_schedule_id_sql(
+            sql_setup.engine,
+            table_name=table,
+            sched_table_name=bs_objs.dict_tbl_sched_id[table],
             columns=bs_objs.dict_tbl_sched_id_cols[table],
             schema="dbo"
         )

@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import QuantLib as ql
+import math
 from concurrent.futures import ProcessPoolExecutor
 
 dict_tbl_sched_id = {
@@ -8,9 +9,31 @@ dict_tbl_sched_id = {
     'financial_instruments': 'fin_inst_sched_id'
 }
 dict_tbl_sched_id_cols = {
-    'loans': ["start_date", "maturity_date", "payment_freq", "fixing_freq", "basis", "b_day_conv"],
-    'financial_instruments': ["start_date", "maturity_date", "payment_freq", "fixing_freq", "basis", "b_day_conv"]
+    'loans': ["currency", "start_date", "maturity_date", "payment_freq", "fixing_freq",
+              "dc_conv", "b_day_conv", "rate_index",  "disc_curve", "fwd_curve"],
+    'financial_instruments': ["currency", "start_date", "maturity_date", "payment_freq", "fixing_freq",
+                              "dc_conv", "b_day_conv", "rate_index",  "disc_curve", "fwd_curve"]
 }
+dict_tbl_sched_sum_cols = {
+    'loans': ["init_balance_amt", "balance_amt"],
+    'financial_instruments': ["balance_amt"]
+}
+
+def get_calendar_from_currency(curr:str) -> object:
+    currency_to_calendar = {
+        'PLN': ql.Poland(),
+        'EUR': ql.TARGET(),
+        'USD': ql.UnitedStates(ql.UnitedStates.NYSE)
+    }
+    return currency_to_calendar.get(curr, ql.TARGET())
+
+def get_dc_from_currency(curr:str) -> object:
+    currency_to_dc_conv = {
+        'PLN': ql.Actual365Fixed(),
+        'USD': ql.ActualActual(ql.ActualActual.ISDA),
+        'EUR': ql.Thirty360(ql.Thirty360.ISDA),
+    }
+    return currency_to_dc_conv.get(curr, ql.Actual365Fixed())
 
 def depo_beh_models_job(file_name):
     df_depo_beh = pd.read_excel(file_name)
@@ -28,7 +51,7 @@ def loan_beh_models_job(file_name):
 
 def load_historical_fixings(curve_file_name):
     fixing_hst = pd.read_excel(curve_file_name)
-    df_fixing = fixing_hst[['date', 'ir_type', 'tenor', 'currency', 'rate']].rename(columns={'date': 'fixing_date'})
+    df_fixing = fixing_hst[['date', 'rate_index', 'tenor', 'currency', 'rate']].rename(columns={'date': 'fixing_date'})
     df_fixing = df_fixing.sort_values(by=['fixing_date'])
     return df_fixing
 
@@ -104,8 +127,6 @@ def simulate_hw_curves_quantlib(
     curve_date = pd.to_datetime(subdf['date'].values[0])
 
     ql_valuation = ql.Date.from_date(curve_date)
-    cal = ql.Poland()
-    dc = ql.Actual365Fixed()
 
     quotes = {
         '1D': subdf.loc[subdf['tenor'] == '1D', 'rate'].values[0] / 100.0,
@@ -115,16 +136,18 @@ def simulate_hw_curves_quantlib(
         '1Y': subdf.loc[subdf['tenor'] == '1Y', 'rate'].values[0] / 100.0
     }
     ccy = subdf['currency'].values[0]
+    cal = get_calendar_from_currency(ccy)
+    dc_conv =get_dc_from_currency(ccy)
 
     yts = build_curve_ql(ql_valuation, quotes)
     model = ql.HullWhite(yts, a, sigma)
 
     horizon_date = cal.advance(ql_valuation, horizon)
-    t_h = dc.yearFraction(ql_valuation, horizon_date)
+    t_h = dc_conv.yearFraction(ql_valuation, horizon_date)
 
     # 1D data / year_frac (do outputu)
     spot_1d_date = cal.advance(ql_valuation, ql.Period(1, ql.Days))
-    spot_1d_year_frac = dc.yearFraction(ql_valuation, spot_1d_date)
+    spot_1d_year_frac = dc_conv.yearFraction(ql_valuation, spot_1d_date)
 
     # --- użyj HullWhiteProcess zamiast własnej OU-ki ---
     time_steps = 1
@@ -141,9 +164,9 @@ def simulate_hw_curves_quantlib(
     # ---------------------------------------------------
 
     targets = [cal.advance(ql_valuation, ten2period(tk)) for tk in output_tenors]
-    t_targets = [dc.yearFraction(ql_valuation, dT) for dT in targets]
-    taus_today = [dc.yearFraction(ql_valuation, dT) for dT in targets]
-    taus_forward = [dc.yearFraction(horizon_date, dT) for dT in targets]
+    t_targets = [dc_conv.yearFraction(ql_valuation, dT) for dT in targets]
+    taus_today = [dc_conv.yearFraction(ql_valuation, dT) for dT in targets]
+    taus_forward = [dc_conv.yearFraction(horizon_date, dT) for dT in targets]
 
     # oryginalne tenory (żeby znaleźć pozycję 0M)
     orig_cols = [tk.upper() for tk in output_tenors]
@@ -171,21 +194,29 @@ def simulate_hw_curves_quantlib(
         # i popraw daty targetów dla tej pozycji na +1D, żeby year_frac/mat_date nie były 0
         targets[idx0] = spot_1d_date
 
+    year_fracs = [dc_conv.yearFraction(ql_valuation, tgt) for tgt in targets]
+    disc_factors = [math.exp(- r * yf) for r, yf in zip(avg_rates, year_fracs)]
+    day_n_list = [int(tgt - ql_valuation) for tgt in targets]
+
     result_curves_disc = pd.DataFrame({
         "curve_date": curve_date.date(),
         "tenor": cols,
-        "year_frac": [dc.yearFraction(ql_valuation, tgt) for tgt in targets],
-        "mat_date": [pd.Timestamp(tgt.to_date()) for tgt in targets],
-        "int_rate": avg_rates,
+        "year_frac": year_fracs,
+        "n_days": day_n_list,
+        "mat_date": [tgt.to_date() for tgt in targets],
+        "zero_rate": avg_rates,
+        "d_f": disc_factors,
         "currency": ccy,
         "curve_name": ccy + '_disc_curve'
     })
     result_curves_fwd = pd.DataFrame({
         "curve_date": curve_date.date(),
         "tenor": cols,
-        "year_frac": [dc.yearFraction(ql_valuation, tgt) for tgt in targets],
-        "mat_date": [pd.Timestamp(tgt.to_date()) for tgt in targets],
-        "int_rate": avg_rates,
+        "year_frac": year_fracs,
+        "n_days": day_n_list,
+        "mat_date": [tgt.to_date() for tgt in targets],
+        "zero_rate": avg_rates,
+        "d_f": disc_factors,
         "currency": ccy,
         "curve_name": ccy + '_fwd_curve'
     })

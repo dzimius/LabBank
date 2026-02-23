@@ -43,16 +43,17 @@ Column("report_date", Date, nullable=False),
     Column("client_type_id", Integer, nullable=False),
     Column("rate_type", String(1), nullable=True),
     Column("maturity", String(4), nullable=True),
-    Column("rate_index", String(8), nullable=True),
+    Column("rate_index", String(11), nullable=True),
     Column("payment_freq", String(8), nullable=True),
     Column("fixing_freq", String(8), nullable=True),
-    Column("basis", String(7), nullable=True),
+    Column("dc_conv", String(7), nullable=True),
     Column("b_day_conv", String(25), nullable=True),
     Column("amort_type", String(1), nullable=True),
     Column("init_balance_amt", DECIMAL(18, 2), nullable=True),
     Column("margin", DECIMAL(6, 4), nullable=True),
     Column("disc_curve", String(20), nullable=True),
-    Column("fwd_curve", String(20), nullable=True)
+    Column("fwd_curve", String(20), nullable=True),
+    Column("schedule_id", Integer, nullable=True)
 )
 
 Deposits = Table(
@@ -69,7 +70,7 @@ Column("report_date", Date, nullable=False),
     Column("client_type_id", Integer, nullable=False),
     Column("maturity", String(4), nullable=True),
     Column("rate_type", String(1), nullable=True),
-    Column("basis", String(7), nullable=True),
+    Column("dc_conv", String(7), nullable=True),
     Column("b_day_conv", String(25), nullable=True),
     Column("disc_curve", String(20), nullable=True),
     Column("fwd_curve", String(20), nullable=True)
@@ -89,13 +90,14 @@ Column("report_date", Date, nullable=False),
     Column("maturity", String(4), nullable=True),
     Column("amort_type", String(1), nullable=True),
     Column("rate_type", String(1), nullable=True),
-    Column("rate_index", String(8), nullable=True),
+    Column("rate_index", String(11), nullable=True),
     Column("payment_freq", String(8), nullable=True),
     Column("fixing_freq", String(8), nullable=True),
-    Column("basis", String(7), nullable=True),
+    Column("dc_conv", String(7), nullable=True),
     Column("b_day_conv", String(25), nullable=True),
     Column("disc_curve", String(20), nullable=True),
-    Column("fwd_curve", String(20), nullable=True)
+    Column("fwd_curve", String(20), nullable=True),
+    Column("schedule_id", Integer, nullable=True)
 )
 
 Equity = Table(
@@ -129,15 +131,15 @@ def append_df_to_table(df: pd.DataFrame, table_name: str):
     # kolejność i lista kolumn wg tabeli:
     cols = [c.name for c in tbl.columns]
     # dołóż brakujące kolumny (NaN -> później NULL)
+    df_work = df.copy()
+
     for c in cols:
-        if c not in df.columns:
-            df[c] = pd.NA
-    # utnij nadmiarowe kolumny i ustaw kolejność
-    df2 = df[cols].copy()
-    # NaN/NaT -> None, żeby poszło jako NULL
+        if c not in df_work.columns:
+            df_work[c] = pd.NA
+
+    df2 = df_work[cols]
     df2 = df2.where(pd.notnull(df2), None)
 
-    # append
     df2.to_sql(
         table_name,
         engine,
@@ -258,7 +260,7 @@ def assign_client_ids(transactions_df: pd.DataFrame, seed:None) -> pd.DataFrame:
 
     return df
 
-def reset_data(mode: int, report_date: str) -> None:
+def reset_data(mode: int, report_date=None) -> None:
     """
     mode=0 -> drop + recreate tabele
     mode=1 -> DELETE specific report_date data

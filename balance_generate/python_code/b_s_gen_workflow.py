@@ -15,7 +15,7 @@ config.balance_start_date = pd.to_datetime('2015-01-01')
 full_balance_amt = 100_000_000_000 #assets + liabilities+equity = 2*assets
 
 mode = 0 # 0 -- create new tables and remove old , 1 -- only delete rows without creating new schema of table
-sql_setup.reset_data(mode, config.report_date)
+sql_setup.reset_data(mode, report_date=config.report_date)
 
 df_bs_struct = pd.read_excel('input_data/bank_data_only_dep.xlsx', sheet_name='bs_structure')
 

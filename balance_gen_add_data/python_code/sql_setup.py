@@ -21,24 +21,24 @@ Curves = Table(
     Column("curve_date", Date, nullable=False),
     Column("tenor", String(4), nullable=False),
     Column("year_frac", DECIMAL(18, 2), nullable=False),
+    Column("n_days", Integer, nullable=False),
     Column("mat_date", Date, nullable=False),
-    Column("int_rate", DECIMAL(18, 6), nullable=False),
+    Column("zero_rate", DECIMAL(18, 6), nullable=False),
+    Column("d_f", DECIMAL(18, 6), nullable=False),
     Column("currency", String(3), nullable=False),
     Column("curve_name", String(20), nullable=False),
-
-
 )
 
 Fixing = Table(
     "fixings", metadata,
     Column("fixing_date", Date, nullable=False),
-    Column("ir_type", String(8), nullable=False),
+    Column("rate_index", String(8), nullable=False),
     Column("tenor", String(4), nullable=False),
     Column("rate", DECIMAL(18, 6), nullable=False),
     Column("currency", String(3), nullable=False)
 )
 
-Loan = Table(
+Loan_mod = Table(
     "models_loan", metadata,
     Column("report_date", Date, nullable=False),
     Column("product_code", String(4), nullable=False),
@@ -46,7 +46,7 @@ Loan = Table(
     Column("prep_rate", DECIMAL(18, 2), nullable=False)
 )
 
-Depo = Table(
+Depo_mod = Table(
     "models_deposit", metadata,
     Column("report_date", Date, nullable=False),
     Column("product_code", String(4), nullable=False),
@@ -59,8 +59,8 @@ Depo = Table(
 TABLES = {
     "curves": Curves,
     "fixings": Fixing,
-    "models_loan":Loan,
-    "models_deposit": Depo
+    "models_loan": Loan_mod,
+    "models_deposit": Depo_mod
 }
 
 def append_df_to_table(df: pd.DataFrame, table_name: str):
@@ -125,29 +125,62 @@ def reset_data_remove_always(tables) -> None:
                 )
             )
 
-def create_sched_id_tbl_sql(engine, source_table, target_table, columns, schema="dbo"):
+def create_sched_id_tbl_sql(
+    engine,
+    source_table,
+    target_table,
+    columns,
+    sum_cols=None,
+    schema="dbo"
+):
+    sum_cols = sum_cols or []
     cols_sql = ", ".join(columns)
     order_by_sql = ", ".join(columns)
 
-    sql = f"""
-    DROP TABLE IF EXISTS {schema}.{target_table};
+    # SUM(col) AS col
+    sum_sql = ",\n        ".join([f"SUM({c}) AS {c}" for c in sum_cols])
+    sum_select = ", " + ", ".join(sum_cols) if sum_cols else ""
 
-    WITH grp AS (
-        SELECT {cols_sql}
-        FROM {schema}.{source_table}
-        GROUP BY {cols_sql}
-    ),
-    grp_id AS (
+    sql = f"""
+        DROP TABLE IF EXISTS {schema}.{target_table};
+    
+        WITH grp AS (
+            SELECT 
+                {cols_sql}
+                {"," if sum_sql else ""}
+                {sum_sql}
+            FROM {schema}.{source_table}
+            GROUP BY {cols_sql}
+        ),
+        grp_id AS (
+            SELECT
+                DENSE_RANK() OVER (ORDER BY {order_by_sql}) AS schedule_id,
+                {cols_sql}
+                {sum_select}
+            FROM grp
+        )
         SELECT
-            DENSE_RANK() OVER (ORDER BY {order_by_sql}) AS schedule_id,
+            schedule_id,
             {cols_sql}
-        FROM grp
-    )
-    SELECT
-        schedule_id,
-        {cols_sql}
-    INTO {schema}.{target_table}
-    FROM grp_id;
+            {sum_select}
+        INTO {schema}.{target_table}
+        FROM grp_id;
+        """
+
+    with engine.begin() as conn:
+        conn.execute(text(sql))
+
+def update_schedule_id_sql(engine, table_name, sched_table_name, columns, schema="dbo"):
+    on_sql = " AND ".join([
+        f"(a.{c} = b.{c} OR (a.{c} IS NULL AND b.{c} IS NULL))"
+        for c in columns
+    ])
+    sql = f"""
+    UPDATE a
+       SET a.schedule_id = b.schedule_id
+    FROM {schema}.{table_name} a
+    LEFT JOIN {schema}.{sched_table_name} b
+      ON {on_sql};
     """
 
     with engine.begin() as conn:
