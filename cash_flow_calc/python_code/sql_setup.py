@@ -16,20 +16,26 @@ metadata = MetaData(schema="dbo")
 Loan_sched_d = Table(
     "loan_sched_dates", metadata,
     Column("schedule_id", String(8), primary_key=True, nullable=False),
+    Column("rate_index", String(10), nullable=False),
     Column("fixing_dt", Date, nullable=False),
     Column("cf_start_dt", Date, primary_key=True, nullable=False),
     Column("cf_end_dt", Date, nullable=False),
     Column("cf_yf", DECIMAL(18, 2), nullable=False),
+    Column("d_f", DECIMAL(18, 2), nullable=True),
+    Column("fwd_rt", DECIMAL(18, 2), nullable=True),
     schema="dbo",
 )
 
 Fin_inst_sched_d = Table(
     "fin_inst_sched_dates", metadata,
     Column("schedule_id", String(8), primary_key=True, nullable=False),
+    Column("rate_index", String(10), nullable=False),
     Column("fixing_dt", Date, nullable=False),
     Column("cf_start_dt", Date, primary_key=True, nullable=False),
     Column("cf_end_dt", Date, nullable=False),
     Column("cf_yf", DECIMAL(18, 2), nullable=False),
+    Column("d_f", DECIMAL(18, 2), nullable=True),
+    Column("fwd_rt", DECIMAL(18, 2), nullable=True),
     schema="dbo",
 )
 metadata.create_all(engine)

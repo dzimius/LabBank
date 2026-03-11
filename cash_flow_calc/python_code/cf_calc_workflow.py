@@ -7,6 +7,7 @@ import QuantLib as ql
 import cf_calc_objects as cf_obj
 import datetime
 
+print(datetime.datetime.now())
 BASE_DIR = "C:/Users/dzimi/Documents/data_engineering/data_projects/git_hub_projects/bank_project/cash_flow_calc"
 os.chdir(BASE_DIR)
 
@@ -37,6 +38,26 @@ for i, row in uniq_curves.loc[uniq_curves['curve_type'] == 'fwd_curve'].iterrows
 
 fixing_history = sql_setup.sql_select_fixings()
 
+disc_df = (
+    disc_curves
+    .set_index(["curve_name", "node_date"])["d_f"]
+    .sort_index()
+)
+
+# forward curve: (curve_name, fixing_freq, node_date) -> fwd_rt
+fwd_df = (
+    fwd_curves
+    .set_index(["curve_name", "fixing_freq", "node_date"])["fwd_rt"]
+    .sort_index()
+)
+
+# fixingi: (fixing_date, rate_index) -> rate
+fix_df = (
+    fixing_history
+    .set_index(["fixing_date", "rate_index"])["rate"]
+    .sort_index()
+)
+
 #####
 ### GENERATE SCHED DATES
 #############
@@ -52,7 +73,7 @@ for table_name in cf_obj.dict_cols_loan_fin_inst.keys():
 
     for df_in in chunks:
         parts = [
-            cf_obj.gen_orgin_sched_loan_fin_inst(row, config.report_date, disc_curves, fwd_curves, fixing_history)
+            cf_obj.gen_orgin_sched_loan_fin_inst(row, config.report_date, disc_df, fwd_df, fix_df)
             for row in df_in.itertuples(index=False, name="Row")
         ]
         parts = [p for p in parts if p is not None and len(p) > 0]
@@ -74,5 +95,7 @@ for table_name in cf_obj.dict_cols_loan_fin_inst.keys():
     if buffer:
         out_df = pd.concat(buffer, ignore_index=True)
         sql_setup.write_df(out_df, target_table, chunksize=50000)
+
+print(datetime.datetime.now())
 
 
