@@ -71,6 +71,8 @@ for table_name in cf_obj.dict_cols_loan_fin_inst.keys():
 
     chunks = sql_setup.load_sched_params(table_name, cf_obj.dict_cols_loan_fin_inst[table_name])
 
+    is_loans = table_name == 'loans_sched_id'
+
     for df_in in chunks:
         parts = [
             cf_obj.gen_orgin_sched_loan_fin_inst(row, config.report_date, disc_df, fwd_df, fix_df)
@@ -80,9 +82,16 @@ for table_name in cf_obj.dict_cols_loan_fin_inst.keys():
         if not parts:
             continue
 
-        # ile wierszy dojdzie?
-        add_n = sum(len(p) for p in parts)
-        buffer.extend(parts)
+        batch_df = pd.concat(parts, ignore_index=True)
+
+        # For loans: compute outstanding_bal, int_pmt, capital_pmt vectorized.
+        # df_in contains one row per schedule_id with balance_amt, init_balance_amt,
+        # and amort_type — no loop needed, the full batch is processed at once.
+        if is_loans:
+            batch_df = cf_obj.compute_loan_payments_vectorized(batch_df, df_in)
+
+        add_n = len(batch_df)
+        buffer.append(batch_df)
         buffer_count += add_n
 
         if buffer_count >= BUFFER_ROWS:

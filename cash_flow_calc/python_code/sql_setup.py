@@ -26,9 +26,12 @@ Loan_sched_d = Table(
     Column("fixing_dt", Date, nullable=False),
     Column("cf_start_dt", Date, primary_key=True, nullable=False),
     Column("cf_end_dt", Date, nullable=False),
-    Column("cf_yf", DECIMAL(18, 2), nullable=False),
-    Column("d_f", DECIMAL(18, 2), nullable=True),
-    Column("fwd_rt", DECIMAL(18, 2), nullable=True),
+    Column("cf_yf", DECIMAL(18, 6), nullable=False),
+    Column("d_f", DECIMAL(18, 6), nullable=True),
+    Column("fwd_rt", DECIMAL(18, 6), nullable=True),
+    Column("outstanding_bal", DECIMAL(18, 2), nullable=True),
+    Column("int_pmt", DECIMAL(18, 2), nullable=True),
+    Column("capital_pmt", DECIMAL(18, 2), nullable=True),
     schema="dbo",
 )
 

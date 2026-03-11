@@ -12,8 +12,10 @@ import config
 import sql_setup
 
 dict_cols_loan_fin_inst = {
+    # balance_amt / init_balance_amt / amort_type needed for vectorized payment computation
     'loans_sched_id': ['schedule_id', 'currency', 'start_date', 'maturity_date', 'payment_freq',
-                       'fixing_freq', 'dc_conv', 'b_day_conv', "rate_index", 'disc_curve', 'fwd_curve'],
+                       'fixing_freq', 'dc_conv', 'b_day_conv', "rate_index", 'disc_curve', 'fwd_curve',
+                       'balance_amt', 'init_balance_amt', 'amort_type'],
     'fin_inst_sched_id': ['schedule_id', 'currency', 'start_date', 'maturity_date', 'payment_freq',
                           'fixing_freq', 'dc_conv', 'b_day_conv', "rate_index", 'disc_curve', 'fwd_curve'],
 }
@@ -383,5 +385,106 @@ def interpolate_d_f(x: np.ndarray, y: np.ndarray, report_date: pd.Timestamp) -> 
         "node_date": report_date + pd.to_timedelta(grid_days, unit="D"),
         "d_f": d_f_interp
     })
+
+
+def compute_loan_payments_vectorized(
+    sched_df: pd.DataFrame,
+    sched_params_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Vectorized computation of outstanding balance, interest and capital payments.
+
+    No Python loop over schedule IDs — uses groupby transforms, cumcount and
+    numpy broadcasting so the entire batch is processed in a single pass.
+
+    Amortization types (amort_type column in sched_params_df):
+        0 – bullet:            constant outstanding, full capital repaid at maturity
+        1 – annuity:           fixed total payment; reference rate = first fwd_rt of group
+        2 – constant amort:    equal principal instalment each period
+
+    Interest payment always uses the actual forward rate from the curve:
+        int_pmt = outstanding_bal * fwd_rt * cf_yf
+
+    Parameters
+    ----------
+    sched_df:
+        Expanded schedule dates (output of gen_orgin_sched_loan_fin_inst),
+        must contain: schedule_id, cf_end_dt, cf_yf, fwd_rt.
+    sched_params_df:
+        One row per schedule_id (from loans_sched_id chunk),
+        must contain: schedule_id, balance_amt, init_balance_amt, amort_type.
+
+    Returns
+    -------
+    sched_df with three new columns: outstanding_bal, int_pmt, capital_pmt.
+    """
+    PARAM_COLS = ['schedule_id', 'balance_amt', 'init_balance_amt', 'amort_type']
+    df = sched_df.merge(sched_params_df[PARAM_COLS], on='schedule_id', how='left')
+    df = df.sort_values(['schedule_id', 'cf_end_dt']).reset_index(drop=True)
+
+    df['amort_type'] = pd.to_numeric(df['amort_type'], errors='coerce').fillna(0).astype(int)
+
+    # ── period metadata (no loop, pure groupby) ──────────────────────────────
+    df['_rank'] = df.groupby('schedule_id').cumcount()           # 0-indexed
+    df['_n'] = df.groupby('schedule_id')['_rank'].transform('max') + 1
+    df['_is_last'] = df['_rank'] == df['_n'] - 1
+
+    df['outstanding_bal'] = np.nan
+    df['capital_pmt'] = np.nan
+
+    # ── BULLET (amort_type == 0) ─────────────────────────────────────────────
+    m0 = df['amort_type'] == 0
+    df.loc[m0, 'outstanding_bal'] = df.loc[m0, 'balance_amt']
+    df.loc[m0, 'capital_pmt'] = np.where(
+        df.loc[m0, '_is_last'], df.loc[m0, 'balance_amt'], 0.0
+    )
+
+    # ── CONSTANT AMORTIZATION (amort_type == 2) ──────────────────────────────
+    m2 = df['amort_type'] == 2
+    step = df.loc[m2, 'balance_amt'] / df.loc[m2, '_n']
+    df.loc[m2, 'capital_pmt'] = step
+    # outstanding at START of each period (before capital repayment)
+    df.loc[m2, 'outstanding_bal'] = df.loc[m2, 'balance_amt'] - step * df.loc[m2, '_rank']
+
+    # ── ANNUITY (amort_type == 1) ─────────────────────────────────────────────
+    m1 = df['amort_type'] == 1
+    if m1.any():
+        # Reference rate: first fwd_rt of each group (state at report date)
+        r_ref = df[m1].groupby('schedule_id')['fwd_rt'].transform('first')
+        r = (r_ref * df.loc[m1, 'cf_yf']).to_numpy(dtype=float)
+        n = df.loc[m1, '_n'].to_numpy(dtype=float)
+        B = df.loc[m1, 'balance_amt'].to_numpy(dtype=float)
+        k = df.loc[m1, '_rank'].to_numpy(dtype=float)
+
+        safe_r = np.where(r > 1e-10, r, 1e-10)
+
+        # Fixed annuity payment computed from current balance and reference rate
+        annuity_pmt = np.where(
+            r > 1e-10,
+            B * safe_r / (1.0 - (1.0 + safe_r) ** (-n)),
+            B / n,
+        )
+
+        # Outstanding at start of period k (closed-form cumulative formula)
+        # O(k) = B*(1+r)^k - A*((1+r)^k - 1)/r
+        factor = (1.0 + safe_r) ** k
+        outstanding = np.where(
+            r > 1e-10,
+            B * factor - annuity_pmt * (factor - 1.0) / safe_r,
+            B * (1.0 - k / n),
+        )
+        outstanding = np.maximum(outstanding, 0.0)  # numerical guard
+
+        # Capital = annuity_pmt minus interest at the reference rate
+        capital = annuity_pmt - outstanding * r
+        capital = np.maximum(capital, 0.0)  # guard against floating-point drift
+
+        df.loc[m1, 'outstanding_bal'] = outstanding
+        df.loc[m1, 'capital_pmt'] = capital
+
+    # ── Interest for all amort types (actual forward rate, not reference) ────
+    df['int_pmt'] = df['outstanding_bal'] * df['fwd_rt'] * df['cf_yf']
+
+    df = df.drop(columns=['_rank', '_n', '_is_last', 'balance_amt', 'init_balance_amt', 'amort_type'])
+    return df
 
 

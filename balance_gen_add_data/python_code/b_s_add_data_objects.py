@@ -13,10 +13,11 @@ dict_tbl_sched_id = {
     'financial_instruments': 'fin_inst_sched_id'
 }
 dict_tbl_sched_id_cols = {
+    # amort_type included so each schedule_id maps to a single amortization type
     'loans': ["currency", "start_date", "maturity_date", "payment_freq", "fixing_freq",
-              "dc_conv", "b_day_conv", "rate_index",  "disc_curve", "fwd_curve"],
+              "dc_conv", "b_day_conv", "rate_index", "disc_curve", "fwd_curve", "amort_type"],
     'financial_instruments': ["currency", "start_date", "maturity_date", "payment_freq", "fixing_freq",
-                              "dc_conv", "b_day_conv", "rate_index",  "disc_curve", "fwd_curve"]
+                              "dc_conv", "b_day_conv", "rate_index",  "disc_curve", "fwd_curve"],
 }
 dict_tbl_sched_sum_cols = {
     'loans': ["init_balance_amt", "balance_amt"],
