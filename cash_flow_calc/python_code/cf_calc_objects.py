@@ -451,17 +451,20 @@ def compute_amort_schedule_vectorized(
     # ── ANNUITY (amort_type == 1) ─────────────────────────────────────────────
     m1 = df['amort_type'] == 1
     if m1.any():
-        # Reference rate: first fwd_rt of each group (state at report date).
-        r_ref = df[m1].groupby('schedule_id')['fwd_rt'].transform('first').to_numpy(dtype=float)
-
-        # IMPORTANT: the closed-form O(k) = B*(1+r)^k - A*((1+r)^k-1)/r is only
-        # exact when r is CONSTANT across all periods.  cf_yf can differ slightly
-        # period-to-period (day-count differences), so we use the group average to
-        # get one constant periodic rate per schedule_id.  This ensures
-        #   O(k) - capital_pmt(k)  ==  O(k+1)
-        # for every period.  int_pmt still uses the actual per-period fwd_rt * cf_yf.
-        avg_yf = df[m1].groupby('schedule_id')['cf_yf'].transform('mean').to_numpy(dtype=float)
-        r_const = r_ref * avg_yf          # one constant rate per group
+        # r_const = mean(fwd_rt * cf_yf) per schedule_id.
+        # Using the mean of the per-period products is a better approximation than
+        # first(fwd_rt)*mean(cf_yf): it captures both the term-structure slope of
+        # forward rates and day-count variation in a single average.
+        # r_const is still one constant value per group, so the closed-form
+        #   O(k) = B*(1+r)^k - A*((1+r)^k-1)/r
+        # remains exact and the consistency
+        #   O(k) - capital_pmt(k) == O(k+1)
+        # holds for every period.  int_pmt still uses actual fwd_rt * cf_yf.
+        r_const = (
+            df.loc[m1, 'fwd_rt'].mul(df.loc[m1, 'cf_yf'])
+            .groupby(df.loc[m1, 'schedule_id']).transform('mean')
+            .to_numpy(dtype=float)
+        )
 
         n = df.loc[m1, '_n'].to_numpy(dtype=float)
         B = df.loc[m1, 'balance_amt'].to_numpy(dtype=float)
