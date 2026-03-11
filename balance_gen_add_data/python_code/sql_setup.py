@@ -1,9 +1,14 @@
+from __future__ import annotations
+
+import re
+from typing import Optional
+
 import numpy as np
+import pandas as pd
 from sqlalchemy import create_engine, MetaData, Table, Column
 from sqlalchemy import Integer, String, ForeignKey, Date, text
 from sqlalchemy.dialects.mssql import DECIMAL
-import pandas as pd
-import re
+from sqlalchemy.engine import Engine
 
 engine = create_engine(
     "mssql+pyodbc://maciek_d/bank_gen"
@@ -63,7 +68,7 @@ TABLES = {
     "models_deposit": Depo_mod
 }
 
-def append_df_to_table(df: pd.DataFrame, table_name: str):
+def append_df_to_table(df: pd.DataFrame, table_name: str) -> None:
     """Dopasuj df do schematu tabeli i wykonaj append. Brakujące kolumny -> NULL."""
     tbl = TABLES[table_name]
     # kolejność i lista kolumn wg tabeli:
@@ -116,7 +121,7 @@ def reset_data_models(mode: int, report_date: str, tables: list) -> None:
             raise ValueError("Mode should be 0 or 1")
 
 
-def reset_data_remove_always(tables) -> None:
+def reset_data_remove_always(tables: list[str]) -> None:
     with engine.begin() as conn:
         for t in tables:
             conn.execute(
@@ -126,13 +131,13 @@ def reset_data_remove_always(tables) -> None:
             )
 
 def create_sched_id_tbl_sql(
-    engine,
-    source_table,
-    target_table,
-    columns,
-    sum_cols=None,
-    schema="dbo"
-):
+    engine: Engine,
+    source_table: str,
+    target_table: str,
+    columns: list[str],
+    sum_cols: Optional[list[str]] = None,
+    schema: str = "dbo",
+) -> None:
     sum_cols = sum_cols or []
     cols_sql = ", ".join(columns)
     order_by_sql = ", ".join(columns)
@@ -170,7 +175,13 @@ def create_sched_id_tbl_sql(
     with engine.begin() as conn:
         conn.execute(text(sql))
 
-def update_schedule_id_sql(engine, table_name, sched_table_name, columns, schema="dbo"):
+def update_schedule_id_sql(
+    engine: Engine,
+    table_name: str,
+    sched_table_name: str,
+    columns: list[str],
+    schema: str = "dbo",
+) -> None:
     on_sql = " AND ".join([
         f"(a.{c} = b.{c} OR (a.{c} IS NULL AND b.{c} IS NULL))"
         for c in columns

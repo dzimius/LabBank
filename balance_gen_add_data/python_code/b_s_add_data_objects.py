@@ -1,8 +1,12 @@
-import pandas as pd
-import numpy as np
-import QuantLib as ql
+from __future__ import annotations
+
 import math
 from concurrent.futures import ProcessPoolExecutor
+from typing import Optional
+
+import numpy as np
+import pandas as pd
+import QuantLib as ql
 
 dict_tbl_sched_id = {
     'loans': 'loans_sched_id',
@@ -19,7 +23,7 @@ dict_tbl_sched_sum_cols = {
     'financial_instruments': ["balance_amt"]
 }
 
-def get_calendar_from_currency(curr:str) -> object:
+def get_calendar_from_currency(curr: str) -> ql.Calendar:
     currency_to_calendar = {
         'PLN': ql.Poland(),
         'EUR': ql.TARGET(),
@@ -27,7 +31,7 @@ def get_calendar_from_currency(curr:str) -> object:
     }
     return currency_to_calendar.get(curr, ql.TARGET())
 
-def get_dc_from_currency(curr:str) -> object:
+def get_dc_from_currency(curr: str) -> ql.DayCounter:
     currency_to_dc_conv = {
         'PLN': ql.Actual365Fixed(),
         'USD': ql.ActualActual(ql.ActualActual.ISDA),
@@ -35,28 +39,28 @@ def get_dc_from_currency(curr:str) -> object:
     }
     return currency_to_dc_conv.get(curr, ql.Actual365Fixed())
 
-def depo_beh_models_job(file_name):
+def depo_beh_models_job(file_name: str) -> pd.DataFrame:
     df_depo_beh = pd.read_excel(file_name)
     df_depo_beh = df_depo_beh.melt(id_vars=['report_date', 'tenor'],  var_name='product_code', value_name='outstanding')
     df_depo_beh = df_depo_beh.dropna(subset=['outstanding'])
     df_depo_beh = df_depo_beh[['report_date', 'product_code', 'tenor', 'outstanding']]
     return df_depo_beh
 
-def loan_beh_models_job(file_name):
+def loan_beh_models_job(file_name: str) -> pd.DataFrame:
     df_loan_beh = pd.read_excel(file_name)
     df_loan_beh = df_loan_beh.melt(id_vars=['report_date', 'tenor'],  var_name='product_code', value_name='prep_rate')
     df_loan_beh = df_loan_beh.dropna(subset=['prep_rate'])
     df_loan_beh = df_loan_beh[['report_date', 'product_code', 'tenor', 'prep_rate']]
     return df_loan_beh
 
-def load_historical_fixings(curve_file_name):
+def load_historical_fixings(curve_file_name: str) -> pd.DataFrame:
     fixing_hst = pd.read_excel(curve_file_name)
     df_fixing = fixing_hst[['date', 'rate_index', 'tenor', 'currency', 'rate']].rename(columns={'date': 'fixing_date'})
     df_fixing = df_fixing.sort_values(by=['fixing_date'])
     return df_fixing
 
 
-def build_curve_ql(valuation_date: ql.Date, quotes: dict) -> ql.YieldTermStructureHandle:
+def build_curve_ql(valuation_date: ql.Date, quotes: dict[str, float]) -> ql.YieldTermStructureHandle:
     ql.Settings.instance().evaluationDate = valuation_date
     calendar = ql.Poland()
     day_count = ql.Actual365Fixed()
@@ -88,7 +92,7 @@ def build_curve_ql(valuation_date: ql.Date, quotes: dict) -> ql.YieldTermStructu
     curve.enableExtrapolation()
     return ql.YieldTermStructureHandle(curve)
 
-def sample_hw_state_at(horizon_time: float, a: float, sigma: float, n_paths: int, seed: int = 42):
+def sample_hw_state_at(horizon_time: float, a: float, sigma: float, n_paths: int, seed: int = 42) -> np.ndarray:
     """
     W modelu HW1F r(t) = x(t) + phi(t), gdzie x(t) spełnia OU:
        dx = -a x dt + sigma dW, x(0)=0  =>  x(t) ~ N(0,  sigma^2/(2a)*(1-e^{-2at}))
@@ -116,14 +120,14 @@ def ten2period(s: str) -> ql.Period:
 
 
 def simulate_hw_curves_quantlib(
-    subdf,
+    subdf: pd.DataFrame,
     a: float = 0.10,
     sigma: float = 0.01,
     n_paths: int = 100,
     horizon: ql.Period = ql.Period(1, ql.Years),
-    output_tenors = tuple([f"{i}M" for i in range(0, 12*30+1)]),
-    rng_seed: int = 123
-):
+    output_tenors: tuple[str, ...] = tuple([f"{i}M" for i in range(0, 12*30+1)]),
+    rng_seed: int = 123,
+) -> pd.DataFrame:
     curve_date = pd.to_datetime(subdf['date'].values[0])
 
     ql_valuation = ql.Date.from_date(curve_date)
@@ -231,11 +235,17 @@ def simulate_hw_curves_quantlib(
     return result_curves
 
 
-def _worker_simulate(record: dict) -> pd.DataFrame:
+def _worker_simulate(record: pd.DataFrame) -> pd.DataFrame:
     #subdf = pd.DataFrame([record])
     return simulate_hw_curves_quantlib(record)
 
-def curve_generation_job(file_name, report_date, mode, min_date='2020-01-01', max_workers=None):
+def curve_generation_job(
+    file_name: str,
+    report_date: str | pd.Timestamp,
+    mode: int,
+    min_date: str = '2020-01-01',
+    max_workers: Optional[int] = None,
+) -> pd.DataFrame:
     df = pd.read_excel(file_name)
     report_date = pd.to_datetime(report_date)
     min_date = pd.to_datetime(min_date)

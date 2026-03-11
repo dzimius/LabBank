@@ -1,26 +1,31 @@
-import pandas as pd
-from abc import ABC, abstractmethod
-from scipy.stats import truncnorm
-import QuantLib as ql
-import numpy as np
-import config
+from __future__ import annotations
+
 import datetime as dt
+from abc import ABC, abstractmethod
+from typing import Any, Optional, Union
+
+import numpy as np
+import pandas as pd
+import QuantLib as ql
+from scipy.stats import truncnorm
+
+import config
 
 ##### pozniej mozna przy zwyklym kodzie dodac context i tam krzywe, report date itp, to chat pokazywal jako ustawienie
 ##### w klasach
 
-def get_num_of_months(period):
+def get_num_of_months(period: str) -> int:
     if period[-1] == 'Y':
         months = float(period[:-1]) * 12
     elif period[-1] == 'M':
         months = period[:-1]
     return int(months)
 
-def _as_py_datetimes(x):
+def _as_py_datetimes(x: Any) -> list[dt.datetime]:
     idx = pd.DatetimeIndex(x)
     return [d.to_pydatetime().replace(tzinfo=None) for d in idx]
 
-def as_datetime(x) -> dt.datetime:
+def as_datetime(x: Any) -> dt.datetime:
     if isinstance(x, pd.Timestamp):
         return x.to_pydatetime().replace(tzinfo=None)
     if isinstance(x, np.datetime64):
@@ -31,7 +36,7 @@ def as_datetime(x) -> dt.datetime:
         return x.replace(tzinfo=None)
     return pd.to_datetime(x).to_pydatetime().replace(tzinfo=None)
 
-def get_calendar_from_currency(curr:str) -> object:
+def get_calendar_from_currency(curr: str) -> ql.Calendar:
     currency_to_calendar = {
         'PLN': ql.Poland(),
         'EUR': ql.TARGET(),
@@ -40,7 +45,7 @@ def get_calendar_from_currency(curr:str) -> object:
     return currency_to_calendar.get(curr, ql.TARGET())
 
 
-def outstanding_annuity(initial_notional, maturity_months, months_passed, annual_rate):
+def outstanding_annuity(initial_notional: float, maturity_months: int, months_passed: int, annual_rate: float) -> float:
     r = annual_rate / 12.0
     M = maturity_months
     m = months_passed
@@ -49,11 +54,19 @@ def outstanding_annuity(initial_notional, maturity_months, months_passed, annual
         return round(max(initial_notional * (M - m) / M, 0), 2)
     return round(initial_notional * ((1+r)**M - (1+r)**m) / ((1+r)**M - 1), 2)
 
-def outstanding_constant_amort(initial_notional, maturity_months, months_passed):
+def outstanding_constant_amort(initial_notional: float, maturity_months: int, months_passed: int) -> float:
     monthly_principal = initial_notional / maturity_months
     outstanding = initial_notional - monthly_principal * months_passed
     return max(outstanding, 0)
-def generate_loan_current_balance_amt(init_b_amt, amort_type, start_date, report_date, maturity, int_rate):
+
+def generate_loan_current_balance_amt(
+    init_b_amt: float,
+    amort_type: int,
+    start_date: Any,
+    report_date: Any,
+    maturity: str,
+    int_rate: float,
+) -> float:
     start_date = pd.Timestamp(start_date)
     report_date = pd.Timestamp(report_date)
     n_of_months = get_num_of_months(maturity)
@@ -64,7 +77,15 @@ def generate_loan_current_balance_amt(init_b_amt, amort_type, start_date, report
         c_balance_amt = outstanding_constant_amort(init_b_amt, n_of_months, n_of_months_passed)
     return c_balance_amt
 
-def generate_truncated_normal(mean, std_dev, lower_bound, upper_bound, n=1, rounding=False, round_to=1000):
+def generate_truncated_normal(
+    mean: float,
+    std_dev: float,
+    lower_bound: float,
+    upper_bound: float,
+    n: int = 1,
+    rounding: bool = False,
+    round_to: float = 1000,
+) -> np.ndarray:
     a, b = (lower_bound - mean) / std_dev, (upper_bound - mean) / std_dev
     trunc_dist = truncnorm(a, b, loc=mean, scale=std_dev)
     samples = trunc_dist.rvs(n)
@@ -74,8 +95,15 @@ def generate_truncated_normal(mean, std_dev, lower_bound, upper_bound, n=1, roun
         result = np.round(samples, 2)
     return result
 
-def generate_balances(full_balance_amt, mean, std_dev, lower_bound, upper_bound,
-                              overfill_factor=1.15, round = None):
+def generate_balances(
+    full_balance_amt: float,
+    mean: float,
+    std_dev: float,
+    lower_bound: float,
+    upper_bound: float,
+    overfill_factor: float = 1.15,
+    round: Optional[int] = None,
+) -> list[float]:
     n_estimated = int(full_balance_amt / mean * overfill_factor)
     if not round:
         b_amounts = generate_truncated_normal(mean, std_dev, lower_bound, upper_bound,
@@ -91,7 +119,13 @@ def generate_balances(full_balance_amt, mean, std_dev, lower_bound, upper_bound,
         balances.append(last_value)
     return balances
 
-def gen_init_bal_loan(mean, std_dev, lower_bound, upper_bound, round = None):
+def gen_init_bal_loan(
+    mean: float,
+    std_dev: float,
+    lower_bound: float,
+    upper_bound: float,
+    round: Optional[int] = None,
+) -> np.ndarray:
     if not round:
         b_amount = generate_truncated_normal(mean, std_dev, lower_bound, upper_bound,
                                               n=1)
@@ -111,7 +145,13 @@ def gen_init_bal_loan(mean, std_dev, lower_bound, upper_bound, round = None):
 #                                     replace=True)  # bez zmiany funkcjonalności (duplikaty dozwolone)
 #     return pd.Index(random_dates).to_numpy(dtype="datetime64[D]")
 
-def generate_random_dates(start_date, end_date, n, annual_growth=0.15, seed=None):
+def generate_random_dates(
+    start_date: Any,
+    end_date: Any,
+    n: int,
+    annual_growth: float = 0.15,
+    seed: Optional[int] = None,
+) -> np.ndarray:
     start = pd.to_datetime(start_date)
     end = pd.to_datetime(end_date)
     if seed is not None:
@@ -132,7 +172,14 @@ def generate_random_dates(start_date, end_date, n, annual_growth=0.15, seed=None
     random_dates = np.random.choice(business_days, size=n, replace=True, p=weights)
     return pd.Index(random_dates).to_numpy(dtype="datetime64[D]")
 
-def generate_random_bond_dates(start_date, end_date, n, freq="6M", annual_growth=0.15, seed=None):
+def generate_random_bond_dates(
+    start_date: Any,
+    end_date: Any,
+    n: int,
+    freq: str = "6M",
+    annual_growth: float = 0.15,
+    seed: Optional[int] = None,
+) -> list[dt.datetime]:
     start = pd.to_datetime(start_date)
     end = pd.to_datetime(end_date)
 
@@ -159,10 +206,14 @@ def generate_random_bond_dates(start_date, end_date, n, freq="6M", annual_growth
     random_dates = np.random.choice(adjusted_dates, size=n, replace=True, p=weights)
     return _as_py_datetimes(random_dates)
 
-def ql_date_to_pd_date(ql_date):
+def ql_date_to_pd_date(ql_date: ql.Date) -> pd.Timestamp:
     return pd.Timestamp(ql_date.year(), ql_date.month(), ql_date.dayOfMonth())
 
-def _rescale_curr_and_init(balances, init_balances, target_sum):
+def _rescale_curr_and_init(
+    balances: list[float],
+    init_balances: list[float],
+    target_sum: float,
+) -> tuple[list[float], list[float]]:
     b = np.asarray(balances, dtype=float)
     i = np.asarray(init_balances, dtype=float)
     bsum = float(b.sum())
@@ -178,7 +229,14 @@ def _rescale_curr_and_init(balances, init_balances, target_sum):
         i[-1] += diff * (i[-1] / b[-1])    # zachowaj proporcję initial/current na ostatniej pozycji
     return i.tolist(), b.tolist()
 
-def initial_from_current(curr_amt, amort_type, start_date, report_date, maturity, annual_rate):
+def initial_from_current(
+    curr_amt: float,
+    amort_type: int,
+    start_date: Any,
+    report_date: Any,
+    maturity: str,
+    annual_rate: float,
+) -> float:
     """Wyznacz initial z current (bullet=0, annuity=1, constant=2)."""
     start_date = pd.Timestamp(start_date)
     report_date = pd.Timestamp(report_date)
@@ -204,7 +262,14 @@ def initial_from_current(curr_amt, amort_type, start_date, report_date, maturity
         return float(curr_amt)  # fallback, żeby nie dzielić przez 0
     return float(curr_amt) / k
 
-def current_from_initial(init_amt, amort_type, start_date, report_date, maturity, annual_rate):
+def current_from_initial(
+    init_amt: float,
+    amort_type: int,
+    start_date: Any,
+    report_date: Any,
+    maturity: str,
+    annual_rate: float,
+) -> float:
     """Wyznacz bieżący pozostały kapitał (current) z nominału (initial)
     dla amortyzacji: bullet=0, annuity=1, constant=2.
     """
@@ -248,23 +313,23 @@ class ProductGen(ABC):
         self.fwd_curve = fwd_curve
 
     @abstractmethod
-    def gen_set_of_transactions(self):
+    def gen_set_of_transactions(self) -> pd.DataFrame:
         pass
 
     @abstractmethod
-    def add_parameters(self, set_of_transactions):
+    def add_parameters(self, set_of_transactions: pd.DataFrame) -> pd.DataFrame:
         pass
 
     @classmethod
     @abstractmethod
-    def create_from_row(cls, row):
+    def create_from_row(cls, row: pd.Series) -> ProductGen:
         pass
 
-    def build_result_df(self):
+    def build_result_df(self) -> pd.DataFrame:
         transactions = self.gen_set_of_transactions()
         return self.add_parameters(transactions)
-    
-    def add_ids(self, n):
+
+    def add_ids(self, n: int) -> list[str]:
         side_code = config.bs_side_map.get(self.bs_side)
         rate_code = config.rate_type_map.get(self.rate_type, "0")
         return [f"{side_code}{self.product_code:02d}{rate_code}{i:07d}" for i in range(1, n+1)]
@@ -1030,7 +1095,7 @@ class ProductFactory:
     }
 
     @classmethod
-    def create(cls, row):
+    def create(cls, row: pd.Series) -> ProductGen:
         ptype = row["product_name"]
         product_class = cls.class_registry[ptype]
         return product_class.create_from_row(row)

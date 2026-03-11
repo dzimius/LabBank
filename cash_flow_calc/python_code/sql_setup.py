@@ -1,7 +1,13 @@
+from __future__ import annotations
+
+from typing import Generator, Iterator, Optional
+
 import pandas as pd
-import config
-from sqlalchemy import create_engine,event, MetaData, Table, Column
+from sqlalchemy import create_engine, event, MetaData, Table, Column
 from sqlalchemy import Integer, String, ForeignKey, Date, text, DECIMAL
+from sqlalchemy.engine import Engine
+
+import config
 
 
 engine = create_engine(
@@ -76,7 +82,13 @@ def reset_data(mode: int, report_date=None) -> None:
 
 
 
-def sql_get_params(engine, table_name, columns, chunksize=50_000, schema="dbo"):
+def sql_get_params(
+    engine: Engine,
+    table_name: str,
+    columns: list[str],
+    chunksize: int = 50_000,
+    schema: str = "dbo",
+) -> Iterator[pd.DataFrame]:
     where_clauses = []
     params = []
 
@@ -87,7 +99,7 @@ def sql_get_params(engine, table_name, columns, chunksize=50_000, schema="dbo"):
 
     return pd.read_sql_query(query, engine, params=tuple(params), chunksize=chunksize)
 
-def load_sched_params(table, cols):
+def load_sched_params(table: str, cols: list[str]) -> Iterator[pd.DataFrame]:
     chunks_loans = sql_get_params(
         engine=engine,
         table_name=table,
@@ -113,7 +125,12 @@ def write_df(df: pd.DataFrame, table: str, schema: str = "dbo", chunksize: int =
     )
 
 
-def iter_schedule_batches(engine, table_name, batch_size=1000, schema="dbo"):
+def iter_schedule_batches(
+    engine: Engine,
+    table_name: str,
+    batch_size: int = 1000,
+    schema: str = "dbo",
+) -> Generator[pd.DataFrame, None, None]:
     query = f"""
     WITH ids AS (
         SELECT DISTINCT schedule_id,
@@ -136,7 +153,7 @@ def iter_schedule_batches(engine, table_name, batch_size=1000, schema="dbo"):
         yield df
         start += batch_size
 
-def sql_get_uniq_curves(tables, curve_type):
+def sql_get_uniq_curves(tables: list[str], curve_type: str) -> pd.DataFrame:
     union_parts = []
 
     for table in tables:
@@ -157,7 +174,7 @@ def sql_get_uniq_curves(tables, curve_type):
     """
     return pd.read_sql_query(query, engine)
 
-def sql_select_specific_curve(curve_name):
+def sql_select_specific_curve(curve_name: str) -> pd.DataFrame:
     query = text("""
         SELECT curve_name, n_days, year_frac, zero_rate, d_f
         FROM curves
@@ -170,7 +187,7 @@ def sql_select_specific_curve(curve_name):
         params={"report_date": config.report_date, "curve_name": curve_name}
     )
 
-def sql_select_fixings():
+def sql_select_fixings() -> pd.DataFrame:
     query = """
     SELECT *  FROM fixings
     """

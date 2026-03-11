@@ -1,9 +1,13 @@
+from __future__ import annotations
+
+import re
+from typing import Optional
+
 import numpy as np
+import pandas as pd
 from sqlalchemy import create_engine, MetaData, Table, Column, text
 from sqlalchemy import Integer, String, ForeignKey, Date
 from sqlalchemy.dialects.mssql import DECIMAL
-import pandas as pd
-import re
 
 engine = create_engine(
     "mssql+pyodbc://maciek_d/bank_gen"
@@ -125,7 +129,7 @@ TABLES = {
     "equity": Equity,
 }
 
-def append_df_to_table(df: pd.DataFrame, table_name: str):
+def append_df_to_table(df: pd.DataFrame, table_name: str) -> None:
     """Dopasuj df do schematu tabeli i wykonaj append. Brakujące kolumny -> NULL."""
     tbl = TABLES[table_name]
     # kolejność i lista kolumn wg tabeli:
@@ -154,7 +158,7 @@ def append_df_to_table(df: pd.DataFrame, table_name: str):
 # ------------------------------------------------------------
 # (A) Zbiorcza 'transactions' — tylko id i balance_amt
 
-def add_client_id(transactions_df: pd.DataFrame, seed:None, pct: float = 0.4) -> pd.DataFrame:
+def add_client_id(transactions_df: pd.DataFrame, seed: Optional[int] = None, pct: float = 0.4) -> pd.DataFrame:
     """
     1) Nadaje unikalne client_id każdemu wierszowi.
     2) loans -> current_account: kopiuje client_id z loanów do części CA.
@@ -214,7 +218,7 @@ def add_client_id(transactions_df: pd.DataFrame, seed:None, pct: float = 0.4) ->
 
     return df
 
-def append_transactions(transactions_df):
+def append_transactions(transactions_df: pd.DataFrame) -> None:
     needed = ["transaction_id", "product_code", "product_name", "bs_side", "balance_amt", "currency",
               "client_id", "client_type_id"]
     missing = [c for c in needed if c not in transactions_df.columns]
@@ -224,7 +228,7 @@ def append_transactions(transactions_df):
     transactions_df = add_client_id(transactions_df)
     append_df_to_table(transactions_df[needed], "transactions")
 
-def assign_client_ids(transactions_df: pd.DataFrame, seed:None) -> pd.DataFrame:
+def assign_client_ids(transactions_df: pd.DataFrame, seed: Optional[int] = None) -> pd.DataFrame:
     """Nadaje unikalne client_id, łączy loans ↔ current_account,
     a dla 40% pozostałych CA losowo zmienia produkt na TD/SA (50/50)."""
     if seed is not None:

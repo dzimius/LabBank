@@ -1,10 +1,15 @@
-import pandas as pd
-import QuantLib as ql
-import numpy as np
+from __future__ import annotations
+
 import datetime
 from bisect import bisect_left
-import sql_setup
+from typing import Any, Optional
+
+import numpy as np
+import pandas as pd
+import QuantLib as ql
+
 import config
+import sql_setup
 
 dict_cols_loan_fin_inst = {
     'loans_sched_id': ['schedule_id', 'currency', 'start_date', 'maturity_date', 'payment_freq',
@@ -21,7 +26,7 @@ dict_nms_loan_fin_inst = {
 sched_tables = ['loans_sched_id', 'fin_inst_sched_id']
 
 
-def get_calendar_from_currency(curr:str) -> object:
+def get_calendar_from_currency(curr: str) -> ql.Calendar:
     currency_to_calendar = {
         'PLN': ql.Poland(),
         'EUR': ql.TARGET(),
@@ -29,7 +34,7 @@ def get_calendar_from_currency(curr:str) -> object:
     }
     return currency_to_calendar.get(curr, ql.TARGET())
 
-def get_dc_conv_from_str(b:str) -> object:
+def get_dc_conv_from_str(b: str) -> ql.DayCounter:
     dc_conv_from_str = {
         'ACT/365': ql.Actual365Fixed(),
         'ACT/ACT': ql.ActualActual(ql.ActualActual.ISDA),
@@ -37,7 +42,7 @@ def get_dc_conv_from_str(b:str) -> object:
     }
     return dc_conv_from_str.get(b, ql.ActualActual(ql.ActualActual.ISDA))
 
-def get_dc_from_currency(curr:str) -> object:
+def get_dc_from_currency(curr: str) -> ql.DayCounter:
     currency_to_dc_conv = {
         'PLN': ql.Actual365Fixed(),
         'USD': ql.ActualActual(ql.ActualActual.ISDA),
@@ -56,7 +61,7 @@ def tenor_to_months(tenor: str) -> int:
 
     raise ValueError(f"Unsupported tenor: {tenor}")
 
-def freeze_fixing_dates(fixing_dates, payment_freq: str, fixing_freq: str):
+def freeze_fixing_dates(fixing_dates: list[ql.Date], payment_freq: str, fixing_freq: str) -> list[ql.Date]:
     pay_m = tenor_to_months(payment_freq)
     fix_m = tenor_to_months(fixing_freq)
 
@@ -175,12 +180,12 @@ def freeze_fixing_dates(fixing_dates, payment_freq: str, fixing_freq: str):
 #     return result_df
 
 def gen_orgin_sched_loan_fin_inst(
-    row,
-    report_date,
-    disc_df,   # pd.Series MultiIndex: (curve_name, node_date) -> d_f
-    fwd_df,    # pd.Series MultiIndex: (curve_name, fixing_freq, node_date) -> fwd_rt
-    fix_df,    # pd.Series MultiIndex: (fixing_date, rate_index) -> rate
-):
+    row: Any,
+    report_date: pd.Timestamp,
+    disc_df: pd.Series,   # MultiIndex: (curve_name, node_date) -> d_f
+    fwd_df: pd.Series,    # MultiIndex: (curve_name, fixing_freq, node_date) -> fwd_rt
+    fix_df: pd.Series,    # MultiIndex: (fixing_date, rate_index) -> rate
+) -> Optional[pd.DataFrame]:
     r_dt_ql = ql.Date.from_date(report_date)
 
     cal = get_calendar_from_currency(row.currency)
@@ -278,7 +283,14 @@ def gen_orgin_sched_loan_fin_inst(
     result_df = result_df.drop(columns=["join_dt"])
     return result_df
 
-def payment_dates_advance_n(start_date, end_date, freq, calendar, bdc, eom=False):
+def payment_dates_advance_n(
+    start_date: ql.Date,
+    end_date: ql.Date,
+    freq: ql.Period,
+    calendar: ql.Calendar,
+    bdc: int,
+    eom: bool = False,
+) -> list[ql.Date]:
     freq_in_months = freq.length() * (freq.units() == ql.Years and 12 or 1)
 
     diff_in_months = (
@@ -305,20 +317,20 @@ def ql_column_to_datetime(series: pd.Series) -> pd.Series:
         errors="coerce",
     )
 
-def get_unique_curves():
+def get_unique_curves() -> pd.DataFrame:
     uniq_discount_curves = sql_setup.sql_get_uniq_curves(['loans_sched_id', 'fin_inst_sched_id'], 'disc_curve')
     uniq_forward_curves = sql_setup.sql_get_uniq_curves(['loans_sched_id', 'fin_inst_sched_id'], 'fwd_curve')
     result_df = pd.concat([uniq_discount_curves, uniq_forward_curves])
     return result_df
 
-def get_interpolated_curves(row):
+def get_interpolated_curves(row: pd.Series) -> pd.DataFrame:
     if row['curve_type'] == 'fwd_curve':
         curve_df = get_daily_intrpl_curve(row['curve_name'], row['fixing_freq'])
     elif row['curve_type'] == 'disc_curve':
         curve_df = get_daily_intrpl_curve(row['curve_name'])
     return curve_df
 
-def get_daily_intrpl_curve(curve_name, fixing_freq=None):
+def get_daily_intrpl_curve(curve_name: str, fixing_freq: Optional[str] = None) -> pd.DataFrame:
     df_sql = sql_setup.sql_select_specific_curve(curve_name)
     x_s = df_sql['n_days']
     y_s = df_sql['d_f']
@@ -346,7 +358,7 @@ def get_daily_intrpl_curve(curve_name, fixing_freq=None):
         df_intpl = df_intpl.dropna(subset=['fwd_rt'])
     return df_intpl
 
-def interpolate_d_f(x, y, report_date):
+def interpolate_d_f(x: np.ndarray, y: np.ndarray, report_date: pd.Timestamp) -> pd.DataFrame:
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
 
