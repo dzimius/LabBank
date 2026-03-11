@@ -12,17 +12,18 @@ import config
 import sql_setup
 
 dict_cols_loan_fin_inst = {
-    # balance_amt / init_balance_amt / amort_type needed for vectorized payment computation
+    # balance_amt / init_balance_amt / amort_type pulled for vectorized payment computation
     'loans_sched_id': ['schedule_id', 'currency', 'start_date', 'maturity_date', 'payment_freq',
                        'fixing_freq', 'dc_conv', 'b_day_conv', "rate_index", 'disc_curve', 'fwd_curve',
                        'balance_amt', 'init_balance_amt', 'amort_type'],
     'fin_inst_sched_id': ['schedule_id', 'currency', 'start_date', 'maturity_date', 'payment_freq',
-                          'fixing_freq', 'dc_conv', 'b_day_conv', "rate_index", 'disc_curve', 'fwd_curve'],
+                          'fixing_freq', 'dc_conv', 'b_day_conv', "rate_index", 'disc_curve', 'fwd_curve',
+                          'balance_amt', 'amort_type'],
 }
 
 dict_nms_loan_fin_inst = {
-    'loans_sched_id': 'loan_sched_dates',
-    'fin_inst_sched_id': 'fin_inst_sched_dates',
+    'loans_sched_id': 'loan_orig_sched',
+    'fin_inst_sched_id': 'fin_inst_orig_sched',
 }
 
 sched_tables = ['loans_sched_id', 'fin_inst_sched_id']
@@ -387,21 +388,23 @@ def interpolate_d_f(x: np.ndarray, y: np.ndarray, report_date: pd.Timestamp) -> 
     })
 
 
-def compute_loan_payments_vectorized(
+def compute_amort_schedule_vectorized(
     sched_df: pd.DataFrame,
     sched_params_df: pd.DataFrame,
 ) -> pd.DataFrame:
     """Vectorized computation of outstanding balance, interest and capital payments.
 
-    No Python loop over schedule IDs — uses groupby transforms, cumcount and
-    numpy broadcasting so the entire batch is processed in a single pass.
+    Shared by loans and financial instruments (bonds).  No Python loop over
+    schedule IDs — uses groupby transforms, cumcount and numpy broadcasting so
+    the entire batch is processed in a single pass.
 
     Amortization types (amort_type column in sched_params_df):
-        0 – bullet:            constant outstanding, full capital repaid at maturity
-        1 – annuity:           fixed total payment; reference rate = first fwd_rt of group
-        2 – constant amort:    equal principal instalment each period
+        0 – bullet:         constant outstanding, full capital repaid at maturity
+        1 – annuity:        fixed total payment; reference rate = first fwd_rt of
+                            group × mean(cf_yf) so r_const is uniform per schedule
+        2 – constant amort: equal principal instalment each period
 
-    Interest payment always uses the actual forward rate from the curve:
+    Interest uses the actual per-period forward rate:
         int_pmt = outstanding_bal * fwd_rt * cf_yf
 
     Parameters
@@ -410,14 +413,14 @@ def compute_loan_payments_vectorized(
         Expanded schedule dates (output of gen_orgin_sched_loan_fin_inst),
         must contain: schedule_id, cf_end_dt, cf_yf, fwd_rt.
     sched_params_df:
-        One row per schedule_id (from loans_sched_id chunk),
-        must contain: schedule_id, balance_amt, init_balance_amt, amort_type.
+        One row per schedule_id (from *_sched_id chunk),
+        must contain: schedule_id, balance_amt, amort_type.
 
     Returns
     -------
     sched_df with three new columns: outstanding_bal, int_pmt, capital_pmt.
     """
-    PARAM_COLS = ['schedule_id', 'balance_amt', 'init_balance_amt', 'amort_type']
+    PARAM_COLS = ['schedule_id', 'balance_amt', 'amort_type']
     df = sched_df.merge(sched_params_df[PARAM_COLS], on='schedule_id', how='left')
     df = df.sort_values(['schedule_id', 'cf_end_dt']).reset_index(drop=True)
 
@@ -495,7 +498,7 @@ def compute_loan_payments_vectorized(
     # ── Interest for all amort types (actual forward rate, not reference) ────
     df['int_pmt'] = df['outstanding_bal'] * df['fwd_rt'] * df['cf_yf']
 
-    df = df.drop(columns=['_rank', '_n', '_is_last', 'balance_amt', 'init_balance_amt', 'amort_type'])
+    df = df.drop(columns=['_rank', '_n', '_is_last', 'balance_amt', 'amort_type'])
     return df
 
 
