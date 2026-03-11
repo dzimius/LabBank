@@ -448,34 +448,45 @@ def compute_loan_payments_vectorized(
     # ── ANNUITY (amort_type == 1) ─────────────────────────────────────────────
     m1 = df['amort_type'] == 1
     if m1.any():
-        # Reference rate: first fwd_rt of each group (state at report date)
-        r_ref = df[m1].groupby('schedule_id')['fwd_rt'].transform('first')
-        r = (r_ref * df.loc[m1, 'cf_yf']).to_numpy(dtype=float)
+        # Reference rate: first fwd_rt of each group (state at report date).
+        r_ref = df[m1].groupby('schedule_id')['fwd_rt'].transform('first').to_numpy(dtype=float)
+
+        # IMPORTANT: the closed-form O(k) = B*(1+r)^k - A*((1+r)^k-1)/r is only
+        # exact when r is CONSTANT across all periods.  cf_yf can differ slightly
+        # period-to-period (day-count differences), so we use the group average to
+        # get one constant periodic rate per schedule_id.  This ensures
+        #   O(k) - capital_pmt(k)  ==  O(k+1)
+        # for every period.  int_pmt still uses the actual per-period fwd_rt * cf_yf.
+        avg_yf = df[m1].groupby('schedule_id')['cf_yf'].transform('mean').to_numpy(dtype=float)
+        r_const = r_ref * avg_yf          # one constant rate per group
+
         n = df.loc[m1, '_n'].to_numpy(dtype=float)
         B = df.loc[m1, 'balance_amt'].to_numpy(dtype=float)
         k = df.loc[m1, '_rank'].to_numpy(dtype=float)
 
-        safe_r = np.where(r > 1e-10, r, 1e-10)
+        safe_r = np.where(r_const > 1e-10, r_const, 1e-10)
 
-        # Fixed annuity payment computed from current balance and reference rate
+        # Fixed annuity payment using constant periodic rate
         annuity_pmt = np.where(
-            r > 1e-10,
+            r_const > 1e-10,
             B * safe_r / (1.0 - (1.0 + safe_r) ** (-n)),
             B / n,
         )
 
-        # Outstanding at start of period k (closed-form cumulative formula)
+        # Outstanding at start of period k — closed-form is now exact because r_const
+        # is the same value used in the annuity_pmt formula above.
         # O(k) = B*(1+r)^k - A*((1+r)^k - 1)/r
         factor = (1.0 + safe_r) ** k
         outstanding = np.where(
-            r > 1e-10,
+            r_const > 1e-10,
             B * factor - annuity_pmt * (factor - 1.0) / safe_r,
             B * (1.0 - k / n),
         )
         outstanding = np.maximum(outstanding, 0.0)  # numerical guard
 
-        # Capital = annuity_pmt minus interest at the reference rate
-        capital = annuity_pmt - outstanding * r
+        # Capital = annuity_pmt - interest at the SAME constant rate used above.
+        # This guarantees:  O(k) - capital(k)  =  O(k)*(1+r) - A  =  O(k+1)
+        capital = annuity_pmt - outstanding * r_const
         capital = np.maximum(capital, 0.0)  # guard against floating-point drift
 
         df.loc[m1, 'outstanding_bal'] = outstanding
