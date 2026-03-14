@@ -77,7 +77,8 @@ Column("report_date", Date, nullable=False),
     Column("dc_conv", String(7), nullable=True),
     Column("b_day_conv", String(25), nullable=True),
     Column("disc_curve", String(20), nullable=True),
-    Column("fwd_curve", String(20), nullable=True)
+    Column("fwd_curve", String(20), nullable=True),
+    Column("schedule_id", Integer, nullable=True)
 )
 
 FinancialInstruments = Table(

@@ -32,6 +32,11 @@ Loan_sched_d = Table(
     Column("outstanding_bal", DECIMAL(18, 2), nullable=True),
     Column("int_pmt", DECIMAL(18, 2), nullable=True),
     Column("capital_pmt", DECIMAL(18, 2), nullable=True),
+    Column("annuity_pmt", DECIMAL(18, 2), nullable=True),
+    Column("outstanding_adj", DECIMAL(18, 2), nullable=True),
+    Column("capital_adj", DECIMAL(18, 2), nullable=True),
+    Column("prepayment_pmt", DECIMAL(18, 2), nullable=True),
+    Column("int_adj", DECIMAL(18, 2), nullable=True),
     schema="dbo",
 )
 
@@ -48,8 +53,28 @@ Fin_inst_sched_d = Table(
     Column("outstanding_bal", DECIMAL(18, 2), nullable=True),
     Column("int_pmt", DECIMAL(18, 2), nullable=True),
     Column("capital_pmt", DECIMAL(18, 2), nullable=True),
+    Column("annuity_pmt", DECIMAL(18, 2), nullable=True),
+    Column("outstanding_adj", DECIMAL(18, 2), nullable=True),
+    Column("capital_adj", DECIMAL(18, 2), nullable=True),
+    Column("prepayment_pmt", DECIMAL(18, 2), nullable=True),
+    Column("int_adj", DECIMAL(18, 2), nullable=True),
     schema="dbo",
 )
+Deposit_sched_d = Table(
+    "deposit_orig_sched", metadata,
+    Column("schedule_id", String(8), primary_key=True, nullable=False),
+    Column("fixing_dt", Date, nullable=False),
+    Column("cf_start_dt", Date, primary_key=True, nullable=False),
+    Column("cf_end_dt", Date, nullable=False),
+    Column("cf_yf", DECIMAL(18, 6), nullable=False),
+    Column("d_f", DECIMAL(18, 6), nullable=True),
+    Column("fwd_rt", DECIMAL(18, 6), nullable=True),
+    Column("outstanding_bal", DECIMAL(18, 2), nullable=True),
+    Column("int_pmt", DECIMAL(18, 2), nullable=True),
+    Column("capital_pmt", DECIMAL(18, 2), nullable=True),
+    schema="dbo",
+)
+
 metadata.create_all(engine)
 
 
@@ -61,6 +86,7 @@ def reset_data(mode: int, report_date=None) -> None:
     tables = [
         "loan_orig_sched",
         "fin_inst_orig_sched",
+        "deposit_orig_sched",
     ]
 
     with engine.begin() as conn:
@@ -198,5 +224,13 @@ def sql_select_fixings() -> pd.DataFrame:
     SELECT *  FROM fixings
     """
     return pd.read_sql_query(query, engine)
+
+def sql_select_models_loan() -> pd.DataFrame:
+    query = text("""
+        SELECT product_code, tenor, prep_rate
+        FROM models_loan
+        WHERE report_date = :report_date
+    """)
+    return pd.read_sql_query(query, engine, params={"report_date": config.report_date})
 
 

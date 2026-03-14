@@ -10,18 +10,24 @@ import QuantLib as ql
 
 dict_tbl_sched_id = {
     'loans': 'loans_sched_id',
-    'financial_instruments': 'fin_inst_sched_id'
+    'financial_instruments': 'fin_inst_sched_id',
+    'deposits': 'deposits_sched_id',
 }
 dict_tbl_sched_id_cols = {
     # amort_type included so each schedule_id maps to a single amortization type
+    # product_code included for loans so prepayment model can be joined in CF calc
     'loans': ["currency", "start_date", "maturity_date", "payment_freq", "fixing_freq",
-              "dc_conv", "b_day_conv", "rate_index", "disc_curve", "fwd_curve", "amort_type"],
+              "dc_conv", "b_day_conv", "rate_index", "disc_curve", "fwd_curve", "amort_type", "product_code"],
     'financial_instruments': ["currency", "start_date", "maturity_date", "payment_freq", "fixing_freq",
                               "dc_conv", "b_day_conv", "rate_index", "disc_curve", "fwd_curve", "amort_type"],
+    # deposits: grouped by contract params + product_code for separate behavioural models
+    # NULL maturity_date = non-maturity (overnight)
+    'deposits': ["product_code", "currency", "start_date", "maturity_date", "dc_conv", "b_day_conv", "disc_curve", "fwd_curve"],
 }
 dict_tbl_sched_sum_cols = {
     'loans': ["init_balance_amt", "balance_amt"],
-    'financial_instruments': ["balance_amt"]
+    'financial_instruments': ["balance_amt"],
+    'deposits': ["balance_amt"],
 }
 
 def get_calendar_from_currency(curr: str) -> ql.Calendar:
