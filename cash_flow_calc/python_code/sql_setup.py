@@ -298,7 +298,7 @@ def _tenor_bucket(days: int) -> str:
     """Map number of days from report_date to tenor bucket label."""
     if days <= 1:
         return "1D"
-    months = math.ceil(days / 30.4375)
+    months = max(1, round(days / 30.4375))
     if months > 360:
         return ">30Y"
     return f"{months}M"
