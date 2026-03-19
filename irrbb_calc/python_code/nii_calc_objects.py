@@ -56,11 +56,11 @@ def compute_nii(
     """
     df = ir_gap_beh.copy()
 
-    # Attach current account gap (floored) per row, matched by (currency, cf_end_dt)
+    # Attach current account gap (floored) per row, matched by (currency, bs_side, cf_end_dt)
     if ca_gap is not None:
         df = df.merge(
-            ca_gap[["currency", "cf_end_dt", "ca_gap_cf"]],
-            on=["currency", "cf_end_dt"],
+            ca_gap[["currency", "bs_side", "cf_end_dt", "ca_gap_cf"]],
+            on=["currency", "bs_side", "cf_end_dt"],
             how="left",
         )
         df["ca_gap_cf"] = df["ca_gap_cf"].fillna(0.0)

@@ -25,19 +25,19 @@ def load_ir_gap_beh() -> pd.DataFrame:
 
 
 def load_ir_gap_ca() -> pd.DataFrame:
-    """Load current account (product_code=6000) repricing gap from deposit behavioral CFs.
+    """Load current account (product_code=6000) repricing gap from ir_gap_beh_a.
 
-    Returns (currency, cf_end_dt, ca_gap_cf) with same sign convention as ir_gap_beh:
-    ca_gap_cf = -capital_pmt  (negative for L-side deposits).
+    Reads directly from the analytical gap table (already aggregated by tenor bucket,
+    gap_cf = capital_pmt + int_pmt with sign applied) so values match ir_gap_beh exactly.
+    Returns (currency, bs_side, cf_end_dt, ca_gap_cf).
     Used to apply floor = 0% on the down shock in NII sensitivity.
     """
     query = text("""
-        SELECT s.currency, d.cf_end_dt,
-               SUM(-d.capital_pmt) AS ca_gap_cf
-        FROM cf.deposit_beh d
-        JOIN sched.deposits s ON d.schedule_id = s.schedule_id
-        WHERE s.product_code = 6000
-        GROUP BY s.currency, d.cf_end_dt
+        SELECT currency, bs_side, cf_end_dt,
+               SUM(gap_cf) AS ca_gap_cf
+        FROM irrbb.ir_gap_beh_a
+        WHERE product_name = '6000'
+        GROUP BY currency, bs_side, cf_end_dt
     """)
     df = pd.read_sql_query(query, engine)
     df["cf_end_dt"] = pd.to_datetime(df["cf_end_dt"])
