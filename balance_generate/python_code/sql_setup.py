@@ -18,11 +18,21 @@ engine = create_engine(
 )
 
 
-metadata = MetaData(schema=None)   # np. schema="dbo" jeśli używasz
+metadata = MetaData(schema=None)
+
+
+def _ensure_schemas() -> None:
+    """Create schemat schema if it doesn't exist."""
+    with engine.begin() as conn:
+        conn.execute(text(
+            "IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = 'schemat') "
+            "EXEC('CREATE SCHEMA [schemat]');"
+        ))
+
 
 Transactions = Table(
     "transactions", metadata,
-Column("report_date", Date, nullable=False),
+    Column("report_date", Date, nullable=False),
     Column("transaction_id", String(13), primary_key=True, nullable=False),
     Column("product_code", String(4), nullable=False),
     Column("product_name", String(64), nullable=False),
@@ -30,13 +40,14 @@ Column("report_date", Date, nullable=False),
     Column("balance_amt", DECIMAL(18, 2), nullable=False),
     Column("currency", String(3), nullable=False),
     Column("client_id", Integer, nullable=False),
-    Column("client_type_id", Integer, nullable=False)
+    Column("client_type_id", Integer, nullable=False),
+    schema="dbo",
 )
 
 Loans = Table(
     "loans", metadata,
-Column("report_date", Date, nullable=False),
-    Column("transaction_id", String(13), ForeignKey('transactions.transaction_id'), nullable=False),
+    Column("report_date", Date, nullable=False),
+    Column("transaction_id", String(13), ForeignKey('dbo.transactions.transaction_id'), nullable=False),
     Column("product_code", String(4), nullable=False),
     Column("product_name", String(64), nullable=False),
     Column("bs_side", String(1), nullable=False),
@@ -55,15 +66,18 @@ Column("report_date", Date, nullable=False),
     Column("amort_type", String(1), nullable=True),
     Column("init_balance_amt", DECIMAL(18, 2), nullable=True),
     Column("margin", DECIMAL(6, 4), nullable=True),
+    Column("index_rt", DECIMAL(18, 6), nullable=True),
+    Column("client_rt", DECIMAL(18, 6), nullable=True),
     Column("disc_curve", String(20), nullable=True),
     Column("fwd_curve", String(20), nullable=True),
-    Column("schedule_id", Integer, nullable=True)
+    Column("schedule_id", Integer, nullable=True),
+    schema="schemat",
 )
 
 Deposits = Table(
     "deposits", metadata,
-Column("report_date", Date, nullable=False),
-    Column("transaction_id", String(13), ForeignKey('transactions.transaction_id'), nullable=False),
+    Column("report_date", Date, nullable=False),
+    Column("transaction_id", String(13), ForeignKey('dbo.transactions.transaction_id'), nullable=False),
     Column("product_code", String(4), nullable=False),
     Column("product_name", String(64), nullable=False),
     Column("bs_side", String(1), nullable=False),
@@ -78,13 +92,16 @@ Column("report_date", Date, nullable=False),
     Column("b_day_conv", String(25), nullable=True),
     Column("disc_curve", String(20), nullable=True),
     Column("fwd_curve", String(20), nullable=True),
-    Column("schedule_id", Integer, nullable=True)
+    Column("index_rt", DECIMAL(18, 6), nullable=True),
+    Column("client_rt", DECIMAL(18, 6), nullable=True),
+    Column("schedule_id", Integer, nullable=True),
+    schema="schemat",
 )
 
 FinancialInstruments = Table(
     "financial_instruments", metadata,
-Column("report_date", Date, nullable=False),
-    Column("transaction_id", String(13), ForeignKey('transactions.transaction_id'), nullable=False),
+    Column("report_date", Date, nullable=False),
+    Column("transaction_id", String(13), ForeignKey('dbo.transactions.transaction_id'), nullable=False),
     Column("product_code", String(4), nullable=False),
     Column("product_name", String(64), nullable=False),
     Column("bs_side", String(1), nullable=False),
@@ -102,24 +119,22 @@ Column("report_date", Date, nullable=False),
     Column("b_day_conv", String(25), nullable=True),
     Column("disc_curve", String(20), nullable=True),
     Column("fwd_curve", String(20), nullable=True),
-    Column("schedule_id", Integer, nullable=True)
+    Column("index_rt", DECIMAL(18, 6), nullable=True),
+    Column("client_rt", DECIMAL(18, 6), nullable=True),
+    Column("schedule_id", Integer, nullable=True),
+    schema="schemat",
 )
 
 Equity = Table(
     "equity", metadata,
-Column("report_date", Date, nullable=False),
-    Column("transaction_id", String(13), ForeignKey('transactions.transaction_id'), nullable=False),
+    Column("report_date", Date, nullable=False),
+    Column("transaction_id", String(13), ForeignKey('dbo.transactions.transaction_id'), nullable=False),
     Column("product_code", String(4), nullable=False),
     Column("product_name", String(64), nullable=False),
     Column("balance_amt", DECIMAL(18, 2), nullable=False),
-    Column("currency", String(3), nullable=True)
+    Column("currency", String(3), nullable=True),
+    schema="schemat",
 )
-
-# Clients = Table(
-#     "clients", metadata,
-# Column("client_id", String(13), ForeignKey('transactions.transaction_id'), nullable=False),
-#     Column("product_code", String(4), nullable=False),
-#     Column("product_name", String(64), nullable=False))
 
 # Rejestr tabel do wygodnego użycia
 TABLES = {
@@ -133,6 +148,7 @@ TABLES = {
 def append_df_to_table(df: pd.DataFrame, table_name: str) -> None:
     """Dopasuj df do schematu tabeli i wykonaj append. Brakujące kolumny -> NULL."""
     tbl = TABLES[table_name]
+    schema = tbl.schema
     # kolejność i lista kolumn wg tabeli:
     cols = [c.name for c in tbl.columns]
     # dołóż brakujące kolumny (NaN -> później NULL)
@@ -148,6 +164,7 @@ def append_df_to_table(df: pd.DataFrame, table_name: str) -> None:
     df2.to_sql(
         table_name,
         engine,
+        schema=schema,
         if_exists="append",
         index=False,
         chunksize=10_000,
@@ -270,33 +287,32 @@ def reset_data(mode: int, report_date=None) -> None:
     mode=0 -> drop + recreate tabele
     mode=1 -> DELETE specific report_date data
     """
-    tables = [
-        "loans",
-        "deposits",
-        "financial_instruments",
-        "equity",
-        "transactions",
-    ]
+    child_tables = ["loans", "deposits", "financial_instruments", "equity"]
 
+    _ensure_schemas()
     with engine.begin() as conn:
         if mode == 0:
-            for t in tables:
-                conn.execute(
-                    text(
-                        f"IF OBJECT_ID('dbo.{t}', 'U') IS NOT NULL "
-                        f"DROP TABLE dbo.{t};"
-                    )
-                )
+            for t in child_tables:
+                conn.execute(text(
+                    f"IF OBJECT_ID('schemat.{t}', 'U') IS NOT NULL DROP TABLE schemat.{t};"
+                ))
+            conn.execute(text(
+                "IF OBJECT_ID('dbo.transactions', 'U') IS NOT NULL DROP TABLE dbo.transactions;"
+            ))
             metadata.create_all(bind=conn, checkfirst=False)
 
         elif mode == 1:
             if report_date is None:
                 raise ValueError("For mode=1 report_date is needed")
 
-            for t in tables:
+            for t in child_tables:
                 conn.execute(
-                    text(f"DELETE FROM dbo.{t} WHERE report_date = :rd"),
+                    text(f"DELETE FROM schemat.{t} WHERE report_date = :rd"),
                     {"rd": report_date},
                 )
+            conn.execute(
+                text("DELETE FROM dbo.transactions WHERE report_date = :rd"),
+                {"rd": report_date},
+            )
         else:
             raise ValueError("Mode should be 0 or 1")

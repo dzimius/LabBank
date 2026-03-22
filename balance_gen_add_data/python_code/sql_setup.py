@@ -19,7 +19,24 @@ engine = create_engine(
 )
 
 
-metadata = MetaData(schema=None)   # np. schema="dbo" jeśli używasz
+metadata = MetaData(schema=None)
+
+# Schema mapping: which schema each table lives in
+TABLE_SCHEMAS: dict[str, str] = {
+    "curves":        "mkt",
+    "fixings":       "mkt",
+    "models_loan":   "bs",
+    "models_deposit":"bs",
+}
+
+def _ensure_schemas() -> None:
+    """Create mkt, bs, and sched schemas if they don't exist."""
+    for s in ("mkt", "bs", "sched"):
+        with engine.begin() as conn:
+            conn.execute(text(
+                f"IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = '{s}') "
+                f"EXEC('CREATE SCHEMA [{s}]');"
+            ))
 
 Curves = Table(
     "curves", metadata,
@@ -32,6 +49,7 @@ Curves = Table(
     Column("d_f", DECIMAL(18, 6), nullable=False),
     Column("currency", String(3), nullable=False),
     Column("curve_name", String(20), nullable=False),
+    schema="mkt",
 )
 
 Fixing = Table(
@@ -40,7 +58,8 @@ Fixing = Table(
     Column("rate_index", String(8), nullable=False),
     Column("tenor", String(4), nullable=False),
     Column("rate", DECIMAL(18, 6), nullable=False),
-    Column("currency", String(3), nullable=False)
+    Column("currency", String(3), nullable=False),
+    schema="mkt",
 )
 
 Loan_mod = Table(
@@ -48,7 +67,8 @@ Loan_mod = Table(
     Column("report_date", Date, nullable=False),
     Column("product_code", String(4), nullable=False),
     Column("tenor", String(4), nullable=False),
-    Column("prep_rate", DECIMAL(18, 2), nullable=False)
+    Column("prep_rate", DECIMAL(18, 2), nullable=False),
+    schema="bs",
 )
 
 Depo_mod = Table(
@@ -56,7 +76,8 @@ Depo_mod = Table(
     Column("report_date", Date, nullable=False),
     Column("product_code", String(4), nullable=False),
     Column("tenor", String(4), nullable=False),
-    Column("outstanding", DECIMAL(18, 2), nullable=False)
+    Column("outstanding", DECIMAL(18, 2), nullable=False),
+    schema="bs",
 )
 
 
@@ -70,22 +91,19 @@ TABLES = {
 
 def append_df_to_table(df: pd.DataFrame, table_name: str) -> None:
     """Dopasuj df do schematu tabeli i wykonaj append. Brakujące kolumny -> NULL."""
+    schema = TABLE_SCHEMAS[table_name]
     tbl = TABLES[table_name]
-    # kolejność i lista kolumn wg tabeli:
     cols = [c.name for c in tbl.columns]
-    # dołóż brakujące kolumny (NaN -> później NULL)
     for c in cols:
         if c not in df.columns:
             df[c] = pd.NA
-    # utnij nadmiarowe kolumny i ustaw kolejność
     df2 = df[cols].copy()
-    # NaN/NaT -> None, żeby poszło jako NULL
     df2 = df2.where(pd.notnull(df2), None)
 
-    # append
     df2.to_sql(
         table_name,
         engine,
+        schema=schema,
         if_exists="append",
         index=False,
         chunksize=10_000,
@@ -100,12 +118,11 @@ def reset_data_models(mode: int, report_date: str, tables: list) -> None:
     with engine.begin() as conn:
         if mode == 0:
             for t in tables:
-                conn.execute(
-                    text(
-                        f"IF OBJECT_ID('dbo.{t}', 'U') IS NOT NULL "
-                        f"DROP TABLE dbo.{t};"
-                    )
-                )
+                schema = TABLE_SCHEMAS.get(t, "bs")
+                conn.execute(text(
+                    f"IF OBJECT_ID('{schema}.{t}', 'U') IS NOT NULL "
+                    f"DROP TABLE {schema}.{t};"
+                ))
             metadata.create_all(bind=conn, checkfirst=True)
 
         elif mode == 1:
@@ -113,22 +130,20 @@ def reset_data_models(mode: int, report_date: str, tables: list) -> None:
                 raise ValueError("Report_date is needed")
 
             for t in tables:
+                schema = TABLE_SCHEMAS.get(t, "bs")
                 conn.execute(
-                    text(f"DELETE FROM dbo.{t} WHERE report_date = :rd"),
+                    text(f"DELETE FROM {schema}.{t} WHERE report_date = :rd"),
                     {"rd": report_date},
                 )
         else:
             raise ValueError("Mode should be 0 or 1")
 
 
-def reset_data_remove_always(tables: list[str]) -> None:
+def reset_data_remove_always(schema_tables: list[str]) -> None:
+    """Accept 'schema.table' strings (e.g. 'mkt.curves')."""
     with engine.begin() as conn:
-        for t in tables:
-            conn.execute(
-                text(
-                    f"DROP TABLE IF EXISTS dbo.{t};"
-                )
-            )
+        for st in schema_tables:
+            conn.execute(text(f"DROP TABLE IF EXISTS {st};"))
 
 def create_sched_id_tbl_sql(
     engine: Engine,
@@ -136,39 +151,46 @@ def create_sched_id_tbl_sql(
     target_table: str,
     columns: list[str],
     sum_cols: Optional[list[str]] = None,
-    schema: str = "dbo",
+    avg_cols: Optional[list[str]] = None,
+    source_schema: str = "dbo",
+    target_schema: str = "bs",
 ) -> None:
     sum_cols = sum_cols or []
+    avg_cols = avg_cols or []
     cols_sql = ", ".join(columns)
     order_by_sql = ", ".join(columns)
 
-    # SUM(col) AS col
-    sum_sql = ",\n        ".join([f"SUM({c}) AS {c}" for c in sum_cols])
-    sum_select = ", " + ", ".join(sum_cols) if sum_cols else ""
+    agg_parts = (
+        [f"SUM({c}) AS {c}" for c in sum_cols]
+        + [f"AVG({c}) AS {c}" for c in avg_cols]
+    )
+    agg_sql = ",\n        ".join(agg_parts)
+    extra_cols = sum_cols + avg_cols
+    extra_select = ", " + ", ".join(extra_cols) if extra_cols else ""
 
     sql = f"""
-        DROP TABLE IF EXISTS {schema}.{target_table};
-    
+        DROP TABLE IF EXISTS {target_schema}.{target_table};
+
         WITH grp AS (
-            SELECT 
+            SELECT
                 {cols_sql}
-                {"," if sum_sql else ""}
-                {sum_sql}
-            FROM {schema}.{source_table}
+                {"," if agg_sql else ""}
+                {agg_sql}
+            FROM {source_schema}.{source_table}
             GROUP BY {cols_sql}
         ),
         grp_id AS (
             SELECT
                 DENSE_RANK() OVER (ORDER BY {order_by_sql}) AS schedule_id,
                 {cols_sql}
-                {sum_select}
+                {extra_select}
             FROM grp
         )
         SELECT
             schedule_id,
             {cols_sql}
-            {sum_select}
-        INTO {schema}.{target_table}
+            {extra_select}
+        INTO {target_schema}.{target_table}
         FROM grp_id;
         """
 
@@ -180,7 +202,8 @@ def update_schedule_id_sql(
     table_name: str,
     sched_table_name: str,
     columns: list[str],
-    schema: str = "dbo",
+    source_schema: str = "dbo",
+    sched_schema: str = "bs",
 ) -> None:
     on_sql = " AND ".join([
         f"(a.{c} = b.{c} OR (a.{c} IS NULL AND b.{c} IS NULL))"
@@ -189,8 +212,8 @@ def update_schedule_id_sql(
     sql = f"""
     UPDATE a
        SET a.schedule_id = b.schedule_id
-    FROM {schema}.{table_name} a
-    LEFT JOIN {schema}.{sched_table_name} b
+    FROM {source_schema}.{table_name} a
+    LEFT JOIN {sched_schema}.{sched_table_name} b
       ON {on_sql};
     """
 

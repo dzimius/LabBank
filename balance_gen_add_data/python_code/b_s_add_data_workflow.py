@@ -14,9 +14,10 @@ if __name__ == "__main__":
     tables = ['loans']
 
     mode = 0
+    sql_setup._ensure_schemas()
     sql_setup.reset_data_models(mode, report_date, ['models_loan', 'models_deposit'])
 
-    sql_setup.reset_data_remove_always(["curves", "fixings", "loans_sched_id", "fin_inst_sched_id"])
+    sql_setup.reset_data_remove_always(["mkt.curves", "mkt.fixings", "sched.loans", "sched.fin_inst", "sched.deposits"])
 
 ###curve generation
 ###################
@@ -45,14 +46,17 @@ if __name__ == "__main__":
             target_table=bs_objs.dict_tbl_sched_id[table],
             columns=bs_objs.dict_tbl_sched_id_cols[table],
             sum_cols=bs_objs.dict_tbl_sched_sum_cols[table],
-            schema="dbo"
+            avg_cols=bs_objs.dict_tbl_sched_avg_cols.get(table, []),
+            source_schema="schemat",
+            target_schema="sched",
         )
         sql_setup.update_schedule_id_sql(
             sql_setup.engine,
             table_name=table,
             sched_table_name=bs_objs.dict_tbl_sched_id[table],
             columns=bs_objs.dict_tbl_sched_id_cols[table],
-            schema="dbo"
+            source_schema="schemat",
+            sched_schema="sched",
         )
 
 

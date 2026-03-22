@@ -12,30 +12,37 @@ import sql_setup
 
 dict_cols_loan_fin_inst = {
     # balance_amt / init_balance_amt / amort_type pulled for vectorized payment computation
-    # product_code links loan schedules to prepayment models (models_loan table)
-    'loans_sched_id': ['schedule_id', 'currency', 'start_date', 'maturity_date', 'payment_freq',
-                       'fixing_freq', 'dc_conv', 'b_day_conv', "rate_index", 'disc_curve', 'fwd_curve',
-                       'balance_amt', 'init_balance_amt', 'amort_type', 'product_code'],
-    'fin_inst_sched_id': ['schedule_id', 'currency', 'start_date', 'maturity_date', 'payment_freq',
-                          'fixing_freq', 'dc_conv', 'b_day_conv', "rate_index", 'disc_curve', 'fwd_curve',
-                          'balance_amt', 'amort_type'],
+    # product_code links loan schedules to prepayment models (bs.models_loan table)
+    # margin is the per-product spread over the market forward rate (loans only)
+    'loans': ['schedule_id', 'currency', 'start_date', 'maturity_date', 'payment_freq',
+              'fixing_freq', 'dc_conv', 'b_day_conv', "rate_index", 'disc_curve', 'fwd_curve',
+              'balance_amt', 'init_balance_amt', 'amort_type', 'product_code', 'bs_side', 'margin'],
+    'fin_inst': ['schedule_id', 'currency', 'start_date', 'maturity_date', 'payment_freq',
+                 'fixing_freq', 'dc_conv', 'b_day_conv', "rate_index", 'disc_curve', 'fwd_curve',
+                 'balance_amt', 'amort_type', 'bs_side', 'product_code'],
 }
 
 dict_nms_loan_fin_inst = {
-    'loans_sched_id': 'loan_orig_sched',
-    'fin_inst_sched_id': 'fin_inst_orig_sched',
+    'loans':    'loan_orig',
+    'fin_inst': 'fin_inst_orig',
 }
 
-sched_tables = ['loans_sched_id', 'fin_inst_sched_id']
+sched_tables = ['loans', 'fin_inst']
 
 dict_cols_deposits = {
     # maturity_date = NULL means non-maturity deposit (overnight in origin schedule)
-    'deposits_sched_id': ['schedule_id', 'currency', 'maturity_date', 'dc_conv', 'b_day_conv',
-                          'disc_curve', 'balance_amt'],
+    # product_code links to bs.models_deposit for behavioural schedule
+    # client_rt is the all-in rate paid to clients (a * market_rate + b), computed at balance generation
+    'deposits': ['schedule_id', 'product_code', 'currency', 'rate_type', 'maturity_date', 'dc_conv',
+                 'b_day_conv', 'disc_curve', 'balance_amt', 'bs_side', 'client_rt'],
 }
 
 dict_nms_deposits = {
-    'deposits_sched_id': 'deposit_orig_sched',
+    'deposits': 'deposit_orig',
+}
+
+dict_nms_deposits_beh = {
+    'deposits': 'deposit_beh',
 }
 
 
@@ -334,26 +341,139 @@ def gen_deposit_sched(
 
     d_f = disc_df.get((row.disc_curve, cf_end), np.nan)
 
-    # simple rate implied by disc factor at cf_end: r = (1/d_f - 1) / yf
+    # Market reference rate implied by disc factor: fwd_rt = (1/d_f - 1) / yf
     if cf_yf > 0 and not np.isnan(d_f) and d_f > 0:
         fwd_rt = (1.0 / d_f - 1.0) / cf_yf
     else:
         fwd_rt = np.nan
 
+    # Client rate is set at balance generation (a * market_rate + b); use for int_pmt
+    client_rt = float(row.client_rt) if not pd.isnull(row.client_rt) else fwd_rt
+
     bal = float(row.balance_amt)
 
     return pd.DataFrame({
         "schedule_id":    [row.schedule_id],
+        "bs_side":        [row.bs_side],
         "fixing_dt":      [fix_dt],
         "cf_start_dt":    [cf_start],
         "cf_end_dt":      [cf_end],
         "cf_yf":          [cf_yf],
         "d_f":            [d_f],
         "fwd_rt":         [fwd_rt],
+        "client_rt":      [client_rt],
         "outstanding_bal":[bal],
-        "int_pmt":        [bal * fwd_rt * cf_yf if not np.isnan(fwd_rt) else np.nan],
+        "int_pmt":        [bal * client_rt * cf_yf if not np.isnan(client_rt) else np.nan],
         "capital_pmt":    [bal],
     })
+
+
+def tenor_str_to_ql_period(tenor: str) -> ql.Period:
+    """Convert tenor string like '1D', '3M', '2Y' to QuantLib Period."""
+    tenor = tenor.strip().upper()
+    n = int(tenor[:-1])
+    unit = tenor[-1]
+    unit_map = {'D': ql.Days, 'W': ql.Weeks, 'M': ql.Months, 'Y': ql.Years}
+    if unit not in unit_map:
+        raise ValueError(f"Unsupported tenor unit: {tenor}")
+    return ql.Period(n, unit_map[unit])
+
+
+def compute_deposit_beh_schedule(
+    row,
+    report_date: pd.Timestamp,
+    disc_df: pd.Series,
+    models_depo: pd.DataFrame,
+) -> Optional[pd.DataFrame]:
+    """Generate behavioural cash flow schedule for a deposit group.
+
+    Uses models_deposit outstanding percentages (fraction of original balance
+    remaining at each tenor) to derive capital payments.
+
+    For each tenor k (sorted chronologically):
+        outstanding_bal(k) = balance_amt * pct(k-1)   where pct(0) = 1.0
+        capital_pmt(k)     = balance_amt * (pct(k-1) - pct(k))
+        fwd_rt(k)          = marginal forward rate for period [start_k, end_k]
+        int_pmt(k)         = outstanding_bal(k) * fwd_rt(k) * cf_yf(k)
+
+    Example: balance=1M, pct[1D]=1.0, pct[1M]=0.7
+        period 1D: outstanding_bal=1M, capital_pmt=0, int_pmt=1M*r*yf
+        period 1M: outstanding_bal=1M, capital_pmt=0.3M, int_pmt=1M*r*yf
+    """
+    if models_depo.empty:
+        return None
+
+    r_dt_ql = ql.Date.from_date(report_date)
+    cal = get_calendar_from_currency(row.currency)
+    bdc = getattr(ql, row.b_day_conv)
+    dc_conv = get_dc_conv_from_str(row.dc_conv)
+
+    # resolve end dates and sort tenors chronologically
+    models_depo = models_depo.copy().reset_index(drop=True)
+    end_dates_ql = [
+        cal.advance(r_dt_ql, tenor_str_to_ql_period(t), bdc)
+        for t in models_depo['tenor']
+    ]
+    n_days = [int(d - r_dt_ql) for d in end_dates_ql]
+    order = sorted(range(len(n_days)), key=lambda i: n_days[i])
+    models_depo = models_depo.iloc[order].reset_index(drop=True)
+    end_dates_ql = [end_dates_ql[i] for i in order]
+
+    n = len(models_depo)
+    bal = float(row.balance_amt)
+    pct = models_depo['outstanding'].to_numpy(dtype=float)
+    start_dates_ql = [r_dt_ql] + end_dates_ql[:-1]
+
+    # client_rt is constant for all behavioural periods (rate set at balance generation)
+    client_rt_val = float(row.client_rt) if not pd.isnull(row.client_rt) else np.nan
+
+    rows = []
+    for i in range(n):
+        cf_start_ql = start_dates_ql[i]
+        cf_end_ql = end_dates_ql[i]
+        cf_yf = dc_conv.yearFraction(cf_start_ql, cf_end_ql)
+
+        cf_start = pd.Timestamp(
+            datetime.date(cf_start_ql.year(), cf_start_ql.month(), cf_start_ql.dayOfMonth())
+        )
+        cf_end = pd.Timestamp(
+            datetime.date(cf_end_ql.year(), cf_end_ql.month(), cf_end_ql.dayOfMonth())
+        )
+
+        d_f_start = disc_df.get((row.disc_curve, cf_start), 1.0) if i > 0 else 1.0
+        d_f_end = disc_df.get((row.disc_curve, cf_end), np.nan)
+
+        # fwd_rt: marginal market rate for this period (kept for reference / basis risk)
+        if cf_yf > 0 and not np.isnan(d_f_end) and d_f_end > 0 and d_f_start > 0:
+            fwd_rt = (d_f_start / d_f_end - 1.0) / cf_yf
+        else:
+            fwd_rt = np.nan
+
+        # Use client_rt if available, fall back to fwd_rt
+        rate_for_int = client_rt_val if not np.isnan(client_rt_val) else fwd_rt
+
+        pct_prev = 1.0 if i == 0 else pct[i - 1]
+        pct_curr = pct[i]
+
+        outstanding = bal * pct_prev
+        capital = bal * (pct_prev - pct_curr)
+        interest = outstanding * rate_for_int * cf_yf if not np.isnan(rate_for_int) else np.nan
+
+        rows.append({
+            'schedule_id':    row.schedule_id,
+            'bs_side':        row.bs_side,
+            'cf_start_dt':    cf_start,
+            'cf_end_dt':      cf_end,
+            'cf_yf':          cf_yf,
+            'd_f':            d_f_end,
+            'fwd_rt':         fwd_rt,
+            'client_rt':      client_rt_val,
+            'outstanding_bal': outstanding,
+            'capital_pmt':    capital,
+            'int_pmt':        interest,
+        })
+
+    return pd.DataFrame(rows) if rows else None
 
 
 def payment_dates_advance_n(
@@ -391,10 +511,9 @@ def ql_column_to_datetime(series: pd.Series) -> pd.Series:
     )
 
 def get_unique_curves() -> pd.DataFrame:
-    uniq_discount_curves = sql_setup.sql_get_uniq_curves(['loans_sched_id', 'fin_inst_sched_id'], 'disc_curve')
-    uniq_forward_curves = sql_setup.sql_get_uniq_curves(['loans_sched_id', 'fin_inst_sched_id'], 'fwd_curve')
-    result_df = pd.concat([uniq_discount_curves, uniq_forward_curves])
-    return result_df
+    uniq_discount_curves = sql_setup.sql_get_uniq_curves(['loans', 'fin_inst'], 'disc_curve')
+    uniq_forward_curves  = sql_setup.sql_get_uniq_curves(['loans', 'fin_inst'], 'fwd_curve')
+    return pd.concat([uniq_discount_curves, uniq_forward_curves])
 
 def get_interpolated_curves(row: pd.Series) -> pd.DataFrame:
     if row['curve_type'] == 'fwd_curve':
@@ -461,6 +580,7 @@ def interpolate_d_f(x: np.ndarray, y: np.ndarray, report_date: pd.Timestamp) -> 
 def compute_amort_schedule_vectorized(
     sched_df: pd.DataFrame,
     sched_params_df: pd.DataFrame,
+    ir_params: dict | None = None,
     exact: bool = True,
 ) -> pd.DataFrame:
     """Vectorized computation of outstanding balance, interest and capital payments.
@@ -485,9 +605,32 @@ def compute_amort_schedule_vectorized(
     sched_df with new columns: outstanding_bal, capital_pmt, int_pmt, annuity_pmt.
     annuity_pmt is NaN for bullet and constant-amort schedules.
     """
-    PARAM_COLS = ['schedule_id', 'balance_amt', 'amort_type']
-    df = sched_df.merge(sched_params_df[PARAM_COLS], on='schedule_id', how='left')
+    PARAM_COLS = ['schedule_id', 'balance_amt', 'amort_type', 'bs_side']
+    # margin only present for loans; product_code for both loans and fin_inst
+    avail_params = PARAM_COLS + [c for c in ['margin', 'product_code'] if c in sched_params_df.columns]
+    df = sched_df.merge(sched_params_df[avail_params], on='schedule_id', how='left')
+    if 'margin' not in df.columns:
+        df['margin'] = np.nan
     df = df.sort_values(['schedule_id', 'cf_end_dt']).reset_index(drop=True)
+
+    # ── Floor parameters from ir_params (index_floor applied to input; client_floor to output) ──
+    df['_idx_fl'] = np.nan
+    df['_cl_fl']  = np.nan
+    if ir_params and 'product_code' in df.columns:
+        def _fl(pc, key):
+            if pd.isna(pc):
+                return np.nan
+            v = ir_params.get(int(pc), {}).get(key)
+            return float(v) if v is not None else np.nan
+        _pc = pd.to_numeric(df['product_code'], errors='coerce')
+        df['_idx_fl'] = [_fl(pc, 'index_floor') for pc in _pc]
+        df['_cl_fl']  = [_fl(pc, 'client_floor') for pc in _pc]
+
+    # ── Effective forward rate after applying index floor ────────────────────
+    _eff = df['fwd_rt'].to_numpy(dtype=float)
+    _ifl = df['_idx_fl'].to_numpy(dtype=float)
+    _eff = np.where(np.isnan(_ifl), _eff, np.maximum(_eff, _ifl))
+    df['_eff_fwd'] = _eff
 
     df['amort_type'] = pd.to_numeric(df['amort_type'], errors='coerce').fillna(0).astype(int)
 
@@ -524,7 +667,9 @@ def compute_amort_schedule_vectorized(
             # C_k = A - O_k * fwd_rt_k * cf_yf_k     → capital + int_pmt == A
             def _exact_annuity_group(group: pd.DataFrame) -> pd.DataFrame:
                 group = group.sort_values('cf_end_dt').reset_index(drop=True)
-                fwd        = group['fwd_rt'].to_numpy(dtype=float)
+                fwd        = group['_eff_fwd'].to_numpy(dtype=float)
+                margin_val = float(group['margin'].fillna(0.0).iloc[0])
+                client_rt  = fwd + margin_val
                 yf         = group['cf_yf'].to_numpy(dtype=float)
                 fixing_dt  = group['fixing_dt'].to_numpy()
                 B          = float(group['balance_amt'].iloc[0])
@@ -537,7 +682,7 @@ def compute_amort_schedule_vectorized(
                 O_curr = B
                 k = 0
                 while k < n:
-                    r = fwd[k]
+                    r = client_rt[k]
                     # Recompute annuity at this fixing: assume rate r stays constant
                     # for all remaining periods, but use exact per-period cf_yf.
                     yf_rem = yf[k:]
@@ -576,11 +721,11 @@ def compute_amort_schedule_vectorized(
 
         else:
             # ── APPROX (exact=False): fully vectorised 1-iter, zero Python loops ─
-            # r_const = mean(fwd_rt * cf_yf) per schedule  →  one groupby.transform
+            # r_const = mean(client_rt * cf_yf) per schedule  →  one groupby.transform
             # closed-form O(k) = B*(1+r)^k - A*((1+r)^k-1)/r  (pure numpy power)
             # capital = A - O*r_const  (consistent with O formula)
-            # int_pmt computed from actual fwd_rt at the end  → capital+int ≠ A
-            fwd1     = df.loc[m1, 'fwd_rt'].to_numpy(dtype=float)
+            # int_pmt computed from actual client_rt at the end  → capital+int ≠ A
+            fwd1     = (df.loc[m1, '_eff_fwd'] + df.loc[m1, 'margin'].fillna(0.0)).to_numpy(dtype=float)
             yf1      = df.loc[m1, 'cf_yf'].to_numpy(dtype=float)
             n1       = df.loc[m1, '_n'].to_numpy(dtype=float)
             B1       = df.loc[m1, 'balance_amt'].to_numpy(dtype=float)
@@ -607,12 +752,28 @@ def compute_amort_schedule_vectorized(
             df.loc[m1, 'capital_pmt']     = C1
             df.loc[m1, 'annuity_pmt']     = A1
 
-    # ── Interest for all amort types (actual forward rate) ────────────────────
-    df['int_pmt'] = df['outstanding_bal'] * df['fwd_rt'] * df['cf_yf']
+    # ── client_rt = eff_fwd + margin, then apply client_floor if set ─────────
+    df['client_rt'] = df['_eff_fwd'] + df['margin'].fillna(0.0)
+    _cl = df['_cl_fl'].to_numpy(dtype=float)
+    df['client_rt'] = np.where(
+        np.isnan(_cl),
+        df['client_rt'].to_numpy(float),
+        np.maximum(df['client_rt'].to_numpy(float), _cl),
+    )
 
-    df = df.drop(columns=['_rank', '_n', '_is_last', 'balance_amt', 'amort_type'])
+    # ── Interest for all amort types ──────────────────────────────────────────
+    df['int_pmt'] = df['outstanding_bal'] * df['client_rt'] * df['cf_yf']
+
+    # ── total_pmt: rename annuity_pmt, fill NaN for non-annuity types ─────────
+    df['_is_annuity'] = df['annuity_pmt'].notna()
+    df['annuity_pmt'] = df['annuity_pmt'].fillna(df['capital_pmt'] + df['int_pmt'])
+    df = df.rename(columns={'annuity_pmt': 'total_pmt'})
+
+    drop_cols = ['_rank', '_n', '_is_last', 'balance_amt', 'amort_type', '_eff_fwd', '_idx_fl', '_cl_fl']
+    if 'product_code' in df.columns:
+        drop_cols.append('product_code')
+    df = df.drop(columns=drop_cols)
     return df
-
 
 def compute_adjusted_schedule(
     sched_df: pd.DataFrame,
@@ -654,21 +815,21 @@ def compute_adjusted_schedule(
     df['prepayment_pmt']  = np.nan
     df['int_adj']         = np.nan
 
-    m1 = df['annuity_pmt'].notna()
+    m1 = df['_is_annuity']
     if not m1.any():
         return df
 
     if exact:
         # ── EXACT: cumprod with per-period h_k = g_k - cpr_k (groupby.apply) ─
         def _adjusted_group(group: pd.DataFrame) -> pd.DataFrame:
-            fwd = group['fwd_rt'].to_numpy(dtype=float)
+            client_rt = group['client_rt'].to_numpy(dtype=float)
             yf  = group['cf_yf'].to_numpy(dtype=float)
             cpr = group['cpr_rate'].to_numpy(dtype=float)
-            A   = float(group['annuity_pmt'].iloc[0])
+            A   = float(group['total_pmt'].iloc[0])
             B   = float(group['outstanding_bal'].iloc[0])
             n   = len(group)
 
-            h = 1.0 + fwd * yf - cpr
+            h = 1.0 + client_rt * yf - cpr
             H = np.empty(n + 1); H[0] = 1.0
             np.cumprod(h, out=H[1:])
 
@@ -678,8 +839,8 @@ def compute_adjusted_schedule(
                 np.cumsum(Q[1:n], out=cum_Q[1:])
 
             O  = np.maximum(H[:n] * (B - A * cum_Q), 0.0)
-            I  = O * fwd * yf
-            C  = np.maximum(A - I, 0.0)
+            I  = O * client_rt * yf
+            C  = np.where(O > 0, np.maximum(A - I, 0.0), 0.0)
             PP = cpr * O
 
             out = group.copy()
@@ -709,14 +870,14 @@ def compute_adjusted_schedule(
         rank = sub.groupby('schedule_id').cumcount().to_numpy(dtype=float)
         n    = sub.groupby('schedule_id')['schedule_id'].transform('count').to_numpy(dtype=float)
 
-        fwd  = sub['fwd_rt'].to_numpy(dtype=float)
+        client_rt = sub['client_rt'].to_numpy(dtype=float)
         yf   = sub['cf_yf'].to_numpy(dtype=float)
-        A    = sub['annuity_pmt'].to_numpy(dtype=float)
+        A    = sub['total_pmt'].to_numpy(dtype=float)
         B    = sub.groupby('schedule_id')['outstanding_bal'].transform('first').to_numpy(dtype=float)
         sid  = sub['schedule_id'].to_numpy()
 
         r_const = (
-            pd.Series(fwd * yf, index=sid)
+            pd.Series(client_rt * yf, index=sid)
             .groupby(level=0).transform('mean')
             .to_numpy(dtype=float)
         )
@@ -730,9 +891,9 @@ def compute_adjusted_schedule(
         O  = np.where(near_zero,
                       np.maximum(B - A * rank, 0.0),
                       np.maximum(B * factor - A * (factor - 1.0) / safe_r, 0.0))
-        C  = np.maximum(A - O * r_adj, 0.0)
+        C  = np.where(O > 0, np.maximum(A - O * r_adj, 0.0), 0.0)
         PP = cpr_const * O
-        I  = O * fwd * yf
+        I  = O * client_rt * yf
 
         df.loc[m1, 'outstanding_adj'] = O
         df.loc[m1, 'capital_adj']     = C

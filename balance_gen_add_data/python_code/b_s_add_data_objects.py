@@ -23,12 +23,19 @@ dict_tbl_sched_id_cols = {
                               "dc_conv", "b_day_conv", "rate_index", "disc_curve", "fwd_curve", "amort_type"],
     # deposits: grouped by contract params + product_code for separate behavioural models
     # NULL maturity_date = non-maturity (overnight)
-    'deposits': ["product_code", "currency", "bs_side", "start_date", "maturity_date", "dc_conv", "b_day_conv", "disc_curve", "fwd_curve"],
+    # rate_type: F=fixed, V=variable/float, A=administrative (bank-managed, e.g. CA/saving)
+    'deposits': ["product_code", "currency", "bs_side", "rate_type", "start_date", "maturity_date", "dc_conv", "b_day_conv", "disc_curve", "fwd_curve"],
 }
 dict_tbl_sched_sum_cols = {
     'loans': ["init_balance_amt", "balance_amt"],
     'financial_instruments': ["balance_amt"],
     'deposits': ["balance_amt"],
+}
+# Columns aggregated with AVG() into the sched table (e.g. per-product margin/client rate)
+dict_tbl_sched_avg_cols = {
+    'loans': ["margin", "index_rt", "client_rt"],
+    'financial_instruments': ["index_rt", "client_rt"],
+    'deposits': ["index_rt", "client_rt"],
 }
 
 def get_calendar_from_currency(curr: str) -> ql.Calendar:

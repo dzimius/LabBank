@@ -1,6 +1,6 @@
 import pandas as pd
 import os
-from b_s_gen_objects import ProductFactory
+from b_s_gen_objects import ProductFactory, compute_deposit_client_rt, compute_asset_rates
 from sqlalchemy import create_engine
 import config
 import sql_setup
@@ -12,7 +12,8 @@ os.chdir(BASE_DIR)
 
 config.report_date = pd.to_datetime('2024-12-31')  # Set the report date
 config.balance_start_date = pd.to_datetime('2015-01-01')
-full_balance_amt = 100_000_000_000 #assets + liabilities+equity = 2*assets
+total_assets = 100_000_000_000
+full_balance_amt = total_assets * 2 #assets + liabilities+equity = 2*assets
 
 mode = 0 # 0 -- create new tables and remove old , 1 -- only delete rows without creating new schema of table
 sql_setup.reset_data(mode, report_date=config.report_date)
@@ -23,6 +24,14 @@ df_client_t = pd.read_excel('dictionaries/client_type.xlsx')
 df_bs_struct['balance_amt'] = full_balance_amt * df_bs_struct['bs_percentage'] / 100
 df_bs_struct['amort_type'] = df_bs_struct['amort_type'].astype('Int64')
 df_result = df_bs_struct.merge(df_client_t, on='client_type_id', how='left')
+
+# Load interest rate formula file and historical fixings
+# interest_rt.xlsx columns: product_code, a, b (% points), delay, index_floor, client_floor
+# rate_index per product is taken from bank_data_only_dep.xlsx (already loaded as df_bs_struct)
+interest_rt = pd.read_excel('input_data/interest_rt.xlsx')
+fixing_file = '../balance_gen_add_data/input/fixing_input.xlsx'
+fixings_raw = pd.read_excel(fixing_file)
+fixings_raw = fixings_raw.rename(columns={'date': 'fixing_date'})
 
 product_objects = {}
 
@@ -36,6 +45,12 @@ for _, row in df_result.iterrows():
 # nadaj client_id i zrób parowania na CAŁOŚCI
 all_tx = pd.concat(parts, ignore_index=True)
 all_tx = sql_setup.add_client_id(all_tx, seed=42, pct=0.4)
+
+# Compute curr_rt and client_rt for deposit products (formula from interest_rt.xlsx)
+all_tx = compute_deposit_client_rt(all_tx, interest_rt, df_bs_struct, fixings_raw, config.report_date)
+
+# Compute curr_rt and client_rt for loan and fin_inst products (current fixing + margin)
+all_tx = compute_asset_rates(all_tx, interest_rt, df_bs_struct, fixings_raw, config.report_date)
 
 # teraz dopiero:
 sql_setup.append_df_to_table(all_tx, "transactions")   # parent

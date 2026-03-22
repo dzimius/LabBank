@@ -176,13 +176,18 @@ def generate_random_bond_dates(
     start_date: Any,
     end_date: Any,
     n: int,
-    freq: str = "6M",
+    freq: str = "3M",
     annual_growth: float = 0.15,
     seed: Optional[int] = None,
 ) -> list[dt.datetime]:
     start = pd.to_datetime(start_date)
     end = pd.to_datetime(end_date)
 
+    # Normalize deprecated pandas freq aliases (e.g. "3M" -> "3ME")
+    import re as _re
+    freq = _re.sub(r'^(\d*)(M)$', lambda m: (m.group(1) or '') + 'ME', freq)
+    freq = _re.sub(r'^(\d*)(Q)$', lambda m: (m.group(1) or '') + 'QE', freq)
+    freq = _re.sub(r'^(\d*)(Y|A)$', lambda m: (m.group(1) or '') + 'YE', freq)
     raw_dates = pd.date_range(start, end, freq=freq)
 
     if len(raw_dates) == 0:
@@ -1064,6 +1069,258 @@ class OneRowDummyProductGen(ProductGen):
         )
     
 
+def compute_deposit_client_rt(
+    all_tx: pd.DataFrame,
+    interest_rt: pd.DataFrame,
+    bs_struct: pd.DataFrame,
+    fixings: pd.DataFrame,
+    report_date: pd.Timestamp,
+) -> pd.DataFrame:
+    """Add client_rt column (decimal) to deposit rows in all_tx.
+
+    Formula per product: client_rt = a * market_rate + b/100
+      - Fixed deposits (rate_type='F'):   market_rate = fixing at start_date
+      - Other deposits (rate_type='A/V'): market_rate = fixing at (report_date - delay months)
+      - If a=0: client_rt = b/100 (e.g. 0% for current accounts)
+
+    interest_rt columns : product_code, a, b (in % points), delay (months)
+    bs_struct columns   : product_code, rate_index (rate_index already encodes the tenor,
+                          e.g. 'PLN_BID_6M'); add rate_index for any deposit product with a != 0
+    fixings columns     : fixing_date, rate_index, rate (in % points), ...
+                          lookup key is (fixing_date, rate_index) — tenor is embedded in rate_index
+    """
+    deposit_names = {'current_account', 'saving_account', 'term_deposit'}
+    deposit_mask = all_tx['product_name'].isin(deposit_names)
+
+    all_tx = all_tx.copy()
+    all_tx['index_rt']  = np.nan
+    all_tx['client_rt'] = np.nan
+
+    if not deposit_mask.any():
+        return all_tx
+
+    ir = interest_rt.copy()
+    ir['product_code'] = ir['product_code'].astype(int)
+    ir = ir.set_index('product_code')
+
+    # rate_index per product_code from bank_data_only_dep (same across all client_type rows)
+    # rate_index encodes both the benchmark and tenor, e.g. 'PLN_BID_6M'
+    pc_to_rate_index = (
+        bs_struct[['product_code', 'rate_index']]
+        .dropna(subset=['rate_index'])
+        .drop_duplicates('product_code')
+        .set_index('product_code')['rate_index']
+        .astype(str)
+    )
+
+    # Validate all deposit product codes are covered by interest_rt
+    deposit_pcs = set(all_tx.loc[deposit_mask, 'product_code'].astype(int).unique())
+    missing = deposit_pcs - set(ir.index)
+    if missing:
+        raise ValueError(
+            f"product_codes missing from interest_rt.xlsx: {sorted(missing)}. "
+            "Add them before running balance generation."
+        )
+
+    fix = fixings.copy()
+    fix['fixing_date'] = pd.to_datetime(fix['fixing_date'])
+    fix = fix.sort_values('fixing_date').reset_index(drop=True)
+
+    def _get_fixing_rate_pct(rate_index: str, target_date: pd.Timestamp) -> float:
+        """Return most recent rate (% points) for rate_index on or before target_date."""
+        sub = fix[
+            (fix['rate_index'] == rate_index) &
+            (fix['fixing_date'] <= target_date)
+        ]
+        if sub.empty:
+            raise ValueError(
+                f"No fixing found for rate_index='{rate_index}' on or before "
+                f"{target_date.date()}. Check fixing_input.xlsx."
+            )
+        return float(sub.iloc[-1]['rate'])
+
+    for pc in sorted(deposit_pcs):
+        row_ir = ir.loc[pc]
+        a     = float(row_ir['a'])
+        b_pct = float(row_ir['b'])   # percentage points, e.g. 0.5 → 0.005 in decimal
+        delay = int(row_ir['delay'])
+
+        # Floor parameters — at most one of index_floor / client_floor may be set
+        index_floor = (
+            float(row_ir['index_floor'])
+            if 'index_floor' in row_ir.index and not pd.isna(row_ir['index_floor'])
+            else None
+        )
+        client_floor = (
+            float(row_ir['client_floor'])
+            if 'client_floor' in row_ir.index and not pd.isna(row_ir['client_floor'])
+            else None
+        )
+        if index_floor is not None and client_floor is not None:
+            raise ValueError(
+                f"product_code {pc}: both index_floor and client_floor are set in "
+                "interest_rt.xlsx. Only one floor type is allowed per product."
+            )
+
+        def _apply_floor(mkt_rate_dec: float) -> float:
+            """Apply index_floor (to input) or client_floor (to output)."""
+            if index_floor is not None:
+                mkt_rate_dec = max(mkt_rate_dec, index_floor)
+            result = a * mkt_rate_dec + b_pct / 100.0
+            if client_floor is not None:
+                result = max(result, client_floor)
+            return result
+
+        pc_mask = deposit_mask & (all_tx['product_code'].astype(int) == pc)
+
+        if a == 0.0:
+            raw = b_pct / 100.0
+            all_tx.loc[pc_mask, 'client_rt'] = max(raw, client_floor) if client_floor is not None else raw
+            # index_rt stays NaN (no market rate dependency)
+            continue
+
+        if pc not in pc_to_rate_index.index:
+            raise ValueError(
+                f"product_code {pc} has a != 0 but no rate_index in bank_data_only_dep.xlsx. "
+                "Add rate_index for this product."
+            )
+        rate_index = pc_to_rate_index[pc]
+
+        rate_type = all_tx.loc[pc_mask, 'rate_type'].iloc[0] if pc_mask.any() else None
+
+        if rate_type == 'F':
+            # Fixed deposit: index_rt and client_rt locked at start_date fixing
+            unique_dates = all_tx.loc[pc_mask, 'start_date'].dropna().unique()
+            date_to_index  = {}
+            date_to_client = {}
+            for sd in unique_dates:
+                sd_ts = pd.Timestamp(sd)
+                mkt_pct = _get_fixing_rate_pct(rate_index, sd_ts)
+                date_to_index[sd_ts]  = mkt_pct / 100.0
+                date_to_client[sd_ts] = _apply_floor(mkt_pct / 100.0)
+            all_tx.loc[pc_mask, 'index_rt'] = (
+                all_tx.loc[pc_mask, 'start_date']
+                .apply(lambda d: date_to_index.get(pd.Timestamp(d), np.nan) if pd.notna(d) else np.nan)
+                .values
+            )
+            all_tx.loc[pc_mask, 'client_rt'] = (
+                all_tx.loc[pc_mask, 'start_date']
+                .apply(lambda d: date_to_client.get(pd.Timestamp(d), np.nan) if pd.notna(d) else np.nan)
+                .values
+            )
+        else:
+            # Variable / Admin: index_rt and client_rt from fixing at (report_date - delay)
+            target_date = pd.Timestamp(report_date) - pd.DateOffset(months=delay)
+            mkt_pct = _get_fixing_rate_pct(rate_index, target_date)
+            all_tx.loc[pc_mask, 'index_rt']  = mkt_pct / 100.0
+            all_tx.loc[pc_mask, 'client_rt'] = _apply_floor(mkt_pct / 100.0)
+
+    return all_tx
+
+
+def compute_asset_rates(
+    all_tx: pd.DataFrame,
+    interest_rt: pd.DataFrame,   # product_code, index_floor, ...
+    bs_struct: pd.DataFrame,     # product_code, rate_type, rate_index
+    fixings: pd.DataFrame,
+    report_date: pd.Timestamp,
+) -> pd.DataFrame:
+    """Add index_rt and client_rt to loan and fin_inst rows in all_tx.
+
+    index_rt = effective index rate for this contract (decimal):
+      - Floating (rate_type='V'): fixing at report_date  (reprices with market)
+      - Fixed    (rate_type='F'): fixing at start_date   (locked at origination)
+    client_rt = max(index_rt, index_floor) + margin
+      margin = 0 for fin_inst (no spread).
+    """
+    asset_names = {
+        'mortgage_fixed', 'mortgage_float', 'cash_loan_fixed', 'cash_loan_float',
+        'investment_loan_fixed', 'investment_loan_float', 'bond_fixed', 'bond_float',
+    }
+    asset_mask = all_tx['product_name'].isin(asset_names)
+
+    all_tx = all_tx.copy()
+    if 'index_rt' not in all_tx.columns:
+        all_tx['index_rt'] = np.nan
+    if 'client_rt' not in all_tx.columns:
+        all_tx['client_rt'] = np.nan
+
+    if not asset_mask.any():
+        return all_tx
+
+    ir = interest_rt.copy()
+    ir['product_code'] = ir['product_code'].astype(int)
+    ir = ir.set_index('product_code')
+
+    pc_to_rate_index = (
+        bs_struct[['product_code', 'rate_index']]
+        .dropna(subset=['rate_index'])
+        .drop_duplicates('product_code')
+        .set_index('product_code')['rate_index']
+        .astype(str)
+    )
+
+    fix = fixings.copy()
+    fix['fixing_date'] = pd.to_datetime(fix['fixing_date'])
+    fix = fix.sort_values('fixing_date').reset_index(drop=True)
+
+    def _get_fixing_dec(rate_index: str, target_date: pd.Timestamp) -> float:
+        """Return fixing rate in decimal (not %) on or before target_date."""
+        sub = fix[(fix['rate_index'] == rate_index) & (fix['fixing_date'] <= target_date)]
+        if sub.empty:
+            return np.nan
+        return float(sub.iloc[-1]['rate']) / 100.0
+
+    report_ts = pd.Timestamp(report_date)
+    asset_pcs = all_tx.loc[asset_mask, 'product_code'].astype(int).unique()
+
+    for pc in sorted(asset_pcs):
+        pc_mask = asset_mask & (all_tx['product_code'].astype(int) == pc)
+
+        if pc not in pc_to_rate_index.index:
+            continue  # no rate_index (e.g., retained_earnings) — skip
+
+        rate_index = pc_to_rate_index[pc]
+
+        # index_floor from interest_rt
+        index_floor = None
+        if pc in ir.index:
+            row_ir = ir.loc[pc]
+            if 'index_floor' in row_ir.index and not pd.isna(row_ir.get('index_floor', np.nan)):
+                index_floor = float(row_ir['index_floor'])
+
+        float_mask = pc_mask & (all_tx['rate_type'] == 'V')
+        fixed_mask = pc_mask & (all_tx['rate_type'] == 'F')
+
+        margin_col = all_tx['margin'].fillna(0.0) if 'margin' in all_tx.columns else pd.Series(0.0, index=all_tx.index)
+
+        # Floating: index_rt = fixing at report_date; client_rt = max(index_rt, floor) + margin
+        if float_mask.any():
+            float_val = _get_fixing_dec(rate_index, report_ts)
+            all_tx.loc[float_mask, 'index_rt'] = float_val
+            if not np.isnan(float_val):
+                floored = max(float_val, index_floor) if index_floor is not None else float_val
+                all_tx.loc[float_mask, 'client_rt'] = floored + margin_col.loc[float_mask]
+
+        # Fixed: index_rt = fixing at start_date; client_rt = max(index_rt, floor) + margin
+        if fixed_mask.any():
+            unique_starts = all_tx.loc[fixed_mask, 'start_date'].dropna().unique()
+            start_to_rt = {}
+            for sd in unique_starts:
+                sd_ts = pd.Timestamp(sd)
+                start_to_rt[sd_ts] = _get_fixing_dec(rate_index, sd_ts)
+            index_rt_s = all_tx.loc[fixed_mask, 'start_date'].apply(
+                lambda d: start_to_rt.get(pd.Timestamp(d), np.nan) if pd.notna(d) else np.nan
+            )
+            all_tx.loc[fixed_mask, 'index_rt'] = index_rt_s.values
+            floored_s = index_rt_s.apply(
+                lambda rt: max(rt, index_floor) if not np.isnan(rt) and index_floor is not None else rt
+            )
+            all_tx.loc[fixed_mask, 'client_rt'] = floored_s.values + margin_col.loc[fixed_mask].values
+
+    return all_tx
+
+
 # === Factory Class ===
 class ProductFactory:
     class_registry = {
@@ -1075,8 +1332,6 @@ class ProductFactory:
         "investment_loan_float": LoansFloatGen,
         "bond_fixed": BondsFixedGen,
         "bond_float": BondsFloatGen,
-        "issued_bonds": IssuedBondsGen,
-        "issued_stocks": IssuedStocksGen,
         "saving_account": SavingAccountsGen,
         "current_account": CurrentAccountsGen,
         "term_deposit": TermDepositsGen,
@@ -1090,8 +1345,7 @@ class ProductFactory:
         TermDepositsGen: "deposits",
         BondsFixedGen: "financial_instruments",
         BondsFloatGen: "financial_instruments",
-        IssuedBondsGen: "equity",
-        IssuedStocksGen: "equity"
+        OneRowDummyProductGen: "equity",
     }
 
     @classmethod
