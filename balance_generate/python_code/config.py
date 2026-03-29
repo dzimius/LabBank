@@ -32,7 +32,8 @@ stats_dict = {
                 5: {'mean': 200_000, 'std_dev': 150_000, 'lower_bound': 0, 'upper_bound': 50_000_000},
                 6: {'mean': 30_000,  'std_dev': 40_000,  'lower_bound': 0, 'upper_bound': 15_000_000},
                 7: {'mean': 5_000_000, 'std_dev': 3_000_000, 'lower_bound': 0, 'upper_bound': 70_000_000},
-                8: {'mean': 7_000_000, 'std_dev': 3_000_000, 'lower_bound': 0, 'upper_bound': 70_000_000}
+                8: {'mean': 7_000_000, 'std_dev': 3_000_000, 'lower_bound': 0, 'upper_bound': 70_000_000},
+                9: {'mean': 50_000_000, 'std_dev': 30_000_000, 'lower_bound': 5_000_000, 'upper_bound': 200_000_000},
                 },
         "mortgage_fixed": {
                 4: {'mean': 600_000,  'std_dev': 350_000,  'lower_bound': 0, 'upper_bound': 15_000_000},
@@ -71,6 +72,9 @@ stats_dict = {
                 2: {'mean': 2_000_000, 'std_dev': 2_000_000, 'lower_bound': 100_000, 'upper_bound': 20_000_000},
                 7: {'mean': 2_000_000, 'std_dev': 3_000_000, 'lower_bound': 0, 'upper_bound': 20_000_000},
                 8: {'mean': 2_000_000, 'std_dev': 3_000_000, 'lower_bound': 0, 'upper_bound': 20_000_000}
+                },
+        "issued_bond": {
+                8: {'mean': 50_000_000, 'std_dev': 40_000_000, 'lower_bound': 10_000_000, 'upper_bound': 200_000_000},
                 }
 }
 

@@ -152,21 +152,32 @@ def create_sched_id_tbl_sql(
     columns: list[str],
     sum_cols: Optional[list[str]] = None,
     avg_cols: Optional[list[str]] = None,
+    null_cols: Optional[list[str]] = None,
     source_schema: str = "dbo",
     target_schema: str = "bs",
 ) -> None:
-    sum_cols = sum_cols or []
-    avg_cols = avg_cols or []
-    cols_sql = ", ".join(columns)
+    """Create a schedule-id table by grouping source_table rows.
+
+    null_cols: columns not present in the source table; added as NULL in output
+               so all sched tables share a uniform column set.
+    """
+    sum_cols  = sum_cols  or []
+    avg_cols  = avg_cols  or []
+    null_cols = null_cols or []
+
+    cols_sql     = ", ".join(columns)
     order_by_sql = ", ".join(columns)
 
     agg_parts = (
         [f"SUM({c}) AS {c}" for c in sum_cols]
         + [f"AVG({c}) AS {c}" for c in avg_cols]
     )
-    agg_sql = ",\n        ".join(agg_parts)
-    extra_cols = sum_cols + avg_cols
+    agg_sql      = ",\n        ".join(agg_parts)
+    extra_cols   = sum_cols + avg_cols
     extra_select = ", " + ", ".join(extra_cols) if extra_cols else ""
+
+    null_grp_sql    = (",\n        " + ",\n        ".join(f"NULL AS {c}" for c in null_cols)) if null_cols else ""
+    null_out_select = (", " + ", ".join(null_cols)) if null_cols else ""
 
     sql = f"""
         DROP TABLE IF EXISTS {target_schema}.{target_table};
@@ -176,6 +187,7 @@ def create_sched_id_tbl_sql(
                 {cols_sql}
                 {"," if agg_sql else ""}
                 {agg_sql}
+                {null_grp_sql}
             FROM {source_schema}.{source_table}
             GROUP BY {cols_sql}
         ),
@@ -184,12 +196,14 @@ def create_sched_id_tbl_sql(
                 DENSE_RANK() OVER (ORDER BY {order_by_sql}) AS schedule_id,
                 {cols_sql}
                 {extra_select}
+                {null_out_select}
             FROM grp
         )
         SELECT
             schedule_id,
             {cols_sql}
             {extra_select}
+            {null_out_select}
         INTO {target_schema}.{target_table}
         FROM grp_id;
         """

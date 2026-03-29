@@ -6,6 +6,35 @@ import pandas as pd
 _TENOR_SORT = {"1D": 0, ">30Y": 999}
 
 
+def _apply_rt_limits(
+    rate: "np.ndarray | pd.Series",
+    product_codes: pd.Series,
+    caps_map:    dict | None = None,
+    floors_map:  dict | None = None,
+    coeff_a_map: dict | None = None,
+    coeff_b_map: dict | None = None,
+) -> np.ndarray:
+    """Apply per-product linear transform and floor/cap to a rate array.
+
+    Transform order: client_rt = a * index_rt + b → clip(floor, cap).
+    Products absent from coeff maps default to a=1, b=0 (identity).
+    Values in all maps must be in decimal (same unit as rate).
+    """
+    result = np.asarray(rate, dtype=float).copy()
+    pcs = product_codes.astype(str)
+    if coeff_a_map or coeff_b_map:
+        a_v = pcs.map(coeff_a_map or {}).fillna(1.0).to_numpy(dtype=float)
+        b_v = pcs.map(coeff_b_map or {}).fillna(0.0).to_numpy(dtype=float)
+        result = a_v * result + b_v
+    if floors_map:
+        floor_v = pcs.map(floors_map).fillna(float("-inf")).to_numpy(dtype=float)
+        result  = np.maximum(floor_v, result)
+    if caps_map:
+        cap_v  = pcs.map(caps_map).fillna(float("inf")).to_numpy(dtype=float)
+        result = np.minimum(cap_v, result)
+    return result
+
+
 def _tenor_to_yf(tenor_bucket: str) -> float:
     """Convert tenor bucket label to year fraction."""
     if tenor_bucket == "1D":
@@ -26,70 +55,62 @@ def compute_nii(
     horizon_yf: float = 1.0,
     shock_up: float = 0.01,
     shock_dn: float = -0.01,
-    ca_gap: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Compute NII sensitivity from ir_gap_beh repricing gap.
 
-    For each tenor bucket within the horizon:
-        remain_yf   = horizon_yf - tenor_yf       (time left to earn/pay interest)
-        NII_up      = net_gap_cf * shock_up * remain_yf
-        NII_dn      = (net_gap_cf - net_ca_gap_cf) * shock_dn * remain_yf
-        delta_NII   = NII_scenario - NII_base  (NII_base = 0, shocks are incremental)
+    ir_gap_beh must contain split columns written by the BS + IRS workflows:
+      gap_cf     — total balance-sheet gap (no IRS)
+      gap_cf_ca  — current-account portion (floored at 0% in down shock)
+      gap_cf_irs — IRS gap contribution
 
-    Current accounts (ca_gap) are floored at 0% rate — the -100bps shock cannot push
-    their rate below 0, so they are excluded from the down shock only.
+    For each tenor bucket within the horizon:
+        remain_yf              = horizon_yf - tenor_yf
+        d_nii_up_100_no_swap   = gap_cf * shock_up * remain_yf
+        d_nii_dn_100_no_swap   = (gap_cf - gap_cf_ca) * shock_dn * remain_yf
+        d_nii_up_100_with_swap = (gap_cf + gap_cf_irs) * shock_up * remain_yf
+        d_nii_dn_100_with_swap = (gap_cf + gap_cf_irs - gap_cf_ca) * shock_dn * remain_yf
 
     Parameters
     ----------
-    ir_gap_beh  : DataFrame with columns currency, bs_side, tenor_bucket, cf_end_dt, gap_cf
-    horizon_yf  : NII horizon in year fractions (default 1.0 = 1 year)
-    shock_up    : rate shock up in decimal (default +100bps = 0.01)
-    shock_dn    : rate shock down in decimal (default -100bps = -0.01)
-    ca_gap      : optional DataFrame (currency, cf_end_dt, ca_gap_cf) for current account gap;
-                  when provided, ca_gap_cf is excluded from the down shock (floor = 0%)
+    ir_gap_beh : unified gap table with gap_cf, gap_cf_ca, gap_cf_irs columns
+    horizon_yf : NII horizon in year fractions (default 1.0)
+    shock_up   : rate shock up in decimal (default +100bps = 0.01)
+    shock_dn   : rate shock down in decimal (default -100bps = -0.01)
 
     Returns
     -------
-    detail_df   : per (currency, tenor_bucket) breakdown
-    summary_df  : total NII per currency
+    detail_df  : per (currency, tenor_bucket) breakdown
+    summary_df : total NII per currency
     """
     df = ir_gap_beh.copy()
+    for col in ("gap_cf_ca", "gap_cf_irs"):
+        if col not in df.columns:
+            df[col] = 0.0
 
-    # Attach current account gap (floored) per row, matched by (currency, bs_side, cf_end_dt)
-    if ca_gap is not None:
-        df = df.merge(
-            ca_gap[["currency", "bs_side", "cf_end_dt", "ca_gap_cf"]],
-            on=["currency", "bs_side", "cf_end_dt"],
-            how="left",
-        )
-        df["ca_gap_cf"] = df["ca_gap_cf"].fillna(0.0)
-    else:
-        df["ca_gap_cf"] = 0.0
-
-    # Net gap per (currency, tenor_bucket) — sign already applied in ir_gap_beh
+    # Aggregate gap components by (currency, tenor_bucket)
     net_gap = (
-        df.groupby(["currency", "tenor_bucket"], sort=False)[["gap_cf", "ca_gap_cf"]]
+        df.groupby(["currency", "tenor_bucket"], sort=False)
+        [["gap_cf", "gap_cf_ca", "gap_cf_irs"]]
         .sum()
         .reset_index()
-        .rename(columns={"gap_cf": "net_gap_cf", "ca_gap_cf": "net_ca_gap_cf"})
     )
 
     # Tenor year fraction and filter to horizon
-    net_gap["tenor_yf"] = net_gap["tenor_bucket"].map(_tenor_to_yf)
+    net_gap["tenor_yf"]  = net_gap["tenor_bucket"].map(_tenor_to_yf)
     net_gap = net_gap[net_gap["tenor_yf"] <= horizon_yf].copy()
-
-    # Remaining year fraction within horizon
     net_gap["remain_yf"] = (horizon_yf - net_gap["tenor_yf"]).clip(lower=0.0)
 
-    # NII sensitivity — down shock excludes CA (floored at 0%)
-    net_gap["nii_base"]        = 0.0
-    net_gap["nii_up_100bps"]   = net_gap["net_gap_cf"] * shock_up * net_gap["remain_yf"]
-    net_gap["nii_dn_100bps"]   = (
-        (net_gap["net_gap_cf"] - net_gap["net_ca_gap_cf"]) * shock_dn * net_gap["remain_yf"]
-    )
-    net_gap["delta_nii_up"]    = net_gap["nii_up_100bps"] - net_gap["nii_base"]
-    net_gap["delta_nii_dn"]    = net_gap["nii_dn_100bps"] - net_gap["nii_base"]
+    # Derived gap columns
+    net_gap["net_gap_without_ca"]      = net_gap["gap_cf"] - net_gap["gap_cf_ca"]
+    net_gap["net_gap_with_irs"]        = net_gap["gap_cf"] + net_gap["gap_cf_irs"]
+    net_gap["net_gap_with_irs_no_ca"]  = net_gap["net_gap_with_irs"] - net_gap["gap_cf_ca"]
+
+    # NII
+    net_gap["d_nii_up_100_no_swap"]   = net_gap["gap_cf"]               * shock_up * net_gap["remain_yf"]
+    net_gap["d_nii_dn_100_no_swap"]   = net_gap["net_gap_without_ca"]   * shock_dn * net_gap["remain_yf"]
+    net_gap["d_nii_up_100_with_swap"] = net_gap["net_gap_with_irs"]     * shock_up * net_gap["remain_yf"]
+    net_gap["d_nii_dn_100_with_swap"] = net_gap["net_gap_with_irs_no_ca"] * shock_dn * net_gap["remain_yf"]
 
     # Sort by currency then tenor
     net_gap["_sort"] = net_gap["tenor_bucket"].map(_tenor_sort_key)
@@ -101,21 +122,312 @@ def compute_nii(
     )
     detail_df = detail_df[[
         "currency", "tenor_bucket", "tenor_yf", "remain_yf",
-        "net_gap_cf", "net_ca_gap_cf", "nii_base", "nii_up_100bps", "nii_dn_100bps",
-        "delta_nii_up", "delta_nii_dn",
+        "gap_cf", "gap_cf_ca", "net_gap_without_ca",
+        "gap_cf_irs", "net_gap_with_irs", "net_gap_with_irs_no_ca",
+        "d_nii_up_100_no_swap", "d_nii_dn_100_no_swap",
+        "d_nii_up_100_with_swap", "d_nii_dn_100_with_swap",
     ]]
 
-    # Summary totals per currency
+    nii_cols = [
+        "d_nii_up_100_no_swap", "d_nii_dn_100_no_swap",
+        "d_nii_up_100_with_swap", "d_nii_dn_100_with_swap",
+    ]
     summary_df = (
         detail_df
-        .groupby("currency")[["net_gap_cf", "net_ca_gap_cf", "nii_base",
-                               "nii_up_100bps", "nii_dn_100bps",
-                               "delta_nii_up", "delta_nii_dn"]]
+        .groupby("currency")[nii_cols]
         .sum()
         .reset_index()
     )
 
     return detail_df, summary_df
+
+
+def compute_nii_shocked(
+    beh_df: pd.DataFrame,
+    shocked_disc_df: pd.Series,         # MultiIndex (curve_name, node_date) → d_f
+    disc_curve_map: dict[str, str],     # currency → disc_curve_name
+    report_date: pd.Timestamp,
+    scenario_id: str,
+    horizon_yf: float = 1.0,
+    nii_floor_rate: float = 0.0,
+    caps_map:   dict | None = None,
+    floors_map: dict | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Compute NII under a shocked rate scenario (EBA constant balance sheet).
+
+    For each CF in beh_df within the horizon:
+
+    Existing-portfolio interest (eff_rate logic)
+    --------------------------------------------
+    - fixed products  : int_pmt unchanged (contractual rate locked).
+                        eff_rate = int_pmt / (outstanding_bal × cf_yf).
+    - floating products: int_pmt recomputed using shocked forward rate derived
+                        from the shocked discount curve, with 0% floor.
+                        Shocked fwd_rt ≈ (d_f_start / d_f_end − 1) / cf_yf.
+    - current accounts: treated as float but fwd_rt = 0 (product rate already
+                        0% — insensitive to down shocks; no special override needed
+                        here because the product rate IS already 0 in eff_rate).
+
+    Renewal interest (constant balance assumption)
+    ----------------------------------------------
+    Capital repaid within the horizon is reinvested/re-borrowed at the shocked
+    forward rate for the remaining tenor to horizon-end:
+      nii_renewal = capital_total × max(0, shocked_renewal_fwd_rt) × remain_yf × sign
+
+    Returns
+    -------
+    detail_df  : per (currency, source, rate_type) breakdown
+    summary_df : total NII per currency
+    Both also include a 'scenario_id' column.
+    """
+    import numpy as np
+
+    horizon_end = report_date + pd.Timedelta(days=round(horizon_yf * 365.25))
+    df = beh_df.copy()
+
+    # ── Shocked forward rates for each CF ─────────────────────────────────────
+    # For each CF row: fwd_rt_shocked = (d_f(cf_start_dt) / d_f(cf_end_dt) - 1) / cf_yf
+    # Uses the pre-loaded daily shocked disc curve (same curve for the currency).
+    def _lookup_df(dates: pd.Series, curve_name: str) -> np.ndarray:
+        idx = pd.MultiIndex.from_arrays(
+            [[curve_name] * len(dates), dates.to_numpy()],
+            names=["curve_name", "node_date"],
+        )
+        return shocked_disc_df.reindex(idx).to_numpy(dtype=float)
+
+    fwd_rt_shocked = np.full(len(df), np.nan)
+    for ccy, grp in df.groupby("currency"):
+        cn = disc_curve_map.get(ccy)
+        if cn is None:
+            continue
+        idx = grp.index
+        d_f_start = _lookup_df(df.loc[idx, "cf_start_dt"], cn)
+        d_f_end   = _lookup_df(df.loc[idx, "cf_end_dt"],   cn)
+        yf        = df.loc[idx, "cf_yf"].to_numpy()
+        with np.errstate(divide="ignore", invalid="ignore"):
+            fwd = np.where(
+                (d_f_end > 0) & (yf > 0) & ~np.isnan(d_f_end),
+                (d_f_start / d_f_end - 1.0) / yf,
+                np.nan,
+            )
+        fwd_rt_shocked[idx] = fwd
+
+    df["fwd_rt_shocked"] = np.maximum(nii_floor_rate, np.nan_to_num(fwd_rt_shocked, nan=0.0))
+
+    # ── Effective rate per CF (eff_rate_shocked) ───────────────────────────────
+    # F (fixed)          → eff_rate (contracted, unchanged)
+    # V (variable)       → fwd_rt_shocked with per-product floor/cap applied
+    #                       e.g. CA with client_cap=0.001: rate stays capped in any shock
+    # A (administrative) → 0% regardless of scenario (bank-managed rate)
+    rate_type_s = df.get("rate_type", pd.Series("V", index=df.index))
+    df["eff_rate_shocked"] = df["eff_rate"].fillna(0.0)                     # F: contracted
+    mask_var   = rate_type_s == "V"
+    mask_admin = rate_type_s == "A"
+    if mask_var.any() and "product_code" in df.columns:
+        df.loc[mask_var, "eff_rate_shocked"] = _apply_rt_limits(
+            df.loc[mask_var, "fwd_rt_shocked"],
+            df.loc[mask_var, "product_code"],
+            caps_map, floors_map,
+        )
+    elif mask_var.any():
+        df.loc[mask_var, "eff_rate_shocked"] = df.loc[mask_var, "fwd_rt_shocked"]
+    df.loc[mask_admin, "eff_rate_shocked"] = 0.0                            # A: always 0%
+
+    # ── NII components ─────────────────────────────────────────────────────────
+    df["sign"] = np.where(df["bs_side"] == "A", 1.0, -1.0)
+
+    # Interest on existing positions at shocked client rate
+    df["nii_interest"] = (
+        df["outstanding_bal"].fillna(0.0)
+        * df["eff_rate_shocked"]
+        * df["cf_yf"].fillna(0.0)
+        * df["sign"]
+    )
+
+    # Renewal at the same shocked (and constrained) client rate
+    df["remain_yf"]    = ((horizon_end - df["cf_end_dt"]).dt.days / 365.0).clip(lower=0.0)
+    df["total_capital"]= df["capital_pmt"].fillna(0.0) + df["prepayment_pmt"].fillna(0.0)
+    df["nii_renewal"]  = (
+        df["total_capital"]
+        * df["eff_rate_shocked"]
+        * df["remain_yf"]
+        * df["sign"]
+    )
+    df["nii_total"]    = df["nii_interest"] + df["nii_renewal"]
+    df["scenario_id"]  = scenario_id
+
+    rate_type_col = df["rate_type"] if "rate_type" in df.columns else "float"
+    group_cols    = ["currency", "source", "rate_type"] if "rate_type" in df.columns \
+                    else ["currency", "source"]
+
+    detail_df = (
+        df.groupby(group_cols)[["nii_interest", "nii_renewal", "nii_total"]]
+        .sum()
+        .reset_index()
+        .assign(scenario_id=scenario_id)
+        .sort_values(group_cols)
+        .reset_index(drop=True)
+    )
+    summary_df = (
+        detail_df.groupby("currency")[["nii_interest", "nii_renewal", "nii_total"]]
+        .sum()
+        .reset_index()
+        .assign(scenario_id=scenario_id)
+    )
+    return detail_df, summary_df
+
+
+_SCHED_GROUP_COLS = ["schedule_id", "product_type", "product_code",
+                     "currency", "bs_side", "rate_type"]
+
+
+def compute_nii_base_schedule(
+    beh_df: pd.DataFrame,
+    report_date: pd.Timestamp,
+    horizon_yf: float = 1.0,
+    scenario_id: str = "base",
+    caps_map:    dict | None = None,
+    floors_map:  dict | None = None,
+    coeff_a_map: dict | None = None,
+    coeff_b_map: dict | None = None,
+) -> pd.DataFrame:
+    """Per-schedule NII for the base scenario (no rate shock).
+
+    Groups at (schedule_id, product_type, product_code, currency, bs_side, rate_type).
+    Renewal uses fwd_rt with per-product cap/floor applied (same limits as shocked scenario).
+
+    Returns
+    -------
+    DataFrame with: scenario_id + _SCHED_GROUP_COLS + nii_interest/renewal/total
+    """
+    horizon_end = report_date + pd.Timedelta(days=round(horizon_yf * 365.25))
+    df = beh_df.copy()
+    df["sign"] = np.where(df["bs_side"] == "A", 1.0, -1.0)
+    df["nii_interest"]  = df["int_pmt"].fillna(0.0) * df["sign"]
+    df["remain_yf"]     = ((horizon_end - df["cf_end_dt"]).dt.days / 365.0).clip(lower=0.0)
+    df["total_capital"] = df["capital_pmt"].fillna(0.0) + df["prepayment_pmt"].fillna(0.0)
+    # renewal uses fwd_rt (market rate, not contracted) with linear transform + floor/cap
+    # Fixed products renew at current market fwd_rt, variable at a*fwd_rt+b, admin at 0
+    renewal_base = df["fwd_rt"].fillna(0.0) if "fwd_rt" in df.columns else df["eff_rate"].fillna(0.0)
+    if "product_code" in df.columns:
+        renewal_rt = _apply_rt_limits(renewal_base, df["product_code"],
+                                      caps_map, floors_map, coeff_a_map, coeff_b_map)
+    else:
+        renewal_rt = renewal_base.to_numpy()
+    if "rate_type" in df.columns:
+        renewal_rt = renewal_rt.copy()
+        renewal_rt[(df["rate_type"] == "A").to_numpy()] = 0.0
+    df["nii_renewal"] = df["total_capital"] * renewal_rt * df["remain_yf"] * df["sign"]
+    df["nii_total"] = df["nii_interest"] + df["nii_renewal"]
+
+    group_cols = [c for c in _SCHED_GROUP_COLS if c in df.columns]
+    return (
+        df.groupby(group_cols)[["nii_interest", "nii_renewal", "nii_total"]]
+        .sum()
+        .reset_index()
+        .assign(scenario_id=scenario_id)
+    )
+
+
+def compute_nii_shocked_schedule(
+    beh_df: pd.DataFrame,
+    shocked_disc_df: pd.Series,
+    disc_curve_map: dict[str, str],
+    report_date: pd.Timestamp,
+    scenario_id: str,
+    horizon_yf: float = 1.0,
+    nii_floor_rate: float = 0.0,
+    caps_map:    dict | None = None,
+    floors_map:  dict | None = None,
+    coeff_a_map: dict | None = None,
+    coeff_b_map: dict | None = None,
+) -> pd.DataFrame:
+    """Per-schedule NII under a shocked rate scenario.
+
+    For variable products: eff_rate_shocked = max(floor, min(cap, fwd_rt_shocked)).
+    CAs with client_cap=0.001 (0.1%) stay capped regardless of shock size.
+
+    Returns
+    -------
+    DataFrame with: scenario_id + _SCHED_GROUP_COLS + nii_interest/renewal/total
+    """
+    import numpy as np
+
+    horizon_end = report_date + pd.Timedelta(days=round(horizon_yf * 365.25))
+    df = beh_df.copy()
+
+    def _lookup_df(dates: pd.Series, curve_name: str) -> np.ndarray:
+        idx = pd.MultiIndex.from_arrays(
+            [[curve_name] * len(dates), dates.to_numpy()],
+            names=["curve_name", "node_date"],
+        )
+        return shocked_disc_df.reindex(idx).to_numpy(dtype=float)
+
+    fwd_rt_shocked = np.full(len(df), np.nan)
+    for ccy, grp in df.groupby("currency"):
+        cn = disc_curve_map.get(ccy)
+        if cn is None:
+            continue
+        idx = grp.index
+        d_f_start = _lookup_df(df.loc[idx, "cf_start_dt"], cn)
+        d_f_end   = _lookup_df(df.loc[idx, "cf_end_dt"],   cn)
+        yf        = df.loc[idx, "cf_yf"].to_numpy()
+        with np.errstate(divide="ignore", invalid="ignore"):
+            fwd = np.where(
+                (d_f_end > 0) & (yf > 0) & ~np.isnan(d_f_end),
+                (d_f_start / d_f_end - 1.0) / yf,
+                np.nan,
+            )
+        fwd_rt_shocked[idx] = fwd
+
+    df["fwd_rt_shocked"] = np.maximum(nii_floor_rate, np.nan_to_num(fwd_rt_shocked, nan=0.0))
+
+    # eff_rate_shocked: F=fixed (unchanged), V=fwd_rt_shocked with per-product floor/cap
+    rate_type_s = df.get("rate_type", pd.Series("V", index=df.index))
+    df["eff_rate_shocked"] = df["eff_rate"].fillna(0.0)           # F: contracted rate
+    mask_var   = rate_type_s == "V"
+    mask_admin = rate_type_s == "A"
+    if mask_var.any() and "product_code" in df.columns:
+        df.loc[mask_var, "eff_rate_shocked"] = _apply_rt_limits(
+            df.loc[mask_var, "fwd_rt_shocked"],
+            df.loc[mask_var, "product_code"],
+            caps_map, floors_map, coeff_a_map, coeff_b_map,
+        )
+    elif mask_var.any():
+        df.loc[mask_var, "eff_rate_shocked"] = df.loc[mask_var, "fwd_rt_shocked"]
+    df.loc[mask_admin, "eff_rate_shocked"] = 0.0
+
+    df["sign"] = np.where(df["bs_side"] == "A", 1.0, -1.0)
+    df["nii_interest"] = (
+        df["outstanding_bal"].fillna(0.0)
+        * df["eff_rate_shocked"]
+        * df["cf_yf"].fillna(0.0)
+        * df["sign"]
+    )
+    df["remain_yf"]     = ((horizon_end - df["cf_end_dt"]).dt.days / 365.0).clip(lower=0.0)
+    df["total_capital"] = df["capital_pmt"].fillna(0.0) + df["prepayment_pmt"].fillna(0.0)
+    # renewal rate: always fwd_rt_shocked (market rate at renewal), with transform + limits
+    # Fixed products renew at shocked market rate, not at old contracted rate
+    if "product_code" in df.columns:
+        renewal_rt_shocked = _apply_rt_limits(
+            df["fwd_rt_shocked"], df["product_code"],
+            caps_map, floors_map, coeff_a_map, coeff_b_map,
+        )
+    else:
+        renewal_rt_shocked = df["fwd_rt_shocked"].to_numpy()
+    renewal_rt_shocked[mask_admin.to_numpy()] = 0.0
+    df["nii_renewal"]   = (
+        df["total_capital"] * renewal_rt_shocked * df["remain_yf"] * df["sign"]
+    )
+    df["nii_total"] = df["nii_interest"] + df["nii_renewal"]
+
+    group_cols = [c for c in _SCHED_GROUP_COLS if c in df.columns]
+    return (
+        df.groupby(group_cols)[["nii_interest", "nii_renewal", "nii_total"]]
+        .sum()
+        .reset_index()
+        .assign(scenario_id=scenario_id)
+    )
 
 
 def compute_nii_base(

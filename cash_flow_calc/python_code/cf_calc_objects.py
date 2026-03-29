@@ -22,11 +22,6 @@ dict_cols_loan_fin_inst = {
                  'balance_amt', 'amort_type', 'bs_side', 'product_code'],
 }
 
-dict_nms_loan_fin_inst = {
-    'loans':    'loan_orig',
-    'fin_inst': 'fin_inst_orig',
-}
-
 sched_tables = ['loans', 'fin_inst']
 
 dict_cols_deposits = {
@@ -37,13 +32,87 @@ dict_cols_deposits = {
                  'b_day_conv', 'disc_curve', 'balance_amt', 'bs_side', 'client_rt'],
 }
 
-dict_nms_deposits = {
-    'deposits': 'deposit_orig',
+# ── CF wide-table merge helpers ───────────────────────────────────────────────
+# Rate/identity columns carried from the orig side (filled from beh for outer-only rows).
+_CF_RATE_COLS = ['bs_side', 'rate_index', 'fixing_dt', 'cf_start_dt_delay', 'cf_end_dt',
+                 'cf_yf', 'd_f', 'fwd_rt', 'margin', 'client_rt']
+
+_CON_PAY_RENAME = {
+    'outstanding_bal': 'con_outstanding',
+    'capital_pmt':     'con_capital_pmt',
+    'int_pmt':         'con_interest_pmt',
+    'total_pmt':       'con_total_pmt',
+}
+_BEH_PAY_RENAME = {
+    'outstanding_bal': 'beh_outstanding',
+    'capital_pmt':     'beh_capital_pmt',
+    'int_pmt':         'beh_interest_pmt',
+    'total_pmt':       'beh_total_pmt',
 }
 
-dict_nms_deposits_beh = {
-    'deposits': 'deposit_beh',
-}
+
+def merge_cf_orig_beh(
+    orig_df: pd.DataFrame,
+    beh_df: pd.DataFrame,
+    how: str = 'inner',
+) -> pd.DataFrame:
+    """Merge contractual (orig) and behavioural (beh) CF schedules into one wide row.
+
+    how='inner'  — fin_inst: orig and beh are identical, same date grid.
+    how='left'   — loans: orig grid is authoritative; beh may have fewer rows
+                   (fully-prepaid periods absent from beh → filled with 0).
+    how='outer'  — deposits: orig has one bullet row per schedule; beh has N
+                   tenor-bucket rows.  Missing side filled with 0.
+
+    Added columns in output:
+        con_outstanding, con_capital_pmt, con_interest_pmt, con_total_pmt
+        beh_outstanding, beh_capital_pmt, beh_interest_pmt, beh_total_pmt
+        comp_capital_pmt, comp_interest_pmt, comp_total_pmt
+        prepayment_pmt   (loans only — absent/NULL for all other products)
+    """
+    JOIN_KEYS = ['schedule_id', 'cf_start_dt']
+
+    # Prepare orig side
+    orig_rate = [c for c in _CF_RATE_COLS if c in orig_df.columns]
+    orig_pay  = [c for c in _CON_PAY_RENAME if c in orig_df.columns]
+    orig_prep = (
+        orig_df[JOIN_KEYS + orig_rate + orig_pay]
+        .rename(columns=_CON_PAY_RENAME)
+    )
+
+    # Prepare beh side — include rate cols only for outer join (to fill beh-only rows)
+    beh_pay   = [c for c in _BEH_PAY_RENAME if c in beh_df.columns]
+    beh_extra = ['prepayment_pmt'] if 'prepayment_pmt' in beh_df.columns else []
+    if how == 'outer':
+        beh_rate = [c for c in _CF_RATE_COLS if c in beh_df.columns]
+        beh_sel  = JOIN_KEYS + beh_rate + beh_pay + beh_extra
+    else:
+        beh_sel  = JOIN_KEYS + beh_pay + beh_extra
+
+    beh_prep = beh_df[beh_sel].rename(columns=_BEH_PAY_RENAME)
+
+    merged = orig_prep.merge(beh_prep, on=JOIN_KEYS, how=how, suffixes=('', '_beh'))
+
+    if how == 'outer':
+        # Coalesce rate cols: orig value first; fall back to beh for beh-only rows
+        for col in _CF_RATE_COLS:
+            beh_col = f'{col}_beh'
+            if beh_col in merged.columns:
+                merged[col] = merged[col].fillna(merged[beh_col])
+                merged.drop(columns=[beh_col], inplace=True)
+
+    # Fill missing payment values with 0 on either side (left and outer both need this)
+    if how in ('left', 'outer'):
+        for col in list(_CON_PAY_RENAME.values()) + list(_BEH_PAY_RENAME.values()):
+            if col in merged.columns:
+                merged[col] = merged[col].fillna(0.0)
+
+    # Behavioural components = beh - con
+    merged['comp_capital_pmt']  = merged['beh_capital_pmt']  - merged['con_capital_pmt']
+    merged['comp_interest_pmt'] = merged['beh_interest_pmt'] - merged['con_interest_pmt']
+    merged['comp_total_pmt']    = merged['beh_total_pmt']    - merged['con_total_pmt']
+
+    return merged
 
 
 def get_calendar_from_currency(curr: str) -> ql.Calendar:
@@ -71,27 +140,59 @@ def get_dc_from_currency(curr: str) -> ql.DayCounter:
     return currency_to_dc_conv.get(curr, ql.Actual365Fixed())
 
 def tenor_to_months(tenor: str) -> int:
-    tenor = tenor.strip().upper()
+    """Convert tenor string to integer months using QuantLib Period units.
 
-    if tenor.endswith("M"):
-        return int(tenor[:-1])
-
-    if tenor.endswith("Y"):
-        return int(tenor[:-1]) * 12
-
+    Uses ql.Period so the conversion is exact and consistent with all other
+    QuantLib date arithmetic in the pipeline.
+    Days and weeks are converted to days (not months) — callers that need
+    to compare day-based and month-based tenors must handle this separately.
+    """
+    p = ql.Period(tenor)
+    unit = p.units()
+    n    = p.length()
+    if unit == ql.Days:   return n          # return days as-is; unit = 'D'
+    if unit == ql.Weeks:  return n * 7      # weeks → days
+    if unit == ql.Months: return n
+    if unit == ql.Years:  return n * 12
     raise ValueError(f"Unsupported tenor: {tenor}")
 
-def freeze_fixing_dates(fixing_dates: list[ql.Date], payment_freq: str, fixing_freq: str) -> list[ql.Date]:
-    pay_m = tenor_to_months(payment_freq)
-    fix_m = tenor_to_months(fixing_freq)
 
-    if fix_m < pay_m:
+def _period_to_canonical(tenor: str) -> tuple[int, int]:
+    """Return (value, unit_code) where unit_code 0=days, 1=months.
+
+    Weeks are normalised to days; years to months.
+    This keeps day-based and month-based frequencies in separate integer spaces
+    so block-size division is always exact.
+    """
+    p = ql.Period(tenor)
+    unit = p.units()
+    n    = p.length()
+    if unit == ql.Days:   return n,      0
+    if unit == ql.Weeks:  return n * 7,  0
+    if unit == ql.Months: return n,      1
+    if unit == ql.Years:  return n * 12, 1
+    raise ValueError(f"Unsupported tenor: {tenor}")
+
+
+def freeze_fixing_dates(fixing_dates: list[ql.Date], payment_freq: str, fixing_freq: str) -> list[ql.Date]:
+    pay_val, pay_unit = _period_to_canonical(payment_freq)
+    fix_val, fix_unit = _period_to_canonical(fixing_freq)
+
+    if pay_unit != fix_unit:
+        raise ValueError(
+            f"Cannot mix day-based and month-based frequencies: "
+            f"payment_freq={payment_freq}, fixing_freq={fixing_freq}"
+        )
+
+    if fix_val < pay_val:
         raise ValueError("Assumption violated: payment_freq must be <= fixing_freq")
 
-    if fix_m % pay_m != 0:
-        raise ValueError(f"Fixing freq {fixing_freq} not divisible by payment freq {payment_freq}")
+    if fix_val % pay_val != 0:
+        raise ValueError(
+            f"Fixing freq {fixing_freq} not divisible by payment freq {payment_freq}"
+        )
 
-    block = fix_m // pay_m
+    block = fix_val // pay_val
     n = len(fixing_dates)
 
     out = []
@@ -205,6 +306,7 @@ def gen_orgin_sched_loan_fin_inst(
     disc_df: pd.Series,   # MultiIndex: (curve_name, node_date) -> d_f
     fwd_df: pd.Series,    # MultiIndex: (curve_name, fixing_freq, node_date) -> fwd_rt
     fix_df: pd.Series,    # MultiIndex: (fixing_date, rate_index) -> rate
+    ir_params: dict = None,
 ) -> Optional[pd.DataFrame]:
     r_dt_ql = ql.Date.from_date(report_date)
 
@@ -250,12 +352,23 @@ def gen_orgin_sched_loan_fin_inst(
             fixing_freq=row.fixing_freq,
         )
 
+    # delay shift: if product has a delay, shift cf_start_dt back by that many months
+    pc = int(row.product_code) if hasattr(row, 'product_code') else None
+    delay_months = (ir_params or {}).get(pc, {}).get('delay', 0) if pc is not None else 0
+
+    if delay_months:
+        delay_period = ql.Period(-delay_months, ql.Months)
+        cf_start_dates_delay = [cal.advance(dt, delay_period, bdc) for dt in cf_start_dates]
+    else:
+        cf_start_dates_delay = cf_start_dates
+
     result_df = pd.DataFrame(
         {
             "schedule_id": [row.schedule_id] * len(cf_end_dates),
             "rate_index": [row.rate_index] * len(cf_end_dates),
             "fixing_dt": fixing_dates,
             "cf_start_dt": cf_start_dates,
+            "cf_start_dt_delay": cf_start_dates_delay,
             "cf_end_dt": cf_end_dates,
             "cf_yf": accrual_yf,
         }
@@ -263,12 +376,13 @@ def gen_orgin_sched_loan_fin_inst(
 
     # QuantLib.Date -> datetime
     result_df["cf_start_dt"] = ql_column_to_datetime(result_df["cf_start_dt"])
+    result_df["cf_start_dt_delay"] = ql_column_to_datetime(result_df["cf_start_dt_delay"])
     result_df["cf_end_dt"] = ql_column_to_datetime(result_df["cf_end_dt"])
     result_df["fixing_dt"] = ql_column_to_datetime(result_df["fixing_dt"])
 
-    # join_dt = min(cf_start_dt) dla danego fixing_dt
+    # join_dt = min(cf_start_dt_delay) per fixing_dt — uses delay-shifted date for fwd_rt lookup
     result_df["join_dt"] = (
-        result_df.groupby("fixing_dt")["cf_start_dt"]
+        result_df.groupby("fixing_dt")["cf_start_dt_delay"]
         .transform("min")
     )
 

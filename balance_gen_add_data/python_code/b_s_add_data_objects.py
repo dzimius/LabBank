@@ -13,18 +13,24 @@ dict_tbl_sched_id = {
     'financial_instruments': 'fin_inst',
     'deposits': 'deposits',
 }
+# Grouping columns that exist in the source table (used in GROUP BY and ORDER BY for schedule_id).
+# All sched tables share the same output columns; missing source columns are filled with NULL
+# via dict_tbl_sched_null_cols below.
 dict_tbl_sched_id_cols = {
     # amort_type included so each schedule_id maps to a single amortization type
     # product_code included for loans so prepayment model can be joined in CF calc
     # bs_side included to carry balance sheet sign (A/L) into cash flow tables
-    'loans': ["currency", "bs_side", "rate_type", "start_date", "maturity_date", "payment_freq", "fixing_freq",
-              "dc_conv", "b_day_conv", "rate_index", "disc_curve", "fwd_curve", "amort_type", "product_code"],
-    'financial_instruments': ["currency", "bs_side", "rate_type", "product_code", "start_date", "maturity_date", "payment_freq", "fixing_freq",
-                              "dc_conv", "b_day_conv", "rate_index", "disc_curve", "fwd_curve", "amort_type"],
+    'loans': ["currency", "bs_side", "rate_type", "product_code", "start_date", "maturity_date",
+              "payment_freq", "fixing_freq", "dc_conv", "b_day_conv", "rate_index",
+              "disc_curve", "fwd_curve", "amort_type"],
+    'financial_instruments': ["currency", "bs_side", "rate_type", "product_code", "start_date", "maturity_date",
+                              "payment_freq", "fixing_freq", "dc_conv", "b_day_conv", "rate_index",
+                              "disc_curve", "fwd_curve", "amort_type"],
     # deposits: grouped by contract params + product_code for separate behavioural models
     # NULL maturity_date = non-maturity (overnight)
     # rate_type: F=fixed, V=variable/float, A=administrative (bank-managed, e.g. CA/saving)
-    'deposits': ["product_code", "currency", "bs_side", "rate_type", "start_date", "maturity_date", "dc_conv", "b_day_conv", "disc_curve", "fwd_curve"],
+    'deposits': ["currency", "bs_side", "rate_type", "product_code", "start_date", "maturity_date",
+                 "dc_conv", "b_day_conv", "disc_curve", "fwd_curve"],
 }
 dict_tbl_sched_sum_cols = {
     'loans': ["init_balance_amt", "balance_amt"],
@@ -36,6 +42,12 @@ dict_tbl_sched_avg_cols = {
     'loans': ["margin", "index_rt", "client_rt"],
     'financial_instruments': ["index_rt", "client_rt"],
     'deposits': ["index_rt", "client_rt"],
+}
+# Columns not present in the source table; written as NULL in the sched table for consistency.
+dict_tbl_sched_null_cols = {
+    'loans': [],
+    'financial_instruments': ["init_balance_amt", "margin"],
+    'deposits': ["payment_freq", "fixing_freq", "rate_index", "amort_type", "init_balance_amt", "margin"],
 }
 
 def get_calendar_from_currency(curr: str) -> ql.Calendar:

@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd:*)",
+      "Bash(python -c \":*)",
+      "Bash(python cf_calc_workflow.py)",
+      "Bash(python nii_calc_workflow.py)",
+      "Bash(python -c \"import pandas as pd; df = pd.read_excel\\(''ir_derivatives/input/ir_swap_params.xlsx''\\); print\\(df.columns.tolist\\(\\)\\); print\\(df.to_string\\(\\)\\)\")",
+      "Bash(python create_irs_input.py)",
+      "Bash(python -m py_compile ir_derivatives/python_code/sql_setup.py)",
+      "Bash(python -m py_compile ir_derivatives/python_code/irs_objects.py)",
+      "Bash(python -m py_compile ir_derivatives/python_code/irs_workflow.py)",
+      "Bash(python3:*)",
+      "Bash(python:*)",
+      "WebSearch",
+      "WebFetch(domain:www.eba.europa.eu)",
+      "WebFetch(domain:www.bis.org)",
+      "WebFetch(domain:assets.kpmg.com)",
+      "WebFetch(domain:eur-lex.europa.eu)",
+      "Bash(find C:UsersdzimiDocumentsdata_engineeringdata_projectsgit_hub_projectsbank_project -type f \\\\\\(-name *.xlsx -o -name *.csv \\\\\\) ! -path */venv/*)",
+      "Bash(del:*)",
+      "Bash(find C:/Users/dzimi/Documents/data_engineering/data_projects/git_hub_projects/bank_project -name *.py)",
+      "Bash(xargs grep:*)",
+      "Bash(unzip -l bank_data.xlsx)",
+      "Bash(unzip -p bank_data.xlsx xl/worksheets/sheet1.xml)",
+      "Bash(unzip -p bank_data.xlsx xl/sharedStrings.xml)",
+      "Bash(grep -n \"equity\\\\|retained_earnings\\\\|common_shares\\\\|risk_reserves\" irrbb_calc/python_code/*.py -i)",
+      "Bash(grep -n \"equity\\\\|retained_earnings\\\\|common_shares\\\\|risk_reserves\" balance_generate/python_code/*.py -i)"
+    ]
+  }
+}

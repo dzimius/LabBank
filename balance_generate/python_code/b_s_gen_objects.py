@@ -1067,7 +1067,79 @@ class OneRowDummyProductGen(ProductGen):
             disc_curve=row["disc_curve"],
             fwd_curve=row["fwd_curve"],
         )
-    
+
+
+class CashGen(ProductGen):
+    """Single-row overnight cash position (central bank reserves / vault cash).
+
+    IRRBB treatment: cash has no interest rate sensitivity — it reprices overnight.
+    Placed in the 1D bucket for both liquidity and IR gap.
+      - maturity_date = next business day (overnight)
+      - amort_type    = 0  (bullet: full balance returned overnight)
+      - rate_type     = 'F', client_rt ≈ 0  (non-interest bearing)
+    EVE impact ≈ face value (d_f ≈ 1.0 at overnight).
+    Stored in financial_instruments so it flows through CF calc and IRRBB.
+    """
+    def __init__(self, product_name, product_code, bs_side, balance_amt, currency,
+                 client_type_id, rate_type, dc_conv, b_day_conv, disc_curve, fwd_curve):
+        super().__init__(product_name, product_code, bs_side, balance_amt, currency,
+                         client_type_id, rate_type, dc_conv, b_day_conv, disc_curve, fwd_curve)
+        self.cal = get_calendar_from_currency(currency)
+
+    def gen_set_of_transactions(self):
+        return pd.DataFrame({'balance_amt': [self.balance_amt]})
+
+    def add_parameters(self, set_of_transactions):
+        array_of_ids = self.add_ids(len(set_of_transactions))
+        report_dt = pd.Timestamp(config.report_date)
+        maturity_dt = ql_date_to_pd_date(
+            self.cal.advance(
+                ql.Date.from_date(report_dt.date()),
+                ql.Period(1, ql.Days),
+                ql.Following,
+            )
+        )
+        return pd.DataFrame({
+            'report_date':    config.report_date,
+            'transaction_id': array_of_ids,
+            'product_name':   self.product_name,
+            'product_code':   self.product_code,
+            'bs_side':        self.bs_side,
+            'balance_amt':    set_of_transactions['balance_amt'],
+            'currency':       self.currency,
+            'client_type_id': self.client_type_id,
+            'rate_type':      self.rate_type,
+            'start_date':     report_dt,
+            'maturity_date':  maturity_dt,
+            'maturity':       '1D',
+            'amort_type':     0,
+            'rate_index':     None,
+            'dc_conv':        self.dc_conv,
+            'fixing_freq':    '1M',
+            'payment_freq':   '1M',
+            'b_day_conv':     self.b_day_conv,
+            'disc_curve':     self.disc_curve,
+            'fwd_curve':      self.fwd_curve,
+            'client_rt':      0.0,
+            'index_rt':       0.0,
+        })
+
+    @classmethod
+    def create_from_row(cls, row):
+        return cls(
+            product_name=row["product_name"],
+            product_code=row["product_code"],
+            bs_side=row["bs_side"],
+            balance_amt=row["balance_amt"],
+            currency=row["currency"],
+            client_type_id=row["client_type_id"],
+            rate_type=row["rate_type"],
+            dc_conv=row["dc_conv"],
+            b_day_conv=row["b_day_conv"],
+            disc_curve=row["disc_curve"],
+            fwd_curve=row["fwd_curve"],
+        )
+
 
 def compute_deposit_client_rt(
     all_tx: pd.DataFrame,
@@ -1090,7 +1162,8 @@ def compute_deposit_client_rt(
                           lookup key is (fixing_date, rate_index) — tenor is embedded in rate_index
     """
     deposit_names = {'current_account', 'saving_account', 'term_deposit'}
-    deposit_mask = all_tx['product_name'].isin(deposit_names)
+    # Asset-side term deposits (interbank placements) are handled by compute_asset_rates
+    deposit_mask = all_tx['product_name'].isin(deposit_names) & (all_tx['bs_side'] == 'L')
 
     all_tx = all_tx.copy()
     all_tx['index_rt']  = np.nan
@@ -1230,12 +1303,13 @@ def compute_asset_rates(
     index_rt = effective index rate for this contract (decimal):
       - Floating (rate_type='V'): fixing at report_date  (reprices with market)
       - Fixed    (rate_type='F'): fixing at start_date   (locked at origination)
-    client_rt = max(index_rt, index_floor) + margin
-      margin = 0 for fin_inst (no spread).
+    client_rt = a * max(index_rt, index_floor) + b/100
+      a, b from interest_rt.xlsx (b in % points); default a=1, b=0.
     """
     asset_names = {
         'mortgage_fixed', 'mortgage_float', 'cash_loan_fixed', 'cash_loan_float',
         'investment_loan_fixed', 'investment_loan_float', 'bond_fixed', 'bond_float',
+        'issued_bond', 'term_deposit',
     }
     asset_mask = all_tx['product_name'].isin(asset_names)
 
@@ -1252,11 +1326,13 @@ def compute_asset_rates(
     ir['product_code'] = ir['product_code'].astype(int)
     ir = ir.set_index('product_code')
 
-    pc_to_rate_index = (
-        bs_struct[['product_code', 'rate_index']]
+    # Index by (product_code, bs_side) so products that appear on both sides
+    # (e.g. interbank term deposit 7900: A=placement, L=funding) resolve correctly.
+    pc_bs_to_rate_index = (
+        bs_struct[['product_code', 'bs_side', 'rate_index']]
         .dropna(subset=['rate_index'])
-        .drop_duplicates('product_code')
-        .set_index('product_code')['rate_index']
+        .drop_duplicates(['product_code', 'bs_side'])
+        .set_index(['product_code', 'bs_side'])['rate_index']
         .astype(str)
     )
 
@@ -1277,32 +1353,46 @@ def compute_asset_rates(
     for pc in sorted(asset_pcs):
         pc_mask = asset_mask & (all_tx['product_code'].astype(int) == pc)
 
-        if pc not in pc_to_rate_index.index:
-            continue  # no rate_index (e.g., retained_earnings) — skip
+        # Resolve rate_index per (product_code, bs_side) — handles products on both sides
+        bs_val = all_tx.loc[pc_mask, 'bs_side'].iloc[0] if pc_mask.any() else None
+        key = (pc, bs_val)
+        if key not in pc_bs_to_rate_index.index:
+            continue  # no rate_index (e.g., cash, retained_earnings) — skip
 
-        rate_index = pc_to_rate_index[pc]
+        rate_index = pc_bs_to_rate_index[key]
 
-        # index_floor from interest_rt
+        # Rate formula parameters from interest_rt (same convention as deposit products)
         index_floor = None
+        a     = 1.0
+        b_dec = 0.0
         if pc in ir.index:
             row_ir = ir.loc[pc]
             if 'index_floor' in row_ir.index and not pd.isna(row_ir.get('index_floor', np.nan)):
                 index_floor = float(row_ir['index_floor'])
+            if 'a' in row_ir.index and not pd.isna(row_ir.get('a', np.nan)):
+                a = float(row_ir['a'])
+            if 'b' in row_ir.index and not pd.isna(row_ir.get('b', np.nan)):
+                b_dec = float(row_ir['b']) / 100.0   # % points → decimal
+
+        def _client_rt(index_rt_dec: float) -> float:
+            floored = max(index_rt_dec, index_floor) if index_floor is not None else index_rt_dec
+            return a * floored + b_dec
 
         float_mask = pc_mask & (all_tx['rate_type'] == 'V')
         fixed_mask = pc_mask & (all_tx['rate_type'] == 'F')
 
-        margin_col = all_tx['margin'].fillna(0.0) if 'margin' in all_tx.columns else pd.Series(0.0, index=all_tx.index)
+        # Override per-contract margin with product-level b from interest_rt
+        if 'margin' in all_tx.columns and b_dec != 0.0:
+            all_tx.loc[pc_mask, 'margin'] = b_dec
 
-        # Floating: index_rt = fixing at report_date; client_rt = max(index_rt, floor) + margin
+        # Floating: index_rt = fixing at report_date; client_rt = a * max(index_rt, floor) + b
         if float_mask.any():
             float_val = _get_fixing_dec(rate_index, report_ts)
-            all_tx.loc[float_mask, 'index_rt'] = float_val
+            all_tx.loc[float_mask, 'index_rt']  = float_val
             if not np.isnan(float_val):
-                floored = max(float_val, index_floor) if index_floor is not None else float_val
-                all_tx.loc[float_mask, 'client_rt'] = floored + margin_col.loc[float_mask]
+                all_tx.loc[float_mask, 'client_rt'] = _client_rt(float_val)
 
-        # Fixed: index_rt = fixing at start_date; client_rt = max(index_rt, floor) + margin
+        # Fixed: index_rt = fixing at start_date; client_rt = a * max(index_rt, floor) + b
         if fixed_mask.any():
             unique_starts = all_tx.loc[fixed_mask, 'start_date'].dropna().unique()
             start_to_rt = {}
@@ -1312,11 +1402,10 @@ def compute_asset_rates(
             index_rt_s = all_tx.loc[fixed_mask, 'start_date'].apply(
                 lambda d: start_to_rt.get(pd.Timestamp(d), np.nan) if pd.notna(d) else np.nan
             )
-            all_tx.loc[fixed_mask, 'index_rt'] = index_rt_s.values
-            floored_s = index_rt_s.apply(
-                lambda rt: max(rt, index_floor) if not np.isnan(rt) and index_floor is not None else rt
-            )
-            all_tx.loc[fixed_mask, 'client_rt'] = floored_s.values + margin_col.loc[fixed_mask].values
+            all_tx.loc[fixed_mask, 'index_rt']  = index_rt_s.values
+            all_tx.loc[fixed_mask, 'client_rt'] = index_rt_s.apply(
+                lambda rt: _client_rt(rt) if not np.isnan(rt) else np.nan
+            ).values
 
     return all_tx
 
@@ -1332,10 +1421,14 @@ class ProductFactory:
         "investment_loan_float": LoansFloatGen,
         "bond_fixed": BondsFixedGen,
         "bond_float": BondsFloatGen,
+        "issued_bond": BondsFloatGen,
+        "cash": CashGen,
         "saving_account": SavingAccountsGen,
         "current_account": CurrentAccountsGen,
         "term_deposit": TermDepositsGen,
         "retained_earnings": OneRowDummyProductGen,
+        "common_shares":     OneRowDummyProductGen,
+        "risk_reserves":     OneRowDummyProductGen,
     }
     table_registry = {
         LoansFixedGen: "loans",
@@ -1345,6 +1438,7 @@ class ProductFactory:
         TermDepositsGen: "deposits",
         BondsFixedGen: "financial_instruments",
         BondsFloatGen: "financial_instruments",
+        CashGen: "financial_instruments",
         OneRowDummyProductGen: "equity",
     }
 

@@ -47,6 +47,7 @@ if __name__ == "__main__":
             columns=bs_objs.dict_tbl_sched_id_cols[table],
             sum_cols=bs_objs.dict_tbl_sched_sum_cols[table],
             avg_cols=bs_objs.dict_tbl_sched_avg_cols.get(table, []),
+            null_cols=bs_objs.dict_tbl_sched_null_cols.get(table, []),
             source_schema="schemat",
             target_schema="sched",
         )
