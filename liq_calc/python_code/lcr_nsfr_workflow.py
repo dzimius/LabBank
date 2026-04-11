@@ -1,19 +1,16 @@
-"""LCR / NSFR + IRRBB Report Workflow
-=====================================
-Run order: balance_generate → balance_gen_add_data → cash_flow_calc
-           → irrbb_calc (nii_calc_workflow + eve_calc_workflow) → THIS FILE
+"""LCR / NSFR Workflow
+=====================
+Run order: balance_generate → balance_gen_add_data → cash_flow_calc → THIS FILE
 
 Produces
 --------
 1. results.lcr_nsfr  (SQL) — one row per (report_date, currency):
      hqla, outflows_30d, inflows_30d, net_outflows_30d, lcr, asf, rsf, nsfr
 
-2. results.irrbb_report (SQL) — one row per (report_date, currency, scenario_id):
-     nii_base, nii_shocked, delta_nii, eve_base, eve_shocked, delta_eve
-   + extra rows: scenario_id='worst_nii' and 'worst_eve' per currency
+2. output/lcr_nsfr_report.xlsx  — LCR and NSFR
 
-3. output/lcr_nsfr_report.xlsx  — LCR and NSFR only
-4. output/irrbb_report.xlsx     — all EBA scenarios + worst_nii + worst_eve rows
+Note: results.irrbb_report and output/irrbb_report.xlsx are now written by
+eba_sot_workflow.py (irrbb_calc) — run that after nii_calc_workflow + eve_calc_workflow.
 """
 import os
 import pandas as pd
@@ -88,72 +85,4 @@ with pd.ExcelWriter(lcr_nsfr_path, engine="openpyxl") as writer:
     liq_summary.to_excel(writer, sheet_name="LCR_NSFR", index=False)
 print(f"  Written to {lcr_nsfr_path}")
 
-# ── 7. Load NII and EVE results from irrbb schema ────────────────────────────
-print("Loading NII results from irrbb.nii_results...")
-try:
-    nii_df = sql_setup.load_nii_by_scenario(REPORT_DATE)
-    print(f"  Loaded {len(nii_df)} (currency, scenario) NII rows.")
-except Exception as e:
-    raise RuntimeError(
-        f"Failed to load irrbb.nii_results: {e}\n"
-        "Run nii_calc_workflow.py before this script."
-    ) from e
-
-print("Loading EVE results from irrbb.eve_results...")
-try:
-    eve_df = sql_setup.load_eve_by_scenario(REPORT_DATE)
-    print(f"  Loaded {len(eve_df)} (currency, scenario) EVE rows.")
-except Exception as e:
-    raise RuntimeError(
-        f"Failed to load irrbb.eve_results: {e}\n"
-        "Run eve_calc_workflow.py before this script."
-    ) from e
-
-# ── 8. Build IRRBB report (NII + EVE only, with worst-scenario rows) ──────────
-print("Building IRRBB report...")
-tier1_capital = sql_setup.load_tier1_capital(REPORT_DATE)
-print(f"  Tier 1 capital loaded from schemat.equity: {tier1_capital:,.0f}")
-
-irrbb_df = liq_obj.build_irrbb_report(
-    report_date     = REPORT_DATE,
-    nii_by_scenario = nii_df,
-    eve_by_scenario = eve_df,
-    tier1_capital   = tier1_capital,
-)
-print(f"  Report rows: {len(irrbb_df)}  "
-      f"(currencies: {irrbb_df['currency'].nunique()}, "
-      f"scenarios: {irrbb_df['scenario_id'].nunique()})")
-
-# ── 9. Write IRRBB report to SQL ──────────────────────────────────────────────
-print("Writing results.irrbb_report to SQL...")
-sql_setup.reset_irrbb_report()
-sql_setup.write_irrbb_report(irrbb_df)
-print(f"  Written {len(irrbb_df)} rows to results.irrbb_report.")
-
-# ── 10. Write IRRBB report to Excel ───────────────────────────────────────────
-irrbb_path = "output/irrbb_report.xlsx"
-print(f"Writing IRRBB Excel to {irrbb_path}...")
-
-# Separate regular scenarios from worst rows for clarity
-regular_rows = irrbb_df[~irrbb_df["scenario_id"].isin(["worst_nii", "worst_eve"])]
-worst_rows   = irrbb_df[irrbb_df["scenario_id"].isin(["worst_nii", "worst_eve"])]
-
-delta_nii = (
-    irrbb_df[["currency", "scenario_id", "nii_base", "nii_shocked", "delta_nii"]]
-    .sort_values(["currency", "scenario_id"])
-    .reset_index(drop=True)
-)
-delta_eve = (
-    irrbb_df[["currency", "scenario_id", "eve_base", "eve_shocked", "delta_eve"]]
-    .sort_values(["currency", "scenario_id"])
-    .reset_index(drop=True)
-)
-
-with pd.ExcelWriter(irrbb_path, engine="openpyxl") as writer:
-    irrbb_df.to_excel(   writer, sheet_name="IRRBB_all",   index=False)
-    worst_rows.to_excel( writer, sheet_name="Worst_scenarios", index=False)
-    delta_nii.to_excel(  writer, sheet_name="Delta_NII",    index=False)
-    delta_eve.to_excel(  writer, sheet_name="Delta_EVE",    index=False)
-
-print(f"  Written to {irrbb_path}")
 print("Done.")

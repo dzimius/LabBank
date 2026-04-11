@@ -10,6 +10,127 @@ _SCHED_GROUP_COLS = ["schedule_id", "product_type", "product_code",
                      "currency", "bs_side", "rate_type"]
 
 
+def _lookup_shocked_df(
+    dates: pd.Series,
+    currency: pd.Series,
+    shocked_disc_df: pd.Series,
+    disc_curve_map: dict[str, str],
+) -> pd.Series:
+    """Look up shocked discount factors for each (date, currency) pair.
+
+    Returns a Series indexed like `dates` with d_f values (NaN where unavailable).
+    """
+    out = pd.Series(np.nan, index=dates.index)
+    for ccy in currency.unique():
+        cn = disc_curve_map.get(ccy)
+        if cn is None:
+            continue
+        mask = currency == ccy
+        mi = pd.MultiIndex.from_arrays(
+            [[cn] * int(mask.sum()), dates.loc[mask].to_numpy()],
+            names=["curve_name", "node_date"],
+        )
+        out.loc[mask] = shocked_disc_df.reindex(mi).to_numpy(dtype=float)
+    return out
+
+
+def _build_shocked_disc_and_fwd(
+    df: pd.DataFrame,
+    shocked_disc_df: pd.Series,
+    disc_curve_map: dict[str, str],
+    eve_floor_rate: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Compute (d_f_end, d_f_start, fwd_rt_shocked, locked_mask) arrays indexed like df.
+
+    Forward rate logic
+    ------------------
+    For variable-rate products where fixing_dt is present, the shocked forward
+    rate is derived from the **fixing period** boundaries:
+      period_start = fixing_dt
+      period_end   = max(cf_end_dt) within (schedule_id, fixing_dt) group
+      fwd_rt_shocked = (d_f(period_start) / d_f(period_end) − 1) / yf_period
+
+    This ensures a 3M-fixing loan gets a 3M shocked rate on every monthly CF,
+    matching the base-scenario behaviour where fwd_rt is constant within a
+    fixing period.  When fixing_dt is before the shocked-curve start
+    (d_f_shocked(fixing_dt) == 0), the rate is already locked → the caller
+    substitutes the base fwd_rt (write_shocked_cf_products start_unavail check).
+
+    All other rows use individual CF boundaries (d_f_start / d_f_end).
+
+    locked_mask
+    -----------
+    Boolean array (True = rate already fixed at fixing_dt before report_date).
+    Callers use this to substitute int_pmt directly for locked CFs, preserving
+    the contracted client rate (including origination margin).
+    """
+    d_f_end_ser   = _lookup_shocked_df(df["cf_end_dt"],   df["currency"],
+                                       shocked_disc_df, disc_curve_map)
+    d_f_start_ser = _lookup_shocked_df(df["cf_start_dt"], df["currency"],
+                                       shocked_disc_df, disc_curve_map)
+
+    d_f_end   = d_f_end_ser.to_numpy()
+    d_f_start = d_f_start_ser.to_numpy()
+
+    # Default: individual CF fwd rate
+    yf = df["cf_yf"].fillna(0.0).to_numpy()
+    with np.errstate(divide="ignore", invalid="ignore"):
+        fwd_rt_raw = np.where(
+            (d_f_end > 0) & (yf > 0) & ~np.isnan(d_f_end),
+            (d_f_start / d_f_end - 1.0) / yf,
+            np.nan,
+        )
+    fwd_rt_shocked = np.maximum(eve_floor_rate, np.nan_to_num(fwd_rt_raw, nan=0.0))
+
+    locked_mask_ser = pd.Series(False, index=df.index)
+
+    # ── Fixing-period override for variable products with fixing_dt ───────────
+    rate_type_s = df.get("rate_type", pd.Series("V", index=df.index))
+    if "fixing_dt" in df.columns and "schedule_id" in df.columns:
+        mask_var_fix = (rate_type_s == "V") & df["fixing_dt"].notna()
+        if mask_var_fix.any():
+            sub = df.loc[mask_var_fix]
+            # Fixing period: from fixing_dt to the last CF end in that period
+            period_end_ser   = (
+                sub.groupby(["schedule_id", "fixing_dt"])["cf_end_dt"]
+                .transform("max")
+            )
+            period_start_ser = pd.to_datetime(sub["fixing_dt"])
+            yf_period_ser    = (period_end_ser - period_start_ser).dt.days / 365.0
+
+            d_f_pstart = _lookup_shocked_df(period_start_ser, sub["currency"],
+                                            shocked_disc_df, disc_curve_map)
+            d_f_pend   = _lookup_shocked_df(period_end_ser,   sub["currency"],
+                                            shocked_disc_df, disc_curve_map)
+
+            valid = (d_f_pstart > 0) & (d_f_pend > 0) & (yf_period_ser > 0)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                fwd_period = np.where(
+                    valid,
+                    (d_f_pstart / d_f_pend - 1.0)
+                    / yf_period_ser.where(yf_period_ser > 0, np.nan),
+                    np.nan,
+                )
+            fwd_period = np.maximum(eve_floor_rate, np.nan_to_num(fwd_period, nan=0.0))
+
+            # Where fixing_dt is on the shocked curve: use period shocked rate.
+            # Where fixing_dt is before the curve start (rate already locked):
+            # use base fwd_rt so that int_pmt_shocked == int_pmt (no change).
+            base_fwd_locked = df.loc[mask_var_fix, "fwd_rt"].fillna(0.0).to_numpy()
+            fwd_rt_shocked_ser = pd.Series(fwd_rt_shocked, index=df.index)
+            fwd_rt_shocked_ser.loc[mask_var_fix] = np.where(
+                valid.to_numpy(),
+                fwd_period,
+                base_fwd_locked,
+            )
+            fwd_rt_shocked = fwd_rt_shocked_ser.to_numpy()
+
+            # Mark locked rows: fixing_dt before the shocked curve (valid == False)
+            locked_mask_ser.loc[mask_var_fix] = ~valid.to_numpy()
+
+    return d_f_end, d_f_start, fwd_rt_shocked, locked_mask_ser.to_numpy()
+
+
 def compute_eve_base(
     beh_df: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -65,8 +186,10 @@ def compute_eve_shocked(
     disc_curve_map: dict[str, str],      # currency → disc_curve_name
     scenario_id: str,
     eve_floor_rate: float = 0.0,
-    caps_map:   dict | None = None,
-    floors_map: dict | None = None,
+    caps_map:    dict | None = None,
+    floors_map:  dict | None = None,
+    coeff_a_map: dict | None = None,
+    coeff_b_map: dict | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Compute EVE under a shocked rate scenario (run-off, no renewal).
 
@@ -82,8 +205,9 @@ def compute_eve_shocked(
     - F (fixed)        : int_pmt unchanged — contracted rate locked.
     - V (variable)     : int_pmt_shocked = outstanding_bal × eff_rate_shocked × cf_yf
                          where eff_rate_shocked = max(floor, min(cap, fwd_rt_shocked))
-                         fwd_rt_shocked derived from shocked disc curve:
-                         (d_f_shocked(cf_start) / d_f_shocked(cf_end) − 1) / cf_yf
+                         fwd_rt_shocked derived from shocked disc curve over the
+                         fixing period: (d_f(fixing_dt) / d_f(period_end) − 1) / yf_period
+                         so that e.g. a 3M-fixing loan gets a 3M shocked rate.
     - A (administrative): int_pmt treated as 0% (bank-managed, run-off).
 
     PV components
@@ -110,40 +234,25 @@ def compute_eve_shocked(
     """
     df = beh_df.copy()
 
-    # ── Shocked discount factors at CF start and end dates ────────────────────
-    def _lookup_df(dates: pd.Series, curve_name: str) -> np.ndarray:
-        idx = pd.MultiIndex.from_arrays(
-            [[curve_name] * len(dates), dates.to_numpy()],
-            names=["curve_name", "node_date"],
-        )
-        return shocked_disc_df.reindex(idx).to_numpy(dtype=float)
+    # ── Shocked discount factors and forward rates ────────────────────────────
+    d_f_shocked_end, _, fwd_rt_arr, locked_mask = _build_shocked_disc_and_fwd(
+        df, shocked_disc_df, disc_curve_map, eve_floor_rate
+    )
+    df["d_f_shocked"]    = np.nan_to_num(d_f_shocked_end, nan=0.0)
+    df["fwd_rt_shocked"] = fwd_rt_arr
 
-    d_f_shocked_end   = np.full(len(df), np.nan)
-    d_f_shocked_start = np.full(len(df), np.nan)
-
-    for ccy, grp in df.groupby("currency"):
-        cn = disc_curve_map.get(ccy)
-        if cn is None:
-            continue
-        idx = grp.index
-        d_f_shocked_end[idx]   = _lookup_df(df.loc[idx, "cf_end_dt"],   cn)
-        d_f_shocked_start[idx] = _lookup_df(df.loc[idx, "cf_start_dt"], cn)
-
-    df["d_f_shocked"] = np.nan_to_num(d_f_shocked_end, nan=0.0)
-
-    # ── Shocked forward rates (for variable products) ─────────────────────────
-    yf = df["cf_yf"].to_numpy()
-    with np.errstate(divide="ignore", invalid="ignore"):
-        fwd_rt_raw = np.where(
-            (d_f_shocked_end > 0) & (yf > 0) & ~np.isnan(d_f_shocked_end),
-            (d_f_shocked_start / d_f_shocked_end - 1.0) / yf,
-            np.nan,
-        )
-    df["fwd_rt_shocked"] = np.maximum(eve_floor_rate, np.nan_to_num(fwd_rt_raw, nan=0.0))
+    # ── Contracted client rate (includes origination margin) ─────────────────
+    # eff_rate in beh_df = fwd_rt for V products (pure index, no margin).
+    # We compute the full contracted client rate from int_pmt so that
+    # eff_rate_shocked carries the margin and int_pmt_shocked is correct.
+    _denom_all = (
+        df["outstanding_bal"].fillna(0.0) * df["cf_yf"].fillna(0.0)
+    ).replace(0.0, float("nan"))
+    _contracted_rt = (df["int_pmt"].fillna(0.0) / _denom_all).fillna(0.0)
 
     # ── Effective rate per CF (same logic as NII) ─────────────────────────────
     rate_type_s = df.get("rate_type", pd.Series("V", index=df.index))
-    df["eff_rate_shocked"] = df["eff_rate"].fillna(0.0)          # F: contracted
+    df["eff_rate_shocked"] = _contracted_rt                       # F: contracted (unchanged below)
     mask_var   = rate_type_s == "V"
     mask_admin = rate_type_s == "A"
 
@@ -151,14 +260,21 @@ def compute_eve_shocked(
         df.loc[mask_var, "eff_rate_shocked"] = _apply_rt_limits(
             df.loc[mask_var, "fwd_rt_shocked"],
             df.loc[mask_var, "product_code"],
-            caps_map, floors_map,
+            caps_map, floors_map, coeff_a_map, coeff_b_map,
+            base_eff_rate = _contracted_rt.loc[mask_var],
+            base_fwd_rt   = df.loc[mask_var, "fwd_rt"],
         )
     elif mask_var.any():
-        df.loc[mask_var, "eff_rate_shocked"] = df.loc[mask_var, "fwd_rt_shocked"]
+        # No product_code: stable margin without a/b transform
+        df.loc[mask_var, "eff_rate_shocked"] = (
+            _contracted_rt.loc[mask_var]
+            + (df.loc[mask_var, "fwd_rt_shocked"] - df.loc[mask_var, "fwd_rt"].fillna(0.0))
+        )
     df.loc[mask_admin, "eff_rate_shocked"] = 0.0
 
     # ── Interest cash flows under shocked scenario ────────────────────────────
-    # F: int_pmt unchanged (contractual); V: recomputed; A: 0
+    # F: int_pmt unchanged (contractual); V: recomputed with full client rate; A: 0
+    # Locked V (fixing_dt before report_date): int_pmt unchanged — rate already fixed.
     int_pmt_shocked = df["int_pmt"].fillna(0.0).to_numpy(dtype=float).copy()
     var_idx = mask_var.to_numpy()
     int_pmt_shocked[var_idx] = (
@@ -166,6 +282,10 @@ def compute_eve_shocked(
         * df.loc[mask_var, "eff_rate_shocked"].to_numpy()
         * df.loc[mask_var, "cf_yf"].fillna(0.0).to_numpy()
     )
+    # Locked variable CFs: rate was fixed before report_date → payment cannot change
+    lock_var = locked_mask & var_idx
+    if lock_var.any():
+        int_pmt_shocked[lock_var] = df["int_pmt"].fillna(0.0).to_numpy()[lock_var]
     int_pmt_shocked[mask_admin.to_numpy()] = 0.0
     df["int_pmt_shocked"] = int_pmt_shocked
 
@@ -246,37 +366,20 @@ def compute_eve_shocked_schedule(
     """
     df = beh_df.copy()
 
-    def _lookup_df(dates: pd.Series, curve_name: str) -> np.ndarray:
-        idx = pd.MultiIndex.from_arrays(
-            [[curve_name] * len(dates), dates.to_numpy()],
-            names=["curve_name", "node_date"],
-        )
-        return shocked_disc_df.reindex(idx).to_numpy(dtype=float)
+    # ── Shocked discount factors and forward rates ────────────────────────────
+    d_f_shocked_end, _, fwd_rt_arr, locked_mask = _build_shocked_disc_and_fwd(
+        df, shocked_disc_df, disc_curve_map, eve_floor_rate
+    )
+    df["d_f_shocked"]    = np.nan_to_num(d_f_shocked_end, nan=0.0)
+    df["fwd_rt_shocked"] = fwd_rt_arr
 
-    d_f_shocked_end   = np.full(len(df), np.nan)
-    d_f_shocked_start = np.full(len(df), np.nan)
-
-    for ccy, grp in df.groupby("currency"):
-        cn = disc_curve_map.get(ccy)
-        if cn is None:
-            continue
-        idx = grp.index
-        d_f_shocked_end[idx]   = _lookup_df(df.loc[idx, "cf_end_dt"],   cn)
-        d_f_shocked_start[idx] = _lookup_df(df.loc[idx, "cf_start_dt"], cn)
-
-    df["d_f_shocked"] = np.nan_to_num(d_f_shocked_end, nan=0.0)
-
-    yf = df["cf_yf"].to_numpy()
-    with np.errstate(divide="ignore", invalid="ignore"):
-        fwd_rt_raw = np.where(
-            (d_f_shocked_end > 0) & (yf > 0) & ~np.isnan(d_f_shocked_end),
-            (d_f_shocked_start / d_f_shocked_end - 1.0) / yf,
-            np.nan,
-        )
-    df["fwd_rt_shocked"] = np.maximum(eve_floor_rate, np.nan_to_num(fwd_rt_raw, nan=0.0))
+    _denom_all = (
+        df["outstanding_bal"].fillna(0.0) * df["cf_yf"].fillna(0.0)
+    ).replace(0.0, float("nan"))
+    _contracted_rt = (df["int_pmt"].fillna(0.0) / _denom_all).fillna(0.0)
 
     rate_type_s = df.get("rate_type", pd.Series("V", index=df.index))
-    df["eff_rate_shocked"] = df["eff_rate"].fillna(0.0)
+    df["eff_rate_shocked"] = _contracted_rt
     mask_var   = rate_type_s == "V"
     mask_admin = rate_type_s == "A"
 
@@ -285,9 +388,14 @@ def compute_eve_shocked_schedule(
             df.loc[mask_var, "fwd_rt_shocked"],
             df.loc[mask_var, "product_code"],
             caps_map, floors_map, coeff_a_map, coeff_b_map,
+            base_eff_rate = _contracted_rt.loc[mask_var],
+            base_fwd_rt   = df.loc[mask_var, "fwd_rt"],
         )
     elif mask_var.any():
-        df.loc[mask_var, "eff_rate_shocked"] = df.loc[mask_var, "fwd_rt_shocked"]
+        df.loc[mask_var, "eff_rate_shocked"] = (
+            _contracted_rt.loc[mask_var]
+            + (df.loc[mask_var, "fwd_rt_shocked"] - df.loc[mask_var, "fwd_rt"].fillna(0.0))
+        )
     df.loc[mask_admin, "eff_rate_shocked"] = 0.0
 
     int_pmt_shocked = df["int_pmt"].fillna(0.0).to_numpy(dtype=float).copy()
@@ -297,6 +405,10 @@ def compute_eve_shocked_schedule(
         * df.loc[mask_var, "eff_rate_shocked"].to_numpy()
         * df.loc[mask_var, "cf_yf"].fillna(0.0).to_numpy()
     )
+    # Locked variable CFs: rate was fixed before report_date → payment cannot change
+    lock_var = locked_mask & var_idx
+    if lock_var.any():
+        int_pmt_shocked[lock_var] = df["int_pmt"].fillna(0.0).to_numpy()[lock_var]
     int_pmt_shocked[mask_admin.to_numpy()] = 0.0
     df["int_pmt_shocked"] = int_pmt_shocked
 
@@ -313,6 +425,36 @@ def compute_eve_shocked_schedule(
         .reset_index()
         .assign(scenario_id=scenario_id)
     )
+
+
+def compute_base_cf_detail(beh_df: pd.DataFrame, scenario_id: str = "base") -> pd.DataFrame:
+    """Row-level CF schedule for the base scenario.
+
+    Prepares beh_df in the same interface as compute_shocked_cf_detail() so it
+    can be passed directly to sql_setup.write_shocked_cf_products().  Uses base
+    discount factors and rates — no shock applied.
+
+    d_f_shocked_start is reconstructed as base_df * (1 + fwd_rt * cf_yf) from the
+    base forward rate identity: fwd_rt = (d_f_start / d_f_end - 1) / cf_yf.
+    """
+    df = beh_df.copy()
+    df["scenario_id"]       = scenario_id
+    df["fwd_rt_shocked"]    = df["fwd_rt"].fillna(0.0)
+    df["d_f_shocked"]       = df["base_df"].fillna(0.0)
+    # Reconstruct start d_f from base forward rate identity
+    df["d_f_shocked_start"] = (
+        df["base_df"].fillna(0.0)
+        * (1.0 + df["fwd_rt"].fillna(0.0) * df["cf_yf"].fillna(0.0))
+    )
+    # eff_rate_shocked = contracted client rate (int_pmt / (outstanding × cf_yf)).
+    # Using contracted rate (not raw fwd_rt) keeps the semantics consistent with
+    # shocked scenarios where eff_rate_shocked also includes the origination margin.
+    _denom = (
+        df["outstanding_bal"].fillna(0.0) * df["cf_yf"].fillna(0.0)
+    ).replace(0.0, float("nan"))
+    df["eff_rate_shocked"]  = (df["int_pmt"].fillna(0.0) / _denom).fillna(0.0)
+    df["int_pmt_shocked"]   = df["int_pmt"].fillna(0.0)
+    return df
 
 
 def compute_shocked_cf_detail(
@@ -343,38 +485,21 @@ def compute_shocked_cf_detail(
     """
     df = beh_df.copy()
 
-    def _lookup_df(dates: pd.Series, curve_name: str) -> np.ndarray:
-        idx = pd.MultiIndex.from_arrays(
-            [[curve_name] * len(dates), dates.to_numpy()],
-            names=["curve_name", "node_date"],
-        )
-        return shocked_disc_df.reindex(idx).to_numpy(dtype=float)
-
-    d_f_shocked_end   = np.full(len(df), np.nan)
-    d_f_shocked_start = np.full(len(df), np.nan)
-
-    for ccy, grp in df.groupby("currency"):
-        cn = disc_curve_map.get(ccy)
-        if cn is None:
-            continue
-        idx = grp.index
-        d_f_shocked_end[idx]   = _lookup_df(df.loc[idx, "cf_end_dt"],   cn)
-        d_f_shocked_start[idx] = _lookup_df(df.loc[idx, "cf_start_dt"], cn)
-
+    # ── Shocked discount factors and forward rates ────────────────────────────
+    d_f_shocked_end, d_f_shocked_start, fwd_rt_arr, locked_mask = _build_shocked_disc_and_fwd(
+        df, shocked_disc_df, disc_curve_map, eve_floor_rate
+    )
     df["d_f_shocked"]       = np.nan_to_num(d_f_shocked_end,   nan=0.0)
     df["d_f_shocked_start"] = np.nan_to_num(d_f_shocked_start, nan=0.0)
+    df["fwd_rt_shocked"]    = fwd_rt_arr
 
-    yf = df["cf_yf"].to_numpy()
-    with np.errstate(divide="ignore", invalid="ignore"):
-        fwd_rt_raw = np.where(
-            (d_f_shocked_end > 0) & (yf > 0) & ~np.isnan(d_f_shocked_end),
-            (d_f_shocked_start / d_f_shocked_end - 1.0) / yf,
-            np.nan,
-        )
-    df["fwd_rt_shocked"] = np.maximum(eve_floor_rate, np.nan_to_num(fwd_rt_raw, nan=0.0))
+    _denom_all = (
+        df["outstanding_bal"].fillna(0.0) * df["cf_yf"].fillna(0.0)
+    ).replace(0.0, float("nan"))
+    _contracted_rt = (df["int_pmt"].fillna(0.0) / _denom_all).fillna(0.0)
 
     rate_type_s = df.get("rate_type", pd.Series("V", index=df.index))
-    df["eff_rate_shocked"] = df["eff_rate"].fillna(0.0)
+    df["eff_rate_shocked"] = _contracted_rt
     mask_var   = rate_type_s == "V"
     mask_admin = rate_type_s == "A"
 
@@ -383,9 +508,14 @@ def compute_shocked_cf_detail(
             df.loc[mask_var, "fwd_rt_shocked"],
             df.loc[mask_var, "product_code"],
             caps_map, floors_map, coeff_a_map, coeff_b_map,
+            base_eff_rate = _contracted_rt.loc[mask_var],
+            base_fwd_rt   = df.loc[mask_var, "fwd_rt"],
         )
     elif mask_var.any():
-        df.loc[mask_var, "eff_rate_shocked"] = df.loc[mask_var, "fwd_rt_shocked"]
+        df.loc[mask_var, "eff_rate_shocked"] = (
+            _contracted_rt.loc[mask_var]
+            + (df.loc[mask_var, "fwd_rt_shocked"] - df.loc[mask_var, "fwd_rt"].fillna(0.0))
+        )
     df.loc[mask_admin, "eff_rate_shocked"] = 0.0
 
     int_pmt_shocked = df["int_pmt"].fillna(0.0).to_numpy(dtype=float).copy()
@@ -395,6 +525,10 @@ def compute_shocked_cf_detail(
         * df.loc[mask_var, "eff_rate_shocked"].to_numpy()
         * df.loc[mask_var, "cf_yf"].fillna(0.0).to_numpy()
     )
+    # Locked variable CFs: rate was fixed before report_date → payment cannot change
+    lock_var = locked_mask & var_idx
+    if lock_var.any():
+        int_pmt_shocked[lock_var] = df["int_pmt"].fillna(0.0).to_numpy()[lock_var]
     int_pmt_shocked[mask_admin.to_numpy()] = 0.0
     df["int_pmt_shocked"] = int_pmt_shocked
     df["scenario_id"]     = scenario_id

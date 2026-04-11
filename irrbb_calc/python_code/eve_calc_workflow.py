@@ -102,15 +102,20 @@ print(f"  Loaded {len(all_beh):,} CF rows across "
 
 # ── 3. Base EVE ───────────────────────────────────────────────────────────────
 print("Computing base EVE...")
-base_detail, base_summary = eve_obj.compute_eve_base(all_beh)
-print(f"  EVE base: {base_summary['pv_total'].sum():+,.0f}")
+base_detail, _ = eve_obj.compute_eve_base(all_beh)
 
 # ── 4. Reset EVE results table and write base scenario ────────────────────────
 sql_setup.reset_eve_results()
 
 base_sched = eve_obj.compute_eve_base_schedule(all_beh, scenario_id="base")
 sql_setup.write_eve_results(base_sched, config.report_date)
-print(f"  {'base':8s}: EVE = {base_sched['pv_total'].sum():+,.0f}  "
+
+# Derive base summary from the schedule rows written to SQL (single source of truth)
+base_summary = (
+    base_sched.groupby("currency")[["pv_capital", "pv_interest", "pv_total"]]
+    .sum().reset_index()
+)
+print(f"  EVE base: {base_summary['pv_total'].sum():+,.0f}  "
       f"({len(base_sched)} schedule rows written to irrbb.eve_results)")
 
 # ── 5. Shocked EVE for all 8 EBA SOT scenarios ────────────────────────────────
@@ -138,7 +143,7 @@ for scenario_id in esc.ALL_SCENARIO_IDS:
 
     shocked_disc = pd.concat(disc_series_parts).sort_index()
 
-    det, summ = eve_obj.compute_eve_shocked(
+    det, _ = eve_obj.compute_eve_shocked(
         all_beh,
         shocked_disc_df = shocked_disc,
         disc_curve_map  = DISC_CURVE_MAP,
@@ -146,9 +151,10 @@ for scenario_id in esc.ALL_SCENARIO_IDS:
         eve_floor_rate  = EVE_FLOOR,
         caps_map        = CAPS_MAP,
         floors_map      = FLOORS_MAP,
+        coeff_a_map     = COEFF_A_MAP,
+        coeff_b_map     = COEFF_B_MAP,
     )
     shocked_detail_parts.append(det)
-    shocked_summary_parts.append(summ)
 
     shocked_sched = eve_obj.compute_eve_shocked_schedule(
         all_beh,
@@ -162,6 +168,14 @@ for scenario_id in esc.ALL_SCENARIO_IDS:
         coeff_b_map     = COEFF_B_MAP,
     )
     sql_setup.write_eve_results(shocked_sched, config.report_date)
+
+    # Derive summary from schedule rows written to SQL (single source of truth)
+    summ = (
+        shocked_sched.groupby("currency")[["pv_capital", "pv_interest", "pv_total"]]
+        .sum().reset_index()
+        .assign(scenario_id=scenario_id)
+    )
+    shocked_summary_parts.append(summ)
     print(f"  {scenario_id:8s}: EVE = {shocked_sched['pv_total'].sum():+,.0f}")
 
 shocked_detail  = pd.concat(shocked_detail_parts,  ignore_index=True) \
@@ -187,11 +201,10 @@ if not shocked_summary.empty and not base_summary.empty:
     shocked_summary["delta_eve_reg"]   = d.where(d < 0, d * 0.5)
     shocked_summary["sot_eve_pct_reg"] = shocked_summary["delta_eve_reg"] / TIER1_CAPITAL * 100.0
 
-# ── 6b. Upsert SOT summary into irrbb.irrbb_report ────────────────────────────
-if not shocked_summary.empty:
-    sql_setup.upsert_irrbb_report(shocked_summary, config.report_date, mode="eve")
+# NOTE: irrbb.irrbb_report is written exclusively by eba_sot_workflow (final step).
+# eve_results (schedule-level) is the intermediate output consumed by eba_sot_workflow.
 
-# ── 6c. Shocked CF tables: cf.products_par_dn + cf.products_worst_eve ─────────
+# ── 6b. Shocked CF tables: cf.products_par_dn + cf.products_worst_eve ─────────
 print("Writing shocked CF schedules to SQL...")
 
 # Identify worst EVE scenario (largest negative delta_eve across all currencies)
@@ -204,6 +217,25 @@ if not shocked_summary.empty and "delta_eve" in shocked_summary.columns:
 
 sql_setup.reset_shocked_cf_products("products_par_dn")
 sql_setup.reset_shocked_cf_products("products_worst_eve")
+
+# Write base scenario first so both tables contain base + shocked rows for direct comparison
+_base_cf = eve_obj.compute_base_cf_detail(all_beh, scenario_id="base")
+_base_disc_parts = []
+for ccy, curve_name in DISC_CURVE_MAP.items():
+    try:
+        _base_disc_parts.append(
+            esc.load_irrbb_disc_curve(sql_setup.engine, curve_name, "base", config.report_date)
+        )
+    except Exception:
+        pass
+_base_disc = pd.concat(_base_disc_parts).sort_index() if _base_disc_parts else None
+for _table_name in ("products_par_dn", "products_worst_eve"):
+    sql_setup.write_shocked_cf_products(
+        _base_cf, config.report_date, _table_name,
+        shocked_disc_df=_base_disc,
+        disc_curve_map=DISC_CURVE_MAP,
+    )
+print(f"  base     : {len(_base_cf):,} base CF rows written to both tables")
 
 _scenarios_to_write = [("par_dn", "products_par_dn"),
                        (worst_eve_sid, "products_worst_eve")]
@@ -235,7 +267,11 @@ for _scenario_id, _table_name in _scenarios_to_write:
         coeff_a_map     = COEFF_A_MAP,
         coeff_b_map     = COEFF_B_MAP,
     )
-    sql_setup.write_shocked_cf_products(_cf_detail, config.report_date, _table_name)
+    sql_setup.write_shocked_cf_products(
+        _cf_detail, config.report_date, _table_name,
+        shocked_disc_df=_shocked_disc,
+        disc_curve_map=DISC_CURVE_MAP,
+    )
     print(f"  {_table_name}: {len(_cf_detail):,} CF rows written "
           f"(scenario: {_scenario_id})")
 

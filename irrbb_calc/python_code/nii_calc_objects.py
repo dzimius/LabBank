@@ -9,29 +9,47 @@ _TENOR_SORT = {"1D": 0, ">30Y": 999}
 def _apply_rt_limits(
     rate: "np.ndarray | pd.Series",
     product_codes: pd.Series,
-    caps_map:    dict | None = None,
-    floors_map:  dict | None = None,
-    coeff_a_map: dict | None = None,
-    coeff_b_map: dict | None = None,
+    caps_map:      dict | None = None,
+    floors_map:    dict | None = None,
+    coeff_a_map:   dict | None = None,
+    coeff_b_map:   dict | None = None,
+    base_eff_rate: "np.ndarray | pd.Series | None" = None,
+    base_fwd_rt:   "np.ndarray | pd.Series | None" = None,
 ) -> np.ndarray:
-    """Apply per-product linear transform and floor/cap to a rate array.
+    """Apply per-product rate transform and floor/cap.
 
-    Transform order: client_rt = a * index_rt + b → clip(floor, cap).
-    Products absent from coeff maps default to a=1, b=0 (identity).
-    Values in all maps must be in decimal (same unit as rate).
+    Existing book — pass base_eff_rate and base_fwd_rt (stable-margin formula):
+        client_rt = base_eff_rate + a * (rate - base_fwd_rt)
+        base_eff_rate already contains the origination margin (b), so b is NOT
+        added again.  With a=1: client_rt = base_eff_rate + delta_fwd (margin
+        preserved exactly).
+
+    Renewal / new business — omit base rates:
+        client_rt = a * rate + b
+        Here b is the contractual spread applied to the shocked index rate.
+
+    Products absent from coeff maps default to a=1, b=0.
+    All values must be in decimal.
     """
-    result = np.asarray(rate, dtype=float).copy()
-    pcs = product_codes.astype(str)
-    if coeff_a_map or coeff_b_map:
-        a_v = pcs.map(coeff_a_map or {}).fillna(1.0).to_numpy(dtype=float)
-        b_v = pcs.map(coeff_b_map or {}).fillna(0.0).to_numpy(dtype=float)
-        result = a_v * result + b_v
+    shocked = np.asarray(rate, dtype=float)
+    pcs     = product_codes.astype(str)
+    a_v     = pcs.map(coeff_a_map or {}).fillna(1.0).to_numpy(dtype=float)
+    b_v     = pcs.map(coeff_b_map or {}).fillna(0.0).to_numpy(dtype=float)
+
+    if base_eff_rate is not None and base_fwd_rt is not None:
+        base_e = np.asarray(base_eff_rate, dtype=float)
+        base_f = np.asarray(base_fwd_rt,   dtype=float)
+        # b is already embedded in base_eff_rate (origination margin) — do not add it again
+        result = base_e + a_v * (shocked - base_f)
+    else:
+        result = a_v * shocked + b_v
+
     if floors_map:
         floor_v = pcs.map(floors_map).fillna(float("-inf")).to_numpy(dtype=float)
         result  = np.maximum(floor_v, result)
     if caps_map:
-        cap_v  = pcs.map(caps_map).fillna(float("inf")).to_numpy(dtype=float)
-        result = np.minimum(cap_v, result)
+        cap_v   = pcs.map(caps_map).fillna(float("inf")).to_numpy(dtype=float)
+        result  = np.minimum(cap_v, result)
     return result
 
 
@@ -150,8 +168,10 @@ def compute_nii_shocked(
     scenario_id: str,
     horizon_yf: float = 1.0,
     nii_floor_rate: float = 0.0,
-    caps_map:   dict | None = None,
-    floors_map: dict | None = None,
+    caps_map:    dict | None = None,
+    floors_map:  dict | None = None,
+    coeff_a_map: dict | None = None,
+    coeff_b_map: dict | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Compute NII under a shocked rate scenario (EBA constant balance sheet).
 
@@ -183,7 +203,7 @@ def compute_nii_shocked(
     import numpy as np
 
     horizon_end = report_date + pd.Timedelta(days=round(horizon_yf * 365.25))
-    df = beh_df.copy()
+    df = beh_df[beh_df["cf_end_dt"] <= horizon_end].copy()
 
     # ── Shocked forward rates for each CF ─────────────────────────────────────
     # For each CF row: fwd_rt_shocked = (d_f(cf_start_dt) / d_f(cf_end_dt) - 1) / cf_yf
@@ -214,10 +234,18 @@ def compute_nii_shocked(
 
     df["fwd_rt_shocked"] = np.maximum(nii_floor_rate, np.nan_to_num(fwd_rt_shocked, nan=0.0))
 
+    # CFs whose period started before report_date have their rate already fixed.
+    # The shocked curve has no value for that start date → fwd_rt_shocked collapses
+    # to 0, giving eff_rate_shocked = contracted − base_fwd (wrong).
+    # Substitute base fwd_rt so these CFs contribute zero delta to NII interest.
+    if "cf_start_dt" in df.columns and "fwd_rt" in df.columns:
+        locked = df["cf_start_dt"] < report_date
+        if locked.any():
+            df.loc[locked, "fwd_rt_shocked"] = df.loc[locked, "fwd_rt"].fillna(0.0)
+
     # ── Effective rate per CF (eff_rate_shocked) ───────────────────────────────
     # F (fixed)          → eff_rate (contracted, unchanged)
-    # V (variable)       → fwd_rt_shocked with per-product floor/cap applied
-    #                       e.g. CA with client_cap=0.001: rate stays capped in any shock
+    # V (variable)       → stable-margin: base_client_rt + a*(fwd_shocked - base_fwd) + b
     # A (administrative) → 0% regardless of scenario (bank-managed rate)
     rate_type_s = df.get("rate_type", pd.Series("V", index=df.index))
     df["eff_rate_shocked"] = df["eff_rate"].fillna(0.0)                     # F: contracted
@@ -227,7 +255,9 @@ def compute_nii_shocked(
         df.loc[mask_var, "eff_rate_shocked"] = _apply_rt_limits(
             df.loc[mask_var, "fwd_rt_shocked"],
             df.loc[mask_var, "product_code"],
-            caps_map, floors_map,
+            caps_map, floors_map, coeff_a_map, coeff_b_map,
+            base_eff_rate = df.loc[mask_var, "eff_rate"],
+            base_fwd_rt   = df.loc[mask_var, "fwd_rt"],
         )
     elif mask_var.any():
         df.loc[mask_var, "eff_rate_shocked"] = df.loc[mask_var, "fwd_rt_shocked"]
@@ -244,12 +274,25 @@ def compute_nii_shocked(
         * df["sign"]
     )
 
-    # Renewal at the same shocked (and constrained) client rate
+    # Renewal: ALL products renew at shocked market rate (not contracted),
+    # consistent with compute_nii_shocked_schedule.  Fixed products that
+    # mature within the horizon re-invest/re-borrow at the current shocked
+    # market client rate, not at their old contracted rate.
     df["remain_yf"]    = ((horizon_end - df["cf_end_dt"]).dt.days / 365.0).clip(lower=0.0)
     df["total_capital"]= df["capital_pmt"].fillna(0.0) + df["prepayment_pmt"].fillna(0.0)
+    if "product_code" in df.columns:
+        renewal_rt = _apply_rt_limits(
+            df["fwd_rt_shocked"], df["product_code"],
+            caps_map, floors_map, coeff_a_map, coeff_b_map,
+        )
+    else:
+        renewal_rt = df["fwd_rt_shocked"].to_numpy()
+    if "rate_type" in df.columns:
+        renewal_rt = renewal_rt.copy()
+        renewal_rt[(df["rate_type"] == "A").to_numpy()] = 0.0
     df["nii_renewal"]  = (
         df["total_capital"]
-        * df["eff_rate_shocked"]
+        * renewal_rt
         * df["remain_yf"]
         * df["sign"]
     )
@@ -301,7 +344,7 @@ def compute_nii_base_schedule(
     DataFrame with: scenario_id + _SCHED_GROUP_COLS + nii_interest/renewal/total
     """
     horizon_end = report_date + pd.Timedelta(days=round(horizon_yf * 365.25))
-    df = beh_df.copy()
+    df = beh_df[beh_df["cf_end_dt"] <= horizon_end].copy()
     df["sign"] = np.where(df["bs_side"] == "A", 1.0, -1.0)
     df["nii_interest"]  = df["int_pmt"].fillna(0.0) * df["sign"]
     df["remain_yf"]     = ((horizon_end - df["cf_end_dt"]).dt.days / 365.0).clip(lower=0.0)
@@ -354,7 +397,7 @@ def compute_nii_shocked_schedule(
     import numpy as np
 
     horizon_end = report_date + pd.Timedelta(days=round(horizon_yf * 365.25))
-    df = beh_df.copy()
+    df = beh_df[beh_df["cf_end_dt"] <= horizon_end].copy()
 
     def _lookup_df(dates: pd.Series, curve_name: str) -> np.ndarray:
         idx = pd.MultiIndex.from_arrays(
@@ -382,7 +425,14 @@ def compute_nii_shocked_schedule(
 
     df["fwd_rt_shocked"] = np.maximum(nii_floor_rate, np.nan_to_num(fwd_rt_shocked, nan=0.0))
 
-    # eff_rate_shocked: F=fixed (unchanged), V=fwd_rt_shocked with per-product floor/cap
+    # CFs whose period started before report_date have their rate already fixed.
+    # Substitute base fwd_rt so these CFs contribute zero delta to NII interest.
+    if "cf_start_dt" in df.columns and "fwd_rt" in df.columns:
+        locked = df["cf_start_dt"] < report_date
+        if locked.any():
+            df.loc[locked, "fwd_rt_shocked"] = df.loc[locked, "fwd_rt"].fillna(0.0)
+
+    # eff_rate_shocked: F=fixed (unchanged), V=stable-margin, A=0%
     rate_type_s = df.get("rate_type", pd.Series("V", index=df.index))
     df["eff_rate_shocked"] = df["eff_rate"].fillna(0.0)           # F: contracted rate
     mask_var   = rate_type_s == "V"
@@ -392,6 +442,8 @@ def compute_nii_shocked_schedule(
             df.loc[mask_var, "fwd_rt_shocked"],
             df.loc[mask_var, "product_code"],
             caps_map, floors_map, coeff_a_map, coeff_b_map,
+            base_eff_rate = df.loc[mask_var, "eff_rate"],
+            base_fwd_rt   = df.loc[mask_var, "fwd_rt"],
         )
     elif mask_var.any():
         df.loc[mask_var, "eff_rate_shocked"] = df.loc[mask_var, "fwd_rt_shocked"]
@@ -434,6 +486,10 @@ def compute_nii_base(
     beh_df: pd.DataFrame,
     report_date: pd.Timestamp,
     horizon_yf: float = 1.0,
+    caps_map:    dict | None = None,
+    floors_map:  dict | None = None,
+    coeff_a_map: dict | None = None,
+    coeff_b_map: dict | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Compute base NII from behavioral CF schedules (constant balance assumption, no rate shock).
@@ -445,10 +501,10 @@ def compute_nii_base(
        This is the actual contractual/behavioural interest payment.
 
     2. nii_renewal   — interest on returned capital (constant balance):
-           (capital_pmt + prepayment_pmt) × fwd_rt × remain_yf × sign
-       When capital is repaid/returned within the horizon it is assumed immediately
-       reinvested (assets) or re-borrowed (liabilities) at the current forward rate
-       for the remaining time to horizon end.
+           (capital_pmt + prepayment_pmt) × client_fwd_rt × remain_yf × sign
+       Renewal uses fwd_rt with the same per-product linear transform and
+       floor/cap applied as the shocked scenario, so delta_nii reflects only
+       the market rate change (margins cancel between base and shocked).
            remain_yf = (horizon_end − cf_end_dt).days / 365
 
     Sign convention: A (asset) = +1 (income), L (liability) = −1 (expense).
@@ -458,6 +514,7 @@ def compute_nii_base(
     beh_df      : unified behavioral CF DataFrame from sql_setup.load_beh_schedules()
     report_date : valuation date
     horizon_yf  : NII horizon in year fractions (default 1.0 = 1 year)
+    caps_map, floors_map, coeff_a_map, coeff_b_map : per-product rate limits / transforms
 
     Returns
     -------
@@ -466,7 +523,7 @@ def compute_nii_base(
     """
     horizon_end = report_date + pd.Timedelta(days=round(horizon_yf * 365.25))
 
-    df = beh_df.copy()
+    df = beh_df[beh_df["cf_end_dt"] <= horizon_end].copy()
 
     # Sign: asset = income (+1), liability = expense (-1)
     df["sign"] = np.where(df["bs_side"] == "A", 1.0, -1.0)
@@ -479,8 +536,22 @@ def compute_nii_base(
         (horizon_end - df["cf_end_dt"]).dt.days / 365.0
     ).clip(lower=0.0)
     df["total_capital"] = df["capital_pmt"].fillna(0.0) + df["prepayment_pmt"].fillna(0.0)
+
+    # Apply same client-rate transform as shocked scenario so margins cancel in delta
+    renewal_base = df["fwd_rt"].fillna(0.0)
+    if "product_code" in df.columns:
+        renewal_rt = _apply_rt_limits(
+            renewal_base, df["product_code"],
+            caps_map, floors_map, coeff_a_map, coeff_b_map,
+        )
+    else:
+        renewal_rt = renewal_base.to_numpy()
+    if "rate_type" in df.columns:
+        renewal_rt = renewal_rt.copy()
+        renewal_rt[(df["rate_type"] == "A").to_numpy()] = 0.0
+
     df["nii_renewal"] = (
-        df["total_capital"] * df["fwd_rt"].fillna(0.0) * df["remain_yf"] * df["sign"]
+        df["total_capital"] * renewal_rt * df["remain_yf"] * df["sign"]
     )
 
     df["nii_total"] = df["nii_interest"] + df["nii_renewal"]
