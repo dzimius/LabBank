@@ -89,11 +89,15 @@ def _make_params(n: int = 4) -> BalanceSheetParams:
     balance_arr   = np.array([2_500_000_000, 1_000_000_000, 2_000_000_000, 1_500_000_000], dtype=float)
 
     return BalanceSheetParams(
+        cohort_id         = np.array(["1001", "2001", "3001", "3002"]),
         product_code      = np.array(["1001", "2001", "3001", "3002"]),
         product_name      = np.array(["mortgage_fixed", "gov_bond", "current_account", "term_deposit"]),
         bs_side           = bs_side,
         currency          = currency,
         sign              = sign,
+        start_year        = np.full(n, -1.0),
+        start_month       = np.full(n, -1.0),
+        is_cohort         = np.array([False, False, False, False]),
         bs_pct_current    = bs_pct,
         nii_unit_rate     = nii_unit,
         delta_nii_unit    = delta_nii,
@@ -110,11 +114,17 @@ def _make_params(n: int = 4) -> BalanceSheetParams:
         coeff_b           = coeff_b,
         client_floor      = client_floor,
         client_cap        = client_cap,
-        repricing_tenor_m = repricing_m,
-        scenario_ids      = scenario_ids,
-        total_assets      = 5_000_000_000.0,
-        report_date       = "2024-12-31",
-        balance_arr       = balance_arr,
+        repricing_tenor_m    = repricing_m,
+        rate_type            = np.array(["F", "F", "", ""]),
+        coupon_rate          = np.array([0.06, 0.05, np.nan, np.nan]),
+        cohort_outstanding_m = np.zeros((n, 12)),
+        cohort_capital_m     = np.zeros((n, 12)),
+        cohort_locked_rate   = np.zeros(n),
+        cohort_t_first_m     = np.full(n, 999.0),
+        scenario_ids         = scenario_ids,
+        total_assets         = 5_000_000_000.0,
+        report_date          = "2024-12-31",
+        balance_arr          = balance_arr,
     )
 
 
