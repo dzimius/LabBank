@@ -39,11 +39,15 @@ class BalanceSheetParams:
     delta_nii_unit and delta_eve_unit have shape (n, S) where S = #scenarios.
     """
     # ── identification (object arrays, not used in hot path) ──────────────────
+    cohort_id:    np.ndarray      # str, (n,)  unique entry ID e.g. "1000_A_PLN_2024_01"
     product_code: np.ndarray      # str, (n,)
     product_name: np.ndarray      # str, (n,)
     bs_side:      np.ndarray      # str, (n,)  'A' | 'L' | 'E'
     currency:     np.ndarray      # str, (n,)
     sign:         np.ndarray      # float64, (n,)  +1 for A, -1 for L/E
+    start_year:   np.ndarray      # float64, (n,)  -1 for single-row products
+    start_month:  np.ndarray      # float64, (n,)  -1 for single-row products
+    is_cohort:    np.ndarray      # bool, (n,)
 
     # ── weights ───────────────────────────────────────────────────────────────
     bs_pct_current: np.ndarray    # float64, (n,)  current bs_percentage values
@@ -73,6 +77,16 @@ class BalanceSheetParams:
 
     # ── repricing ─────────────────────────────────────────────────────────────
     repricing_tenor_m: np.ndarray  # float64, (n,)  months to first repricing
+    rate_type:         np.ndarray  # str,     (n,)  'F' fixed / 'V' floating / '' single-row
+    coupon_rate:       np.ndarray  # float64, (n,)  contracted rate for fixed cohorts; NaN otherwise
+
+    # ── schedule monthly profile (from cf.products) ───────────────────────────
+    cohort_outstanding_m: np.ndarray  # float64, (n, 12)  normalised outstanding per month
+    cohort_capital_m:     np.ndarray  # float64, (n, 12)  normalised capital per month
+    cohort_interest_yf_m: np.ndarray  # float64, (n, 12)  normalised outstanding * actual cf_yf
+    cohort_capital_remain_m: np.ndarray  # float64, (n, 12) normalised capital * actual remain_yf
+    cohort_locked_rate:   np.ndarray  # float64, (n,)     locked-period weighted rate
+    cohort_t_first_m:     np.ndarray  # float64, (n,)     months to first future fixing
 
     # ── scenario labels ───────────────────────────────────────────────────────
     scenario_ids: np.ndarray      # str, (S,)  e.g. ['par_up', 'par_dn', ...]
@@ -83,15 +97,17 @@ class BalanceSheetParams:
     balance_arr:  np.ndarray      # float64, (n,) actual balance amounts at extraction
 
     # ── derived masks (not stored in npz, computed on load) ──────────────────
-    is_asset:    np.ndarray = field(default=None, compare=False)   # bool (n,)
+    is_asset:     np.ndarray = field(default=None, compare=False)  # bool (n,)
     is_liability: np.ndarray = field(default=None, compare=False)  # bool (n,)
-    is_equity:   np.ndarray = field(default=None, compare=False)   # bool (n,)
+    is_equity:    np.ndarray = field(default=None, compare=False)  # bool (n,)
+    is_fixed:     np.ndarray = field(default=None, compare=False)  # bool (n,)
 
     def __post_init__(self):
         # computed masks — must bypass frozen=True via object.__setattr__
         object.__setattr__(self, "is_asset",    self.bs_side == "A")
         object.__setattr__(self, "is_liability", self.bs_side == "L")
         object.__setattr__(self, "is_equity",   self.bs_side == "E")
+        object.__setattr__(self, "is_fixed",    self.rate_type == "F")
 
     # ── unique currencies in the book ─────────────────────────────────────────
     @property
@@ -145,12 +161,17 @@ class BalanceSheetParams:
     def load(cls, npz_path: str) -> "BalanceSheetParams":
         """Load from product_params.npz."""
         data = np.load(npz_path, allow_pickle=True)
+        n = len(data["cohort_id"])
         return cls(
+            cohort_id         = data["cohort_id"],
             product_code      = data["product_code"],
             product_name      = data["product_name"],
             bs_side           = data["bs_side"],
             currency          = data["currency"],
             sign              = data["sign"].astype(float),
+            start_year        = data["start_year"].astype(float),
+            start_month       = data["start_month"].astype(float),
+            is_cohort         = data["is_cohort"].astype(bool),
             bs_pct_current    = data["bs_pct_current"].astype(float),
             nii_unit_rate     = data["nii_unit_rate"].astype(float),
             delta_nii_unit    = data["delta_nii_unit"].astype(float),
@@ -168,10 +189,52 @@ class BalanceSheetParams:
             client_floor      = data["client_floor"].astype(float),
             client_cap        = data["client_cap"].astype(float),
             repricing_tenor_m = data["repricing_tenor_m"].astype(float),
+            rate_type         = data["rate_type"].astype(str),
+            coupon_rate       = data["coupon_rate"].astype(float),
             scenario_ids      = data["scenario_ids"],
             total_assets      = float(data["total_assets"][0]),
             report_date       = str(data["report_date"][0]),
             balance_arr       = data["balance_arr"].astype(float),
+            # schedule monthly profile — zeros/999 if not present (old npz)
+            cohort_outstanding_m = (
+                data["cohort_outstanding_m"].astype(float)
+                if "cohort_outstanding_m" in data
+                else np.zeros((n, 12))
+            ),
+            cohort_capital_m = (
+                data["cohort_capital_m"].astype(float)
+                if "cohort_capital_m" in data
+                else np.zeros((n, 12))
+            ),
+            cohort_interest_yf_m = (
+                data["cohort_interest_yf_m"].astype(float)
+                if "cohort_interest_yf_m" in data
+                else (
+                    data["cohort_outstanding_m"].astype(float) / 12.0
+                    if "cohort_outstanding_m" in data
+                    else np.zeros((n, 12))
+                )
+            ),
+            cohort_capital_remain_m = (
+                data["cohort_capital_remain_m"].astype(float)
+                if "cohort_capital_remain_m" in data
+                else (
+                    data["cohort_capital_m"].astype(float)
+                    * np.array([(12 - m - 0.5) / 12.0 for m in range(12)], dtype=float)[None, :]
+                    if "cohort_capital_m" in data
+                    else np.zeros((n, 12))
+                )
+            ),
+            cohort_locked_rate = (
+                data["cohort_locked_rate"].astype(float)
+                if "cohort_locked_rate" in data
+                else np.zeros(n)
+            ),
+            cohort_t_first_m = (
+                data["cohort_t_first_m"].astype(float)
+                if "cohort_t_first_m" in data
+                else np.full(n, 999.0)
+            ),
         )
 
 
@@ -231,6 +294,96 @@ class CurveTensors:
             report_date  = str(data["report_date"][0]),
             n_months     = int(data["n_months"][0]),
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CohortRates  — CF-based rate/discount tables for fast NII + EVE
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class CohortRates:
+    """Pre-computed per-cohort rate and CF tables for CF-based NII/EVE calculation.
+
+    All arrays have first dimension n (number of cohort/single-row entries),
+    aligned with BalanceSheetParams.
+
+    rate_matrix[n, 12, n_rate_scen]
+        Client interest rate for cohort i in calendar month m under scenario s.
+        Base scenario is index 0, shocked scenarios follow in SHOCKED_SCENARIO_IDS order.
+        Fixed cohorts: coupon_rate (constant across months and scenarios).
+        Float cohorts locked period: locked_rate (constant across scenarios).
+        Float cohorts floating period: clip(base_fwd + coeff_a*(shock_fwd-base_fwd)+coeff_b, floor, cap).
+
+    delta_eve_dur_unit[n, n_rate_scen]
+        Pre-computed duration-based delta EVE per PLN of balance per scenario.
+        = -sign * D_mod * delta_fwd(D_mod_tenor, scenario).
+        Zero for base scenario.
+
+    cf_capital_frac[n, max_q]   capital CF / balance per quarterly bucket (all cohorts)
+    cf_fixed_int_frac[n, max_q] (capital + interest) CF / balance for FIXED cohorts;
+                                 equals cf_capital_frac for floating cohorts
+    eve_pv_frac[n, max_q, n_rate_scen]
+        Optional scenario-specific discounted EVE PV / balance.  Non-zero rows
+        override cf_fixed_int_frac * cohort_disc_q in the fast EVE path.
+    cf_yf[n, max_q]             year-fraction of CF bucket midpoint for discounting
+    cf_n_q[n]                   number of valid CF buckets per cohort
+
+    ccy_idx[n]                  index into CurveTensors.currencies per cohort
+    rate_scenario_ids[n_scen]   scenario labels (base first, then shocked)
+    """
+    rate_matrix:         np.ndarray   # (n, 12, n_rate_scen)   float
+    renewal_rate_matrix: np.ndarray   # (n, 12, n_rate_scen)   float  new-business rate per month/scenario
+    delta_eve_dur_unit:  np.ndarray   # (n, n_rate_scen)        float
+    cf_capital_frac:     np.ndarray   # (n, max_q)              float
+    cf_fixed_int_frac:   np.ndarray   # (n, max_q)              float
+    eve_pv_frac:         np.ndarray   # (n, max_q, n_rate_scen) float
+    cf_yf:               np.ndarray   # (n, max_q)              float
+    cf_n_q:              np.ndarray   # (n,)                    int
+    ccy_idx:             np.ndarray   # (n,)                    int
+    rate_scenario_ids:   np.ndarray   # (n_rate_scen,)          str
+    cohort_disc_q:       np.ndarray   # (n, max_q, n_rate_scen) float — pre-indexed DFs
+
+    @classmethod
+    def load(cls, npz_path: str) -> "CohortRates":
+        data = np.load(npz_path, allow_pickle=True)
+        n_entries = len(data["cr_cf_n_q"])
+        n_q       = data["cr_cf_capital_frac"].shape[1]
+        n_scen    = len(data["cr_rate_scenario_ids"])
+        return cls(
+            rate_matrix        = data["cr_rate_matrix"].astype(float),
+            renewal_rate_matrix = (
+                data["cr_renewal_rate_matrix"].astype(float)
+                if "cr_renewal_rate_matrix" in data
+                else np.zeros_like(data["cr_rate_matrix"], dtype=float)
+            ),
+            delta_eve_dur_unit = data["cr_delta_eve_dur_unit"].astype(float),
+            cf_capital_frac    = data["cr_cf_capital_frac"].astype(float),
+            cf_fixed_int_frac  = data["cr_cf_fixed_int_frac"].astype(float),
+            eve_pv_frac        = (
+                data["cr_eve_pv_frac"].astype(float)
+                if "cr_eve_pv_frac" in data
+                else np.zeros((n_entries, n_q, n_scen), dtype=float)
+            ),
+            cf_yf              = data["cr_cf_yf"].astype(float),
+            cf_n_q             = data["cr_cf_n_q"].astype(int),
+            ccy_idx            = data["cr_ccy_idx"].astype(int),
+            rate_scenario_ids  = data["cr_rate_scenario_ids"],
+            cohort_disc_q      = (
+                data["cr_cohort_disc_q"].astype(float)
+                if "cr_cohort_disc_q" in data
+                else np.zeros((n_entries, n_q, n_scen), dtype=float)
+            ),
+        )
+
+    @property
+    def n_rate_scen(self) -> int:
+        return len(self.rate_scenario_ids)
+
+    def scenario_index(self, scenario_id: str) -> int:
+        idx = np.where(self.rate_scenario_ids == scenario_id)[0]
+        if len(idx) == 0:
+            raise KeyError(f"Scenario '{scenario_id}' not found in rate_scenario_ids.")
+        return int(idx[0])
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -84,6 +84,21 @@ def _build_shocked_disc_and_fwd(
 
     locked_mask_ser = pd.Series(False, index=df.index)
 
+    # ── Lock CFs whose period started before the shock curve ─────────────────
+    # _lookup_shocked_df returns NaN (not 0) for dates before the curve start —
+    # reindex on a MultiIndex produces NaN for missing keys.
+    # When d_f_start is NaN the CF period began before report_date; the rate is
+    # already contractually fixed.  Substitute base fwd_rt so that eff_rate_shocked
+    # collapses to the contracted client rate (zero delta) and int_pmt_shocked
+    # equals int_pmt.  Without this, nan_to_num converts NaN → 0 which produces
+    # a wrong fwd_rt_shocked (= 0) for variable products.
+    start_before_curve = np.isnan(d_f_start) & ~np.isnan(d_f_end) & (d_f_end > 0)
+    if start_before_curve.any() and "fwd_rt" in df.columns:
+        fwd_rt_shocked[start_before_curve] = (
+            df.loc[start_before_curve, "fwd_rt"].fillna(0.0).to_numpy()
+        )
+        locked_mask_ser.loc[start_before_curve] = True
+
     # ── Fixing-period override for variable products with fixing_dt ───────────
     rate_type_s = df.get("rate_type", pd.Series("V", index=df.index))
     if "fixing_dt" in df.columns and "schedule_id" in df.columns:
@@ -438,13 +453,15 @@ def compute_base_cf_detail(beh_df: pd.DataFrame, scenario_id: str = "base") -> p
     base forward rate identity: fwd_rt = (d_f_start / d_f_end - 1) / cf_yf.
     """
     df = beh_df.copy()
-    df["scenario_id"]       = scenario_id
-    df["fwd_rt_shocked"]    = df["fwd_rt"].fillna(0.0)
-    df["d_f_shocked"]       = df["base_df"].fillna(0.0)
-    # Reconstruct start d_f from base forward rate identity
+    df["scenario_id"]    = scenario_id
+    df["fwd_rt_shocked"] = df["fwd_rt"].fillna(0.0)
+    # base_df is present in load_all_beh_schedules (EVE run-off mode) but absent
+    # in load_beh_schedules (NII horizon-cut mode).  Fall back to 0 when missing;
+    # d_f columns are informational in NII tables and not used in NII calculations.
+    _base_df = df["base_df"].fillna(0.0) if "base_df" in df.columns else 0.0
+    df["d_f_shocked"]       = _base_df
     df["d_f_shocked_start"] = (
-        df["base_df"].fillna(0.0)
-        * (1.0 + df["fwd_rt"].fillna(0.0) * df["cf_yf"].fillna(0.0))
+        _base_df * (1.0 + df["fwd_rt"].fillna(0.0) * df["cf_yf"].fillna(0.0))
     )
     # eff_rate_shocked = contracted client rate (int_pmt / (outstanding × cf_yf)).
     # Using contracted rate (not raw fwd_rt) keeps the semantics consistent with

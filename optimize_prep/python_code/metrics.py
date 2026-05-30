@@ -33,8 +33,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from bs_vector import BalanceSheetParams, CurveTensors
-from nii_fast  import compute_nii_base_fast, compute_nii_all_scenarios
+from bs_vector import BalanceSheetParams, CurveTensors, CohortRates
+from nii_fast  import compute_nii_scenarios, compute_nii_all_scenarios
 from eve_fast  import compute_eve_base_fast, compute_eve_all_scenarios, compute_worst_delta_eve
 from lcr_fast  import compute_lcr_fast, worst_lcr
 from nsfr_fast import compute_nsfr_fast, worst_nsfr
@@ -139,7 +139,7 @@ class AllMetrics:
 def compute_all_metrics(
     weights: np.ndarray,
     params: BalanceSheetParams,
-    curves: CurveTensors | None,
+    curves: CurveTensors,
     total_assets: float,
 ) -> AllMetrics:
     """Compute all four metrics from a weight vector.
@@ -153,7 +153,7 @@ def compute_all_metrics(
                    Caller must ensure Σ_assets(weights) ≈ 1.0 and
                    Σ_liabilities+equity(weights) ≈ 1.0.
     params       : BalanceSheetParams — loaded once at optimizer startup
-    curves       : CurveTensors — loaded once; can be None (NII level-2 disabled)
+    curves       : CurveTensors — loaded once at optimizer startup
     total_assets : total balance sheet size in PLN
 
     Returns
@@ -163,9 +163,12 @@ def compute_all_metrics(
     amounts = weights * total_assets
 
     # ── NII ───────────────────────────────────────────────────────────────────
-    nii_scenarios  = compute_nii_all_scenarios(amounts, params)
+    # Use calibrated delta_nii_unit (curves=None) — exact at the calibration
+    # point and linear in amounts, matching the IRRBB pipeline for all shock shapes.
+    # Schedule-based (curves provided) diverges for non-parallel shocks.
+    nii_scenarios = compute_nii_all_scenarios(amounts, params, curves=None)
     nii_base       = nii_scenarios.pop("base")
-    delta_nii      = nii_scenarios   # remaining keys are scenario_ids → delta_NII
+    delta_nii      = nii_scenarios
 
     worst_dnii     = min(delta_nii.values()) if delta_nii else 0.0
     worst_nii_scen = min(delta_nii, key=delta_nii.get) if delta_nii else ""
@@ -206,7 +209,7 @@ def load_params_and_curves(
     params_path: str | None = None,
     curves_path: str | None = None,
 ) -> tuple[BalanceSheetParams, CurveTensors]:
-    """Load both artifacts from disk.
+    """Load BalanceSheetParams and CurveTensors from disk.
 
     Defaults to output/ relative to this file's directory.
     """
@@ -221,3 +224,11 @@ def load_params_and_curves(
     params = BalanceSheetParams.load(params_path)
     curves = CurveTensors.load(curves_path)
     return params, curves
+
+
+def load_cohort_rates(params_path: str | None = None) -> CohortRates:
+    """Load CohortRates (cr_* arrays) from product_params.npz."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if params_path is None:
+        params_path = os.path.join(here, "..", "output", "product_params.npz")
+    return CohortRates.load(params_path)

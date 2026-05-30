@@ -89,6 +89,25 @@ SCENARIO_LABELS = {
     "own":    "Own scenario",
 }
 
+# ── Own parallel scenarios (±100 bps and ±1 bps) ─────────────────────────────
+# Used for cf.eve_own_scenarios and cf.nii_own_scenarios analytical tables.
+# ±100 bps = sensitivity / stress view; ±1 bps = PV01/NII01 approximation.
+OWN_SCENARIO_IDS: list[str] = ["own_100_up", "own_100_dn", "own_1_up", "own_1_dn"]
+
+OWN_SCENARIO_BPS: dict[str, float] = {
+    "own_100_up": +100.0,
+    "own_100_dn": -100.0,
+    "own_1_up":   +1.0,
+    "own_1_dn":   -1.0,
+}
+
+OWN_SCENARIO_LABELS: dict[str, str] = {
+    "own_100_up": "Own +100 bps",
+    "own_100_dn": "Own -100 bps",
+    "own_1_up":   "Own +1 bps",
+    "own_1_dn":   "Own -1 bps",
+}
+
 
 # ── Shock formula (Article 3) ─────────────────────────────────────────────────
 
@@ -132,7 +151,17 @@ def shock_bps_at_tenors(
     params         : dict from get_shock_params(currency)
     own_shock_bps  : signed bps for the 'own' scenario
     """
-    t    = np.asarray(t, dtype=float)
+    t = np.asarray(t, dtype=float)
+
+    # Scenarios that don't need currency params — check first to avoid KeyError
+    if scenario == "base":
+        return np.zeros_like(t)
+    elif scenario == "own":
+        return np.full_like(t, float(own_shock_bps))
+    elif scenario in OWN_SCENARIO_BPS:
+        return np.full_like(t, float(OWN_SCENARIO_BPS[scenario]))
+
+    # EBA scenarios — require currency-specific shock params
     R_par = float(params["par"])
     R_s   = float(params["short"])
     R_l   = float(params["long"])
@@ -140,9 +169,7 @@ def shock_bps_at_tenors(
     f_s = np.exp(-t)          # 1 at t=0, → 0 for long tenors
     f_l = 1.0 - np.exp(-t)   # 0 at t=0, → 1 for long tenors
 
-    if scenario == "base":
-        return np.zeros_like(t)
-    elif scenario == "par_up":
+    if scenario == "par_up":
         return np.full_like(t, +R_par)
     elif scenario == "par_dn":
         return np.full_like(t, -R_par)
@@ -154,10 +181,11 @@ def shock_bps_at_tenors(
         return -0.65 * R_s * f_s + 0.90 * R_l * f_l
     elif scenario == "flat":
         return +0.80 * R_s * f_s - 0.75 * R_l * f_l
-    elif scenario == "own":
-        return np.full_like(t, float(own_shock_bps))
     else:
-        raise ValueError(f"Unknown scenario '{scenario}'. Valid: {ALL_SCENARIO_IDS}")
+        raise ValueError(
+            f"Unknown scenario '{scenario}'. "
+            f"Valid EBA: {ALL_SCENARIO_IDS}, Own: {OWN_SCENARIO_IDS}"
+        )
 
 
 # ── Curve shock application ───────────────────────────────────────────────────
@@ -265,10 +293,50 @@ def build_all_shocked_curves(
     return pd.concat(parts, ignore_index=True)
 
 
+def build_own_shocked_curves(
+    mkt_df: pd.DataFrame,
+    report_date: pd.Timestamp,
+    nii_floor_rate: float = 0.0,
+) -> pd.DataFrame:
+    """Compute shocked discount curves for the 4 own parallel scenarios.
+
+    Scenarios (OWN_SCENARIO_IDS):
+      own_100_up (+100 bps) / own_100_dn (−100 bps) — stress / sensitivity
+      own_1_up   (+1 bps)   / own_1_dn   (−1 bps)   — PV01 / NII01 approximation
+
+    Returns same column layout as build_all_shocked_curves() so the result
+    can be passed directly to write_irrbb_curves() with replace=False.
+    """
+    parts = []
+    for scenario in OWN_SCENARIO_IDS:
+        for curve_name, grp in mkt_df.groupby("curve_name"):
+            shocked = apply_shock_to_disc_curve(
+                grp[["n_days", "d_f"]].reset_index(drop=True),
+                scenario=scenario,
+                params={},              # unused — OWN_SCENARIO_BPS handles the shift
+                nii_floor_rate=nii_floor_rate,
+            )
+            shocked.insert(0, "curve_name",  curve_name)
+            shocked.insert(0, "scenario_id", scenario)
+            shocked.insert(0, "report_date", report_date)
+            parts.append(shocked)
+    return pd.concat(parts, ignore_index=True)
+
+
 # ── SQL I/O ───────────────────────────────────────────────────────────────────
 
-def write_irrbb_curves(engine, shocked_df: pd.DataFrame, report_date: pd.Timestamp) -> None:
-    """Delete existing rows for report_date and write shocked curves to irrbb.curves."""
+def write_irrbb_curves(
+    engine,
+    shocked_df: pd.DataFrame,
+    report_date: pd.Timestamp,
+    replace: bool = True,
+) -> None:
+    """Write shocked curves to irrbb.curves.
+
+    replace=True  (default): delete all existing rows for report_date first.
+    replace=False           : append-only — used when adding own scenarios after
+                              EBA curves have already been written.
+    """
     with engine.begin() as conn:
         conn.execute(text("""
             IF OBJECT_ID('irrbb.curves', 'U') IS NULL
@@ -292,10 +360,11 @@ def write_irrbb_curves(engine, shocked_df: pd.DataFrame, report_date: pd.Timesta
             )
                 ALTER TABLE irrbb.curves ADD zero_rt DECIMAL(18, 8) NULL;
         """))
-        conn.execute(
-            text("DELETE FROM irrbb.curves WHERE report_date = :rd"),
-            {"rd": report_date},
-        )
+        if replace:
+            conn.execute(
+                text("DELETE FROM irrbb.curves WHERE report_date = :rd"),
+                {"rd": report_date},
+            )
     shocked_df.to_sql(
         "curves", engine, schema="irrbb",
         if_exists="append", index=False, chunksize=10_000,

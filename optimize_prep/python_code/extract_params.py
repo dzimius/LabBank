@@ -71,6 +71,7 @@ _C_IN = ", ".join(f"'{c}'" for c in sorted(COHORT_PRODUCT_CODES))
 _S_IN = ", ".join(f"'{c}'" for c in sorted(SINGLE_ROW_PRODUCT_CODES))
 _COHORT_KEY = ["product_code", "bs_side", "currency", "start_year", "start_month"]
 _PROD_KEY   = ["product_code", "bs_side", "currency"]
+_AMORTISING_FLOAT_RENEWAL_PRODUCTS = {"1100", "2100"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -137,6 +138,8 @@ def _load_bs_structure() -> pd.DataFrame:
 def _load_rate_coefficients() -> pd.DataFrame:
     df = pd.read_excel(INTEREST_PATH)
     df["product_code"] = df["product_code"].astype(str)
+    df = df.rename(columns={"a": "coeff_a", "b": "coeff_b"})
+    df["coeff_b"] = df["coeff_b"] / 100.0  # Excel stores percent (e.g. 0.50 = 50bps); convert to decimal
     return df.set_index("product_code")
 
 
@@ -276,19 +279,24 @@ def _load_cohort_cf_monthly() -> pd.DataFrame:
             s.currency,
             YEAR(s.start_date)   AS start_year,
             MONTH(s.start_date)  AS start_month,
-            FLOOR(p.cf_yf * 12)  AS month_bucket_idx,
+            mb.month_bucket_idx,
             SUM(CAST(p.beh_capital_pmt  AS FLOAT)
                 + ISNULL(CAST(p.prepayment_pmt AS FLOAT), 0.0)) AS capital_cf,
             SUM(CAST(p.beh_interest_pmt AS FLOAT))               AS interest_cf
         FROM cf.products p
         JOIN sched_key s ON CAST(p.schedule_id AS VARCHAR(8)) = s.schedule_id
           AND CAST(p.product_code AS VARCHAR(4)) = s.product_code
+        CROSS APPLY (
+            SELECT CASE WHEN DATEDIFF(month, :rd, p.cf_end_dt) <= 0 THEN 0
+                        ELSE DATEDIFF(month, :rd, p.cf_end_dt) - 1
+                   END AS month_bucket_idx
+        ) mb
         WHERE CAST(p.product_code AS VARCHAR(4)) IN ({_C_IN})
           AND p.cf_end_dt > :rd
           AND COALESCE(p.beh_total_pmt, 0) <> 0
         GROUP BY s.product_code, s.bs_side, s.currency,
                  YEAR(s.start_date), MONTH(s.start_date),
-                 FLOOR(p.cf_yf * 12)
+                 mb.month_bucket_idx
     """)
     df = _try_query(q, {"rd": REPORT_DATE})
     if not df.empty:
@@ -388,6 +396,48 @@ def _analytical_cf_schedule(
     return pd.DataFrame(rows)
 
 
+def _analytical_monthly_profile(
+    balance: float,
+    annual_coupon: float,
+    term_m: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Monthly outstanding and capital arrays for NII computation (12 months).
+
+    Uses a full annuity amortization schedule — no run-to-first-repricing
+    bullet because NII accrues on the full outstanding balance through the
+    entire 12-month horizon regardless of when the rate reprices.
+
+    Returns:
+        out_m : (12,) outstanding balance at the start of each month (PLN)
+        cap_m : (12,) capital repaid during each month (PLN)
+    """
+    if term_m <= 0 or balance <= 0:
+        return np.zeros(12), np.zeros(12)
+
+    r_m   = max(annual_coupon, 0.0) / 12.0
+    gen_m = max(int(term_m), 1)
+
+    if r_m > 1e-9:
+        pmt = balance * r_m / (1.0 - (1.0 + r_m) ** (-gen_m))
+    else:
+        pmt = balance / gen_m
+
+    out_m   = np.zeros(12)
+    cap_m   = np.zeros(12)
+    rem_bal = balance
+
+    for m in range(min(12, gen_m)):
+        out_m[m]  = rem_bal
+        int_m     = rem_bal * r_m
+        cap_val   = min(pmt - int_m, rem_bal)
+        cap_m[m]  = cap_val
+        rem_bal   = max(rem_bal - cap_val, 0.0)
+        if rem_bal < 1.0:
+            break
+
+    return out_m, cap_m
+
+
 def _load_cohort_float_margins() -> dict:
     """Outstanding-weighted average margin per cohort for FLOATING products.
 
@@ -406,21 +456,23 @@ def _load_cohort_float_margins() -> dict:
                 / NULLIF(SUM(CAST(p.beh_outstanding AS FLOAT)), 0) AS wavg_margin
         FROM cf.products p
         JOIN (
-            SELECT schedule_id, CAST(product_code AS VARCHAR(4)) AS product_code,
+            SELECT CAST(schedule_id AS VARCHAR(8)) AS schedule_id, 'L' AS src,
+                   CAST(product_code AS VARCHAR(4)) AS product_code,
                    bs_side, currency, start_date
             FROM sched.loans
             WHERE CAST(product_code AS VARCHAR(4)) IN ({_C_IN})
             UNION ALL
-            SELECT schedule_id, CAST(product_code AS VARCHAR(4)),
+            SELECT CAST(schedule_id AS VARCHAR(8)), 'D', CAST(product_code AS VARCHAR(4)),
                    bs_side, currency, start_date
             FROM sched.deposits
             WHERE CAST(product_code AS VARCHAR(4)) IN ({_C_IN})
             UNION ALL
-            SELECT schedule_id, CAST(product_code AS VARCHAR(4)),
+            SELECT CAST(schedule_id AS VARCHAR(8)), 'F', CAST(product_code AS VARCHAR(4)),
                    bs_side, currency, start_date
             FROM sched.fin_inst
             WHERE CAST(product_code AS VARCHAR(4)) IN ({_C_IN})
-        ) s ON p.schedule_id = s.schedule_id
+        ) s ON CAST(p.schedule_id AS VARCHAR(8)) = s.schedule_id
+           AND p.product_type = s.src
         WHERE CAST(p.product_code AS VARCHAR(4)) IN ({_C_IN})
           AND p.cf_end_dt > :rd
           AND COALESCE(p.beh_outstanding, 0) > 0
@@ -654,7 +706,7 @@ def _load_cohort_coupon_rates() -> pd.DataFrame:
     return df.groupby(_COHORT_KEY, as_index=False)["wavg_client_rt"].mean()
 
 
-def _load_cohort_monthly_schedule() -> tuple[dict, dict, dict, dict]:
+def _load_cohort_monthly_schedule() -> tuple[dict, dict, dict, dict, dict, dict, dict, dict]:
     """Load behavioral CFs and aggregate to monthly buckets per cohort.
 
     Two GROUP BY queries — avoids transferring millions of individual CF rows:
@@ -666,38 +718,45 @@ def _load_cohort_monthly_schedule() -> tuple[dict, dict, dict, dict]:
         capital_by     : np.ndarray(12,)  capital + prepayment per calendar month
         locked_rate_by : float            outstanding-weighted eff_rate for locked CFs
         t_first_by     : float            months to earliest future fixing (999 if none)
+        locked_frac_by : np.ndarray(12,)  locked outstanding share per month
+        locked_rate_m_by: np.ndarray(12,) outstanding-weighted locked rate per month
+        float_base_eff_m_by: np.ndarray(12,) outstanding-weighted base client rate
+        float_base_fwd_m_by: np.ndarray(12,) outstanding-weighted base market forward
     """
     # Deduplicated sched CTE fragment — shared by Q1 and Q2.
-    # ROW_NUMBER ensures each schedule_id contributes exactly one row even if it
-    # appears in multiple sched tables (UNION ALL would otherwise inflate counts).
+    # Partitions by (src, schedule_id) so that loans, deposits, and fin_inst each
+    # have independent schedule_id spaces.  A plain PARTITION BY schedule_id caused
+    # deposits/fin_inst entries to be silently dropped whenever a loan shared the
+    # same integer schedule_id, because '1000' < '7060' in the ORDER BY.
     _sched_key_cte = f"""
         sched_key AS (
-            SELECT schedule_id, product_code, bs_side, currency, start_date
+            SELECT schedule_id, src, product_code, bs_side, currency, start_date
             FROM (
                 SELECT
                     CAST(schedule_id AS VARCHAR(8)) AS schedule_id,
+                    src,
                     CAST(product_code AS VARCHAR(4)) AS product_code,
                     bs_side, currency, start_date,
                     ROW_NUMBER() OVER (
-                        PARTITION BY CAST(schedule_id AS VARCHAR(8))
+                        PARTITION BY src, CAST(schedule_id AS VARCHAR(8))
                         ORDER BY product_code
                     ) AS rn
                 FROM (
                     SELECT CAST(schedule_id AS VARCHAR(8)) AS schedule_id,
                            CAST(product_code AS VARCHAR(4)) AS product_code,
-                           bs_side, currency, start_date
+                           bs_side, currency, start_date, 'L' AS src
                     FROM sched.loans
                     WHERE CAST(product_code AS VARCHAR(4)) IN ({_C_IN})
                     UNION ALL
                     SELECT CAST(schedule_id AS VARCHAR(8)),
                            CAST(product_code AS VARCHAR(4)),
-                           bs_side, currency, start_date
+                           bs_side, currency, start_date, 'D' AS src
                     FROM sched.deposits
                     WHERE CAST(product_code AS VARCHAR(4)) IN ({_C_IN})
                     UNION ALL
                     SELECT CAST(schedule_id AS VARCHAR(8)),
                            CAST(product_code AS VARCHAR(4)),
-                           bs_side, currency, start_date
+                           bs_side, currency, start_date, 'F' AS src
                     FROM sched.fin_inst
                     WHERE CAST(product_code AS VARCHAR(4)) IN ({_C_IN})
                 ) u
@@ -723,9 +782,30 @@ def _load_cohort_monthly_schedule() -> tuple[dict, dict, dict, dict]:
                 DATEDIFF(month, :rd, p.cf_end_dt)        AS m_end,
                 ISNULL(CAST(p.beh_outstanding AS FLOAT), 0.0)           AS outstanding_val,
                 ISNULL(CAST(p.beh_capital_pmt AS FLOAT), 0.0)
-              + ISNULL(CAST(p.prepayment_pmt  AS FLOAT), 0.0)           AS capital_val
+              + ISNULL(CAST(p.prepayment_pmt  AS FLOAT), 0.0)           AS capital_val,
+                CASE WHEN (p.cf_start_dt < :rd OR (p.fixing_dt IS NOT NULL AND p.fixing_dt < :rd))
+                     THEN ISNULL(CAST(p.beh_outstanding AS FLOAT), 0.0)
+                     ELSE 0.0 END                                       AS locked_outstanding_val,
+                CASE WHEN (p.cf_start_dt < :rd OR (p.fixing_dt IS NOT NULL AND p.fixing_dt < :rd))
+                          AND ISNULL(CAST(p.cf_yf AS FLOAT), 0.0) > 0.0
+                     THEN ISNULL(CAST(p.beh_interest_pmt AS FLOAT), 0.0)
+                          / CAST(p.cf_yf AS FLOAT)
+                     ELSE 0.0 END                                       AS locked_int_div_yf_val,
+                CASE WHEN NOT (p.cf_start_dt < :rd OR (p.fixing_dt IS NOT NULL AND p.fixing_dt < :rd))
+                     THEN ISNULL(CAST(p.beh_outstanding AS FLOAT), 0.0)
+                     ELSE 0.0 END                                       AS float_outstanding_val,
+                CASE WHEN NOT (p.cf_start_dt < :rd OR (p.fixing_dt IS NOT NULL AND p.fixing_dt < :rd))
+                          AND ISNULL(CAST(p.cf_yf AS FLOAT), 0.0) > 0.0
+                     THEN ISNULL(CAST(p.beh_interest_pmt AS FLOAT), 0.0)
+                          / CAST(p.cf_yf AS FLOAT)
+                     ELSE 0.0 END                                       AS float_int_div_yf_val,
+                CASE WHEN NOT (p.cf_start_dt < :rd OR (p.fixing_dt IS NOT NULL AND p.fixing_dt < :rd))
+                     THEN ISNULL(CAST(p.beh_outstanding AS FLOAT), 0.0)
+                          * ISNULL(CAST(p.fwd_rt AS FLOAT), 0.0)
+                     ELSE 0.0 END                                       AS float_fwd_num_val
             FROM cf.products p
             JOIN sched_key s ON CAST(p.schedule_id AS VARCHAR(8)) = s.schedule_id
+                             AND p.product_type = s.src
             WHERE CAST(p.product_code AS VARCHAR(4)) IN ({_C_IN})
               AND p.cf_end_dt > :rd
               AND COALESCE(p.beh_total_pmt, 0) <> 0
@@ -735,7 +815,12 @@ def _load_cohort_monthly_schedule() -> tuple[dict, dict, dict, dict]:
                 product_code, bs_side, currency, start_year, start_month,
                 loan_id, m_start, m_end,
                 MAX(outstanding_val) AS outstanding_val,
-                SUM(capital_val)     AS capital_val
+                SUM(capital_val)     AS capital_val,
+                MAX(locked_outstanding_val) AS locked_outstanding_val,
+                SUM(locked_int_div_yf_val)  AS locked_int_div_yf_val,
+                MAX(float_outstanding_val)  AS float_outstanding_val,
+                SUM(float_int_div_yf_val)   AS float_int_div_yf_val,
+                MAX(float_fwd_num_val)      AS float_fwd_num_val
             FROM period_cfs
             GROUP BY
                 product_code, bs_side, currency, start_year, start_month,
@@ -745,7 +830,12 @@ def _load_cohort_monthly_schedule() -> tuple[dict, dict, dict, dict]:
             product_code, bs_side, currency, start_year, start_month,
             m_start, m_end,
             SUM(outstanding_val) AS outstanding_sum,
-            SUM(capital_val)     AS capital_sum
+            SUM(capital_val)     AS capital_sum,
+            SUM(locked_outstanding_val) AS locked_outstanding_sum,
+            SUM(locked_int_div_yf_val)  AS locked_int_div_yf_sum,
+            SUM(float_outstanding_val)  AS float_outstanding_sum,
+            SUM(float_int_div_yf_val)   AS float_int_div_yf_sum,
+            SUM(float_fwd_num_val)      AS float_fwd_num_sum
         FROM per_loan_period
         GROUP BY
             product_code, bs_side, currency, start_year, start_month,
@@ -763,12 +853,12 @@ def _load_cohort_monthly_schedule() -> tuple[dict, dict, dict, dict]:
             s.bs_side, s.currency,
             YEAR(s.start_date)                                                              AS start_year,
             MONTH(s.start_date)                                                             AS start_month,
-            SUM(CASE WHEN (p.fixing_dt IS NULL OR p.fixing_dt <= :rd)
+            SUM(CASE WHEN (p.cf_start_dt < :rd OR (p.fixing_dt IS NOT NULL AND p.fixing_dt < :rd))
                           AND ISNULL(CAST(p.cf_yf AS FLOAT), 0.0) > 0.0
                      THEN ISNULL(CAST(p.beh_interest_pmt AS FLOAT), 0.0)
                           / CAST(p.cf_yf AS FLOAT)
                      ELSE 0.0 END)                                                          AS locked_int_div_yf,
-            SUM(CASE WHEN p.fixing_dt IS NULL OR p.fixing_dt <= :rd
+            SUM(CASE WHEN (p.cf_start_dt < :rd OR (p.fixing_dt IS NOT NULL AND p.fixing_dt < :rd))
                      THEN ISNULL(CAST(p.beh_outstanding AS FLOAT), 0.0)
                      ELSE 0.0 END)                                                          AS locked_out_sum,
             MIN(CASE WHEN p.fixing_dt > :rd
@@ -776,6 +866,7 @@ def _load_cohort_monthly_schedule() -> tuple[dict, dict, dict, dict]:
                      ELSE NULL END)                                                         AS min_fixing_months
         FROM cf.products p
         JOIN sched_key s ON CAST(p.schedule_id AS VARCHAR(8)) = s.schedule_id
+                         AND p.product_type = s.src
         WHERE CAST(p.product_code AS VARCHAR(4)) IN ({_C_IN})
           AND p.cf_end_dt > :rd
           AND COALESCE(p.beh_total_pmt, 0) <> 0
@@ -789,13 +880,18 @@ def _load_cohort_monthly_schedule() -> tuple[dict, dict, dict, dict]:
     df2 = _try_query(q2, params)
 
     if df1.empty:
-        return {}, {}, {}, {}
+        return {}, {}, {}, {}, {}, {}, {}, {}
 
     df1["product_code"] = df1["product_code"].astype(str)
-    for col in ["outstanding_sum", "capital_sum"]:
+    for col in [
+        "outstanding_sum", "capital_sum",
+        "locked_outstanding_sum", "locked_int_div_yf_sum",
+        "float_outstanding_sum", "float_int_div_yf_sum", "float_fwd_num_sum",
+    ]:
         df1[col] = pd.to_numeric(df1[col], errors="coerce").fillna(0.0)
-    df1["m_start"] = pd.to_numeric(df1["m_start"], errors="coerce").fillna(0).astype(int)
-    df1["m_end"]   = pd.to_numeric(df1["m_end"],   errors="coerce").fillna(1).astype(int).clip(1, 12)
+    df1["m_start"]   = pd.to_numeric(df1["m_start"], errors="coerce").fillna(0).astype(int)
+    df1["m_end_raw"] = pd.to_numeric(df1["m_end"],   errors="coerce").fillna(1).astype(int)
+    df1["m_end"]     = df1["m_end_raw"].clip(1, 12)
 
     # ── Assign group IDs (one per cohort) ────────────────────────────────────
     gid = df1.groupby(
@@ -805,23 +901,72 @@ def _load_cohort_monthly_schedule() -> tuple[dict, dict, dict, dict]:
     n_groups = int(gid.max()) + 1
 
     # ── Vectorised month expansion ────────────────────────────────────────────
-    m_start_v = df1["m_start"].to_numpy(dtype=int)
-    m_end_v   = df1["m_end"].to_numpy(dtype=int)
-    out_v     = df1["outstanding_sum"].to_numpy(dtype=float)
-    cap_v     = df1["capital_sum"].to_numpy(dtype=float)
+    m_start_v   = df1["m_start"].to_numpy(dtype=int)
+    m_end_v     = df1["m_end"].to_numpy(dtype=int)
+    m_end_raw_v = df1["m_end_raw"].to_numpy(dtype=int)
+    out_v       = df1["outstanding_sum"].to_numpy(dtype=float)
+    cap_v       = df1["capital_sum"].to_numpy(dtype=float)
+    lock_out_v  = df1["locked_outstanding_sum"].to_numpy(dtype=float)
+    lock_num_v  = df1["locked_int_div_yf_sum"].to_numpy(dtype=float)
+    float_out_v = df1["float_outstanding_sum"].to_numpy(dtype=float)
+    float_eff_num_v = df1["float_int_div_yf_sum"].to_numpy(dtype=float)
+    float_fwd_num_v = df1["float_fwd_num_sum"].to_numpy(dtype=float)
 
     months = np.arange(12)
     mask_out    = (m_start_v[:, None] <= months[None, :]) & (months[None, :] < m_end_v[:, None])
     out_contrib = out_v[:, None] * mask_out
+    lock_out_contrib = lock_out_v[:, None] * mask_out
+    lock_num_contrib = lock_num_v[:, None] * mask_out
+    float_out_contrib = float_out_v[:, None] * mask_out
+    float_eff_num_contrib = float_eff_num_v[:, None] * mask_out
+    float_fwd_num_contrib = float_fwd_num_v[:, None] * mask_out
 
-    cap_idx     = np.clip(m_end_v - 1, 0, 11)
+    cap_idx     = np.clip(m_end_raw_v - 1, 0, 11)
     cap_contrib = np.zeros((len(df1), 12))
-    np.add.at(cap_contrib, (np.arange(len(df1)), cap_idx), cap_v)
+    cap_in_horizon = (m_end_raw_v >= 1) & (m_end_raw_v <= 12)
+    if cap_in_horizon.any():
+        cap_rows = np.where(cap_in_horizon)[0]
+        np.add.at(cap_contrib, (cap_rows, cap_idx[cap_in_horizon]), cap_v[cap_in_horizon])
 
     outstanding_all = np.zeros((n_groups, 12))
     capital_all     = np.zeros((n_groups, 12))
+    locked_out_all  = np.zeros((n_groups, 12))
+    locked_num_all  = np.zeros((n_groups, 12))
+    float_out_all   = np.zeros((n_groups, 12))
+    float_eff_num_all = np.zeros((n_groups, 12))
+    float_fwd_num_all = np.zeros((n_groups, 12))
     np.add.at(outstanding_all, gid, out_contrib)
     np.add.at(capital_all,     gid, cap_contrib)
+    np.add.at(locked_out_all,  gid, lock_out_contrib)
+    np.add.at(locked_num_all,  gid, lock_num_contrib)
+    np.add.at(float_out_all,   gid, float_out_contrib)
+    np.add.at(float_eff_num_all, gid, float_eff_num_contrib)
+    np.add.at(float_fwd_num_all, gid, float_fwd_num_contrib)
+
+    locked_frac_all = np.divide(
+        locked_out_all,
+        outstanding_all,
+        out=np.zeros_like(locked_out_all),
+        where=outstanding_all > 0,
+    )
+    locked_rate_m_all = np.divide(
+        locked_num_all,
+        locked_out_all,
+        out=np.zeros_like(locked_num_all),
+        where=locked_out_all > 0,
+    )
+    float_base_eff_m_all = np.divide(
+        float_eff_num_all,
+        float_out_all,
+        out=np.zeros_like(float_eff_num_all),
+        where=float_out_all > 0,
+    )
+    float_base_fwd_m_all = np.divide(
+        float_fwd_num_all,
+        float_out_all,
+        out=np.zeros_like(float_fwd_num_all),
+        where=float_out_all > 0,
+    )
 
     # ── Build cohort key → group_id map ──────────────────────────────────────
     key_to_gid: dict = {}
@@ -857,14 +1002,537 @@ def _load_cohort_monthly_schedule() -> tuple[dict, dict, dict, dict]:
     capital_by:     dict = {}
     locked_rate_by: dict = {}
     t_first_by:     dict = {}
+    locked_frac_by: dict = {}
+    locked_rate_m_by: dict = {}
+    float_base_eff_m_by: dict = {}
+    float_base_fwd_m_by: dict = {}
 
     for ck, g in key_to_gid.items():
         outstanding_by[ck] = outstanding_all[g].copy()
         capital_by[ck]     = capital_all[g].copy()
         locked_rate_by[ck] = float(locked_rate_g[g])
         t_first_by[ck]     = float(t_first_g[g])
+        locked_frac_by[ck] = locked_frac_all[g].copy()
+        locked_rate_m_by[ck] = locked_rate_m_all[g].copy()
+        float_base_eff_m_by[ck] = float_base_eff_m_all[g].copy()
+        float_base_fwd_m_by[ck] = float_base_fwd_m_all[g].copy()
 
-    return outstanding_by, capital_by, locked_rate_by, t_first_by
+    return (
+        outstanding_by, capital_by, locked_rate_by, t_first_by,
+        locked_frac_by, locked_rate_m_by,
+        float_base_eff_m_by, float_base_fwd_m_by,
+    )
+
+
+def _load_cohort_effective_nii_tables(
+    curves: dict,
+    ir_coeff: pd.DataFrame,
+    scenario_ids: list[str],
+) -> tuple[dict, dict, dict, dict]:
+    """Build monthly effective NII tables directly from daily CF rows.
+
+    This is intentionally limited to amortising floating loan products.  Those
+    rows have real 12M behavioural cash flows, and they are where the monthly
+    rate_matrix approximation loses the most accuracy.
+
+    Returns dicts keyed by cohort:
+      interest_yf_by       raw sum(outstanding * cf_yf) by cf_end month
+      capital_remain_by    raw sum(capital * actual remain_yf) by cf_end month
+      rate_matrix_by       effective client rate [12, n_scen]
+      renewal_rate_by      effective renewal rate [12, n_scen]
+    """
+    codes = sorted(_AMORTISING_FLOAT_RENEWAL_PRODUCTS)
+    if not codes:
+        return {}, {}, {}, {}
+    codes_in = ", ".join(f"'{c}'" for c in codes)
+    scen_all = ["base"] + list(scenario_ids)
+
+    q = text(f"""
+        WITH sched_key AS (
+            SELECT CAST(schedule_id AS VARCHAR(8)) AS schedule_id, 'L' AS src,
+                   CAST(product_code AS VARCHAR(4)) AS product_code,
+                   bs_side, currency, start_date
+            FROM sched.loans
+            WHERE CAST(product_code AS VARCHAR(4)) IN ({codes_in})
+            UNION ALL
+            SELECT CAST(schedule_id AS VARCHAR(8)), 'D',
+                   CAST(product_code AS VARCHAR(4)), bs_side, currency, start_date
+            FROM sched.deposits
+            WHERE CAST(product_code AS VARCHAR(4)) IN ({codes_in})
+            UNION ALL
+            SELECT CAST(schedule_id AS VARCHAR(8)), 'F',
+                   CAST(product_code AS VARCHAR(4)), bs_side, currency, start_date
+            FROM sched.fin_inst
+            WHERE CAST(product_code AS VARCHAR(4)) IN ({codes_in})
+        )
+        SELECT
+            s.product_code, s.bs_side, s.currency,
+            YEAR(s.start_date) AS start_year,
+            MONTH(s.start_date) AS start_month,
+            DATEDIFF(month, :rd, p.cf_end_dt) AS m_end,
+            p.cf_start_dt, p.cf_end_dt, p.fixing_dt,
+            CAST(p.cf_yf AS FLOAT) AS cf_yf,
+            ISNULL(CAST(p.beh_outstanding AS FLOAT), 0.0) AS outstanding,
+            ISNULL(CAST(p.beh_capital_pmt AS FLOAT), 0.0)
+              + ISNULL(CAST(p.prepayment_pmt AS FLOAT), 0.0) AS capital,
+            ISNULL(CAST(p.beh_interest_pmt AS FLOAT), 0.0) AS interest,
+            ISNULL(CAST(p.fwd_rt AS FLOAT), 0.0) AS base_fwd
+        FROM cf.products p
+        JOIN sched_key s ON CAST(p.schedule_id AS VARCHAR(8)) = s.schedule_id
+                         AND p.product_type = s.src
+        WHERE CAST(p.product_code AS VARCHAR(4)) IN ({codes_in})
+          AND p.cf_end_dt > :rd
+          AND p.cf_end_dt <= :he
+          AND COALESCE(p.beh_total_pmt, 0) <> 0
+    """)
+    horizon_end = REPORT_DATE + pd.Timedelta(days=round(365.25))
+    df = _try_query(q, {"rd": REPORT_DATE, "he": horizon_end})
+    if df.empty:
+        return {}, {}, {}, {}
+
+    df["product_code"] = df["product_code"].astype(str)
+    for c in ["cf_start_dt", "cf_end_dt", "fixing_dt"]:
+        df[c] = pd.to_datetime(df[c], errors="coerce")
+    for c in ["cf_yf", "outstanding", "capital", "interest", "base_fwd"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+    df["m_idx"] = pd.to_numeric(df["m_end"], errors="coerce").fillna(0).astype(int) - 1
+    df = df[(df["m_idx"] >= 0) & (df["m_idx"] < 12)].copy()
+    if df.empty:
+        return {}, {}, {}, {}
+
+    denom = (df["outstanding"] * df["cf_yf"]).replace(0.0, np.nan)
+    df["contracted_rt"] = (df["interest"] / denom).fillna(0.0)
+    df["int_w"] = (df["outstanding"] * df["cf_yf"]).clip(lower=0.0)
+    df["remain_yf"] = ((horizon_end - df["cf_end_dt"]).dt.days / 365.0).clip(lower=0.0)
+    df["cap_remain_w"] = (df["capital"] * df["remain_yf"]).clip(lower=0.0)
+    locked = (df["cf_start_dt"] < REPORT_DATE) | (
+        df["fixing_dt"].notna() & (df["fixing_dt"] < REPORT_DATE)
+    )
+    before_curve = df["cf_start_dt"] < REPORT_DATE
+
+    pcs = df["product_code"].astype(str)
+    a_v = pcs.map(ir_coeff["coeff_a"].to_dict()).fillna(1.0).to_numpy(dtype=float)
+    b_v = pcs.map(ir_coeff["coeff_b"].to_dict()).fillna(0.0).to_numpy(dtype=float)
+    floor_v = pcs.map(
+        ir_coeff["client_floor"].dropna().to_dict()
+        if "client_floor" in ir_coeff.columns else {}
+    ).fillna(float("-inf")).to_numpy(dtype=float)
+    cap_v = pcs.map(
+        ir_coeff["client_cap"].dropna().to_dict()
+        if "client_cap" in ir_coeff.columns else {}
+    ).fillna(float("inf")).to_numpy(dtype=float)
+
+    def _lookup_df(scenario: str, dates: pd.Series) -> np.ndarray:
+        out = np.ones(len(dates), dtype=float)
+        days = (pd.to_datetime(dates) - REPORT_DATE).dt.days.to_numpy(dtype=float)
+        ccy_arr = df["currency"].astype(str).to_numpy()
+        for ccy in np.unique(ccy_arr):
+            mask = ccy_arr == ccy
+            nd_ldf = curves.get(scenario, {}).get(_CCY_CURVE.get(ccy, "PLN_disc_curve"))
+            if nd_ldf is None:
+                continue
+            nd, ldf = nd_ldf
+            vals = np.exp(np.interp(days[mask], nd, ldf, left=ldf[0], right=ldf[-1]))
+            vals = np.where(days[mask] <= 0.0, 1.0, vals)
+            out[mask] = vals
+        return out
+
+    def _fwd_between(scenario: str, start: pd.Series, end: pd.Series, yf: np.ndarray) -> np.ndarray:
+        df_s = _lookup_df(scenario, start)
+        df_e = _lookup_df(scenario, end)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            fwd = np.where((df_e > 0.0) & (yf > 0.0), (df_s / df_e - 1.0) / yf, 0.0)
+        return np.maximum(0.0, np.nan_to_num(fwd, nan=0.0, posinf=0.0, neginf=0.0))
+
+    cf_yf = df["cf_yf"].to_numpy(dtype=float)
+    yf_from_report = ((df["cf_end_dt"] - REPORT_DATE).dt.days / 365.0).clip(lower=0.0).to_numpy(dtype=float)
+    base_fwd = df["base_fwd"].to_numpy(dtype=float)
+    contracted = df["contracted_rt"].to_numpy(dtype=float)
+    int_w = df["int_w"].to_numpy(dtype=float)
+    cap_remain_w = df["cap_remain_w"].to_numpy(dtype=float)
+    locked_arr = locked.to_numpy(dtype=bool)
+    before_arr = before_curve.to_numpy(dtype=bool)
+
+    keys_df = df[_COHORT_KEY].drop_duplicates().reset_index(drop=True)
+    key_to_gid = {
+        (str(r.product_code), str(r.bs_side), str(r.currency), int(r.start_year), int(r.start_month)): i
+        for i, r in keys_df.iterrows()
+    }
+    gid = np.array([
+        key_to_gid[(str(r.product_code), str(r.bs_side), str(r.currency), int(r.start_year), int(r.start_month))]
+        for _, r in df.iterrows()
+    ], dtype=int)
+    midx = df["m_idx"].to_numpy(dtype=int)
+    n_groups = len(key_to_gid)
+    n_scen = len(scen_all)
+
+    int_w_all = np.zeros((n_groups, 12), dtype=float)
+    cap_remain_all = np.zeros((n_groups, 12), dtype=float)
+    rate_num_all = np.zeros((n_groups, 12, n_scen), dtype=float)
+    ren_num_all = np.zeros((n_groups, 12, n_scen), dtype=float)
+    np.add.at(int_w_all, (gid, midx), int_w)
+    np.add.at(cap_remain_all, (gid, midx), cap_remain_w)
+
+    for s_idx, scen in enumerate(scen_all):
+        if scen == "base":
+            eff_interest = contracted.copy()
+            # Base renewal follows compute_nii_base_schedule: use fwd_rt for
+            # future-start CFs, override only already-started periods with the
+            # report-date-to-end base curve rate.
+            fwd_ren = base_fwd.copy()
+            if before_arr.any():
+                dfe = _lookup_df("base", df["cf_end_dt"])
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    fwd_report_end = np.where(
+                        (dfe > 0.0) & (yf_from_report > 0.0),
+                        (1.0 / dfe - 1.0) / yf_from_report,
+                        0.0,
+                    )
+                fwd_ren[before_arr] = np.maximum(0.0, np.nan_to_num(fwd_report_end[before_arr], nan=0.0))
+        else:
+            fwd_sh = _fwd_between(scen, df["cf_start_dt"], df["cf_end_dt"], cf_yf)
+            fwd_interest = np.where(locked_arr, base_fwd, fwd_sh)
+            eff_interest = contracted + a_v * (fwd_interest - base_fwd)
+
+            fwd_ren = fwd_sh.copy()
+            if before_arr.any():
+                dfe = _lookup_df(scen, df["cf_end_dt"])
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    fwd_report_end = np.where(
+                        (dfe > 0.0) & (yf_from_report > 0.0),
+                        (1.0 / dfe - 1.0) / yf_from_report,
+                        0.0,
+                    )
+                fwd_ren[before_arr] = np.maximum(0.0, np.nan_to_num(fwd_report_end[before_arr], nan=0.0))
+
+        eff_interest = np.minimum(cap_v, np.maximum(floor_v, eff_interest))
+        ren_rate = np.minimum(cap_v, np.maximum(floor_v, a_v * fwd_ren + b_v))
+        np.add.at(rate_num_all[:, :, s_idx], (gid, midx), int_w * eff_interest)
+        np.add.at(ren_num_all[:, :, s_idx], (gid, midx), cap_remain_w * ren_rate)
+
+    rate_all = np.divide(
+        rate_num_all,
+        int_w_all[:, :, None],
+        out=np.zeros_like(rate_num_all),
+        where=int_w_all[:, :, None] > 0.0,
+    )
+    ren_rate_all = np.divide(
+        ren_num_all,
+        cap_remain_all[:, :, None],
+        out=np.zeros_like(ren_num_all),
+        where=cap_remain_all[:, :, None] > 0.0,
+    )
+
+    interest_yf_by: dict = {}
+    capital_remain_by: dict = {}
+    rate_matrix_by: dict = {}
+    renewal_rate_by: dict = {}
+    for ck, g in key_to_gid.items():
+        interest_yf_by[ck] = int_w_all[g].copy()
+        capital_remain_by[ck] = cap_remain_all[g].copy()
+        rate_matrix_by[ck] = rate_all[g].copy()
+        renewal_rate_by[ck] = ren_rate_all[g].copy()
+    return interest_yf_by, capital_remain_by, rate_matrix_by, renewal_rate_by
+
+
+def _load_cohort_effective_eve_pv_tables(
+    curves: dict,
+    ir_coeff: pd.DataFrame,
+    scenario_ids: list[str],
+) -> dict:
+    """Build scenario-specific monthly EVE PV tables from daily CF rows.
+
+    Exact EVE is not just capital discounted on shocked curves.  Variable-rate
+    rows also get shocked interest payments, while fixed rows keep contracted
+    interest.  This table preserves that daily logic, then stores unsigned PV
+    by cohort/month/scenario.  Runtime multiplies by sign and current balance.
+    """
+    scen_all = ["base"] + list(scenario_ids)
+    q = text(f"""
+        WITH sched_key AS (
+            SELECT CAST(schedule_id AS VARCHAR(8)) AS schedule_id, 'L' AS src,
+                   CAST(product_code AS VARCHAR(4)) AS product_code,
+                   bs_side, currency, start_date,
+                   ISNULL(rate_type, 'V') AS rate_type
+            FROM sched.loans
+            WHERE CAST(product_code AS VARCHAR(4)) IN ({_C_IN})
+            UNION ALL
+            SELECT CAST(schedule_id AS VARCHAR(8)), 'D',
+                   CAST(product_code AS VARCHAR(4)), bs_side, currency, start_date,
+                   ISNULL(rate_type, 'V') AS rate_type
+            FROM sched.deposits
+            WHERE CAST(product_code AS VARCHAR(4)) IN ({_C_IN})
+            UNION ALL
+            SELECT CAST(schedule_id AS VARCHAR(8)), 'F',
+                   CAST(product_code AS VARCHAR(4)), bs_side, currency, start_date,
+                   ISNULL(rate_type, 'F') AS rate_type
+            FROM sched.fin_inst
+            WHERE CAST(product_code AS VARCHAR(4)) IN ({_C_IN})
+        )
+        SELECT
+            CAST(p.schedule_id AS VARCHAR(8)) AS schedule_id,
+            CAST(p.product_type AS VARCHAR(1)) AS product_type,
+            s.product_code, s.bs_side, s.currency,
+            YEAR(s.start_date) AS start_year,
+            MONTH(s.start_date) AS start_month,
+            CASE WHEN DATEDIFF(month, :rd, p.cf_end_dt) <= 0 THEN 0
+                 ELSE DATEDIFF(month, :rd, p.cf_end_dt) - 1
+            END AS m_idx,
+            s.rate_type,
+            p.cf_start_dt, p.cf_end_dt, p.fixing_dt,
+            CAST(p.cf_yf AS FLOAT) AS cf_yf,
+            ISNULL(CAST(p.fwd_rt AS FLOAT), 0.0) AS base_fwd,
+            ISNULL(CAST(p.d_f AS FLOAT), 0.0) AS base_df,
+            ISNULL(CAST(p.beh_outstanding AS FLOAT), 0.0) AS outstanding,
+            ISNULL(CAST(p.beh_capital_pmt AS FLOAT), 0.0)
+              + ISNULL(CAST(p.prepayment_pmt AS FLOAT), 0.0) AS capital,
+            ISNULL(CAST(p.beh_interest_pmt AS FLOAT), 0.0) AS interest
+        FROM cf.products p
+        JOIN sched_key s ON CAST(p.schedule_id AS VARCHAR(8)) = s.schedule_id
+                         AND CAST(p.product_type AS VARCHAR(1)) = s.src
+                         AND CAST(p.product_code AS VARCHAR(4)) = s.product_code
+        WHERE CAST(p.product_code AS VARCHAR(4)) IN ({_C_IN})
+          AND p.cf_end_dt > :rd
+          AND COALESCE(p.beh_total_pmt, 0) <> 0
+    """)
+    df = _try_query(q, {"rd": REPORT_DATE})
+    if df.empty:
+        return {}
+
+    df["product_code"] = df["product_code"].astype(str)
+    for c in ["cf_start_dt", "cf_end_dt", "fixing_dt"]:
+        df[c] = pd.to_datetime(df[c], errors="coerce")
+    for c in ["m_idx", "cf_yf", "base_fwd", "base_df", "outstanding", "capital", "interest"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+    df["m_idx"] = df["m_idx"].clip(lower=0).astype(int)
+    if df.empty:
+        return {}
+
+    denom = (df["outstanding"] * df["cf_yf"]).replace(0.0, np.nan)
+    df["contracted_rt"] = (df["interest"] / denom).fillna(0.0)
+
+    pcs = df["product_code"].astype(str)
+    a_v = pcs.map(ir_coeff["coeff_a"].to_dict()).fillna(1.0).to_numpy(dtype=float)
+    floor_v = pcs.map(
+        ir_coeff["client_floor"].dropna().to_dict()
+        if "client_floor" in ir_coeff.columns else {}
+    ).fillna(float("-inf")).to_numpy(dtype=float)
+    cap_v = pcs.map(
+        ir_coeff["client_cap"].dropna().to_dict()
+        if "client_cap" in ir_coeff.columns else {}
+    ).fillna(float("inf")).to_numpy(dtype=float)
+
+    cf_yf = df["cf_yf"].to_numpy(dtype=float)
+    base_fwd = df["base_fwd"].to_numpy(dtype=float)
+    base_df = df["base_df"].to_numpy(dtype=float)
+    outstanding = df["outstanding"].to_numpy(dtype=float)
+    capital = df["capital"].to_numpy(dtype=float)
+    interest = df["interest"].to_numpy(dtype=float)
+    contracted = df["contracted_rt"].to_numpy(dtype=float)
+    rate_type = df["rate_type"].fillna("V").astype(str).to_numpy()
+    is_var = rate_type == "V"
+    is_admin = rate_type == "A"
+    start_before = (df["cf_start_dt"] < REPORT_DATE).to_numpy(dtype=bool)
+    has_fixing = df["fixing_dt"].notna().to_numpy(dtype=bool)
+
+    def _lookup_df(scenario: str, dates: pd.Series, *, nan_before: bool = False) -> np.ndarray:
+        dates = pd.to_datetime(dates, errors="coerce")
+        days = (dates - REPORT_DATE).dt.days.to_numpy(dtype=float)
+        out = np.full(len(dates), np.nan if nan_before else 1.0, dtype=float)
+        ccy_arr = df["currency"].astype(str).to_numpy()
+        for ccy in np.unique(ccy_arr):
+            mask = ccy_arr == ccy
+            nd_ldf = curves.get(scenario, {}).get(_CCY_CURVE.get(ccy, "PLN_disc_curve"))
+            if nd_ldf is None:
+                continue
+            nd, ldf = nd_ldf
+            d = days[mask]
+            vals = np.full(mask.sum(), np.nan if nan_before else 1.0, dtype=float)
+            finite = np.isfinite(d)
+            if finite.any():
+                vals[finite] = np.exp(np.interp(d[finite], nd, ldf, left=ldf[0], right=ldf[-1]))
+            if nan_before:
+                vals[d < 0.0] = np.nan
+            else:
+                vals[d <= 0.0] = 1.0
+            out[mask] = vals
+        return out
+
+    def _fwd_between(scenario: str, start: pd.Series, end: pd.Series, yf: np.ndarray) -> np.ndarray:
+        df_s = _lookup_df(scenario, start, nan_before=False)
+        df_e = _lookup_df(scenario, end, nan_before=False)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            fwd = np.where((df_e > 0.0) & (yf > 0.0), (df_s / df_e - 1.0) / yf, 0.0)
+        return np.maximum(0.0, np.nan_to_num(fwd, nan=0.0, posinf=0.0, neginf=0.0))
+
+    period_end = df["cf_end_dt"].copy()
+    var_fix_mask = is_var & has_fixing
+    if var_fix_mask.any():
+        period_end.loc[var_fix_mask] = (
+            df.loc[var_fix_mask]
+              .groupby(["schedule_id", "product_type", "fixing_dt"])["cf_end_dt"]
+              .transform("max")
+        )
+    period_start = df["cf_start_dt"].copy()
+    period_start.loc[var_fix_mask] = df.loc[var_fix_mask, "fixing_dt"]
+    period_yf = ((pd.to_datetime(period_end) - pd.to_datetime(period_start)).dt.days / 365.0).to_numpy(dtype=float)
+
+    keys_df = df[_COHORT_KEY].drop_duplicates().reset_index(drop=True)
+    key_to_gid = {
+        (str(r.product_code), str(r.bs_side), str(r.currency), int(r.start_year), int(r.start_month)): i
+        for i, r in keys_df.iterrows()
+    }
+    gid = np.array([
+        key_to_gid[(str(r.product_code), str(r.bs_side), str(r.currency), int(r.start_year), int(r.start_month))]
+        for _, r in df.iterrows()
+    ], dtype=int)
+    midx = df["m_idx"].to_numpy(dtype=int)
+    n_groups = len(key_to_gid)
+    n_buckets = int(midx.max()) + 1
+    n_scen = len(scen_all)
+    pv_all = np.zeros((n_groups, n_buckets, n_scen), dtype=float)
+
+    base_df_eff = base_df.copy()
+    missing_base_df = base_df_eff <= 0.0
+    if missing_base_df.any():
+        base_df_eff[missing_base_df] = _lookup_df("base", df["cf_end_dt"])[missing_base_df]
+
+    for s_idx, scen in enumerate(scen_all):
+        if scen == "base":
+            int_s = interest.copy()
+            df_end = base_df_eff
+        else:
+            fwd_sh = _fwd_between(scen, df["cf_start_dt"], df["cf_end_dt"], cf_yf)
+            locked = start_before.copy()
+            if var_fix_mask.any():
+                pstart_df = _lookup_df(scen, period_start, nan_before=True)
+                pend_df = _lookup_df(scen, period_end, nan_before=True)
+                valid = (pstart_df > 0.0) & (pend_df > 0.0) & (period_yf > 0.0)
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    fwd_period = np.where(
+                        valid,
+                        (pstart_df / pend_df - 1.0) / period_yf,
+                        0.0,
+                    )
+                fwd_period = np.maximum(0.0, np.nan_to_num(fwd_period, nan=0.0))
+                fwd_sh[var_fix_mask] = np.where(
+                    valid[var_fix_mask],
+                    fwd_period[var_fix_mask],
+                    base_fwd[var_fix_mask],
+                )
+                locked[var_fix_mask] = ~valid[var_fix_mask]
+
+            fwd_for_interest = np.where(locked, base_fwd, fwd_sh)
+            eff_rate = contracted + a_v * (fwd_for_interest - base_fwd)
+            eff_rate = np.minimum(cap_v, np.maximum(floor_v, eff_rate))
+
+            int_s = interest.copy()
+            int_s[is_var] = outstanding[is_var] * eff_rate[is_var] * cf_yf[is_var]
+            lock_var = locked & is_var
+            if lock_var.any():
+                int_s[lock_var] = interest[lock_var]
+            int_s[is_admin] = 0.0
+            df_end = _lookup_df(scen, df["cf_end_dt"])
+
+        pv = (capital + int_s) * df_end
+        np.add.at(pv_all[:, :, s_idx], (gid, midx), pv)
+
+    # Prefer the row-level EVE analytical tables when available.  They are
+    # written by eve_calc_workflow with the exact shocked-interest logic, so
+    # using them removes small reconstruction drift for products with special
+    # fixing / rate-limit behaviour.
+    exact_parts: list[pd.DataFrame] = []
+    exact_sources = [
+        ("eve_base_scenario",       ["base"]),
+        ("eve_par_scenarios",       ["par_up", "par_dn"]),
+        ("eve_short_scenarios",     ["sr_up", "sr_dn"]),
+        ("eve_step_flat_scenarios", ["steep", "flat"]),
+    ]
+    for table_name, table_scenarios in exact_sources:
+        scen_in = ", ".join(f"'{s}'" for s in table_scenarios if s in scen_all)
+        if not scen_in:
+            continue
+        exact_q = text(f"""
+            WITH sched_key AS (
+                SELECT CAST(schedule_id AS VARCHAR(8)) AS schedule_id, 'L' AS src,
+                       CAST(product_code AS VARCHAR(4)) AS product_code,
+                       bs_side, currency, start_date
+                FROM sched.loans
+                WHERE CAST(product_code AS VARCHAR(4)) IN ({_C_IN})
+                UNION ALL
+                SELECT CAST(schedule_id AS VARCHAR(8)), 'D',
+                       CAST(product_code AS VARCHAR(4)), bs_side, currency, start_date
+                FROM sched.deposits
+                WHERE CAST(product_code AS VARCHAR(4)) IN ({_C_IN})
+                UNION ALL
+                SELECT CAST(schedule_id AS VARCHAR(8)), 'F',
+                       CAST(product_code AS VARCHAR(4)), bs_side, currency, start_date
+                FROM sched.fin_inst
+                WHERE CAST(product_code AS VARCHAR(4)) IN ({_C_IN})
+            )
+            SELECT
+                e.scenario_id,
+                s.product_code, s.bs_side, s.currency,
+                YEAR(s.start_date) AS start_year,
+                MONTH(s.start_date) AS start_month,
+                e.cf_end_dt,
+                CASE WHEN e.bs_side = 'A' THEN 1.0 ELSE -1.0 END
+                  * (ISNULL(CAST(e.pv_capital AS FLOAT), 0.0)
+                     + ISNULL(CAST(e.pv_interest AS FLOAT), 0.0)) AS pv_unsigned
+            FROM cf.{table_name} e
+            JOIN sched_key s ON CAST(e.schedule_id AS VARCHAR(8)) = s.schedule_id
+                             AND CAST(e.product_type AS VARCHAR(1)) = s.src
+                             AND CAST(e.product_code AS VARCHAR(4)) = s.product_code
+            WHERE e.report_date = :rd
+              AND CAST(e.product_code AS VARCHAR(4)) IN ({_C_IN})
+              AND e.scenario_id IN ({scen_in})
+              AND e.cf_end_dt > :rd
+        """)
+        part = _try_query(exact_q, {"rd": REPORT_DATE})
+        if not part.empty:
+            exact_parts.append(part)
+
+    if exact_parts:
+        exact_df = pd.concat(exact_parts, ignore_index=True)
+        exact_df["product_code"] = exact_df["product_code"].astype(str)
+        exact_df["cf_end_dt"] = pd.to_datetime(exact_df["cf_end_dt"], errors="coerce")
+        exact_df["m_idx"] = (
+            (exact_df["cf_end_dt"].dt.year - REPORT_DATE.year) * 12
+            + (exact_df["cf_end_dt"].dt.month - REPORT_DATE.month)
+            - 1
+        ).clip(lower=0).astype(int)
+        exact_df["pv_unsigned"] = pd.to_numeric(
+            exact_df["pv_unsigned"], errors="coerce"
+        ).fillna(0.0)
+        max_exact_m = int(exact_df["m_idx"].max()) if not exact_df.empty else -1
+        if max_exact_m >= pv_all.shape[1]:
+            pad = max_exact_m + 1 - pv_all.shape[1]
+            pv_all = np.pad(pv_all, ((0, 0), (0, pad), (0, 0)), mode="constant")
+
+        exact_grp = (
+            exact_df.groupby(_COHORT_KEY + ["scenario_id", "m_idx"], as_index=False)["pv_unsigned"]
+            .sum()
+        )
+        for (pc, side, ccy, sy, sm, scen), sub in exact_grp.groupby(_COHORT_KEY + ["scenario_id"]):
+            ck = (str(pc), str(side), str(ccy), int(sy), int(sm))
+            g = key_to_gid.get(ck)
+            if g is None or scen not in scen_all:
+                continue
+            s_idx = scen_all.index(str(scen))
+            pv_all[g, :, s_idx] = 0.0
+            np.add.at(
+                pv_all[g, :, s_idx],
+                sub["m_idx"].to_numpy(dtype=int),
+                sub["pv_unsigned"].to_numpy(dtype=float),
+            )
+
+    eve_pv_by: dict = {}
+    for ck, g in key_to_gid.items():
+        months = np.flatnonzero(np.any(np.abs(pv_all[g]) > 1e-10, axis=1))
+        if len(months) == 0:
+            continue
+        eve_pv_by[ck] = (months.astype(int), pv_all[g, months, :].copy())
+    return eve_pv_by
 
 
 def _load_product_lcr_nsfr() -> pd.DataFrame:
@@ -969,6 +1637,78 @@ def _load_irs_balance() -> pd.DataFrame:
     return df
 
 
+def _load_irs_outstanding_m() -> dict:
+    """Compute monthly outstanding fractions for IRS floating legs.
+
+    For each (product_code, bs_side, currency) group of floating IRS legs:
+        outstanding_m[m] = Σ notional_i / total_notional
+                           for swaps i that are floating (past next fixing) in month m.
+
+    Locked months (before the next repricing date) and matured swaps are excluded
+    from outstanding, so they contribute zero delta NII in the CF-based B model.
+
+    Returns dict: {(pc, sid, ccy): (outstanding_m ndarray, dominant_F_months)}
+    """
+    q = text("""
+        SELECT CAST(product_code AS VARCHAR(4)) AS product_code, bs_side, currency,
+               CAST(notional AS FLOAT) AS notional,
+               start_date, maturity_date, fixing_freq
+        FROM schemat.ir_swaps
+        WHERE report_date = :rd
+          AND leg_type = 'FLOAT'
+          AND CAST(product_code AS VARCHAR(4)) IN ('0000')
+    """)
+    df = _try_query(q, {"rd": REPORT_DATE})
+    if df.empty:
+        return {}
+
+    df["product_code"] = df["product_code"].astype(str)
+    df["notional"]     = df["notional"].astype(float)
+    df["start_date"]   = pd.to_datetime(df["start_date"],   errors="coerce")
+    df["maturity_date"]= pd.to_datetime(df["maturity_date"],errors="coerce")
+
+    _freq_to_m = {"3M": 3, "6M": 6, "1Y": 12}
+    df["fix_m"] = df["fixing_freq"].map(_freq_to_m).fillna(3).astype(int)
+
+    result: dict = {}
+    for (pc, sid, ccy), grp in df.groupby(["product_code", "bs_side", "currency"]):
+        total_n = grp["notional"].sum()
+        if total_n <= 0:
+            continue
+        outstanding_m = np.zeros(12)
+        freq_notional: dict = {}
+        for _, row in grp.iterrows():
+            n   = float(row["notional"])
+            F   = int(row["fix_m"])
+            mat = row["maturity_date"]
+            start = row["start_date"]
+            freq_notional[F] = freq_notional.get(F, 0.0) + n
+
+            if pd.isna(start) or pd.isna(mat):
+                outstanding_m += n / total_n  # unknown schedule: assume full
+                continue
+
+            months_to_mat = (mat.year  - REPORT_DATE.year)  * 12 + \
+                             (mat.month - REPORT_DATE.month)
+            months_since   = (REPORT_DATE.year  - start.year)  * 12 + \
+                             (REPORT_DATE.month - start.month)
+            t_first = F - (months_since % F)
+            if t_first == F:
+                t_first = F  # just repriced; next fixing in F months
+
+            for m in range(12):
+                if m + 1 > months_to_mat:
+                    continue  # swap matured before this month
+                if m + 1 <= t_first:
+                    continue  # still locked until next fixing
+                outstanding_m[m] += n / total_n
+
+        dominant_F = max(freq_notional, key=freq_notional.get) if freq_notional else 3
+        result[(str(pc), str(sid), str(ccy))] = (outstanding_m, int(dominant_F))
+
+    return result
+
+
 def _load_single_nii() -> pd.DataFrame:
     q = text("""
         SELECT CAST(product_code AS VARCHAR(4)) AS product_code,
@@ -1052,8 +1792,32 @@ def build_product_params() -> None:
     print(f"  {len(coh_coupon)} cohort coupon rate rows")
 
     print("Loading cohort monthly schedule from cf.products...")
-    monthly_out, monthly_cap, monthly_locked_rt, monthly_t_first = _load_cohort_monthly_schedule()
+    (
+        monthly_out,
+        monthly_cap,
+        monthly_locked_rt,
+        monthly_t_first,
+        monthly_locked_frac,
+        monthly_locked_rate_m,
+        monthly_float_base_eff_m,
+        monthly_float_base_fwd_m,
+    ) = _load_cohort_monthly_schedule()
     print(f"  {len(monthly_out)} cohort schedule groups loaded")
+
+    print("Building effective monthly NII tables from daily CFs...")
+    (
+        monthly_interest_yf,
+        monthly_capital_remain,
+        monthly_effective_rate,
+        monthly_effective_renewal_rate,
+    ) = _load_cohort_effective_nii_tables(disc_curves, ir_coeff, SHOCKED_SCENARIO_IDS)
+    print(f"  {len(monthly_effective_rate)} effective NII schedule groups loaded")
+
+    print("Building effective monthly EVE PV tables from daily CFs...")
+    monthly_effective_eve_pv = _load_cohort_effective_eve_pv_tables(
+        disc_curves, ir_coeff, SHOCKED_SCENARIO_IDS
+    )
+    print(f"  {len(monthly_effective_eve_pv)} effective EVE schedule groups loaded")
 
     print("Loading cohort float margins from cf.products...")
     cohort_float_margins = _load_cohort_float_margins()
@@ -1071,6 +1835,10 @@ def build_product_params() -> None:
     if not irs_bal.empty:
         sng_bal = pd.concat([sng_bal, irs_bal], ignore_index=True)
         print(f"  Added {len(irs_bal)} IRS rows -> sng_bal total: {len(sng_bal)}")
+
+    print("Computing IRS monthly outstanding profiles from schemat.ir_swaps...")
+    irs_out_profiles = _load_irs_outstanding_m()
+    print(f"  IRS outstanding profiles: {list(irs_out_profiles.keys())}")
 
     print("Loading single-row NII from irrbb.nii_results...")
     sng_nii = _load_single_nii()
@@ -1327,10 +2095,106 @@ def build_product_params() -> None:
         ck = (pc, sid, ccy, int(row["start_year"]), int(row["start_month"]))
         _out_m = monthly_out.get(ck, np.zeros(12))
         _cap_m = monthly_cap.get(ck, np.zeros(12))
+
+        # ── Analytical fallback for monthly NII schedule ──────────────────────
+        # cf.products only stores 1-2 months of CFs for long-term loans, so
+        # outstanding_m and capital_m would be mostly zero for products like
+        # fixed-rate mortgages.  If SQL coverage is < 50% of the 12-month
+        # horizon, regenerate both arrays from an analytical annuity schedule.
+        # Rate used: contracted coupon for fixed-rate; coeff_b (margin) for
+        # floating (their repricing is captured via rate_matrix, not coupon).
+        # Condition also excludes products not in the NII pipeline (nii_unit=0).
+        # ── Constant-balance extension for NII outstanding ────────────────────
+        # The exact nii_results uses a gap-based methodology:
+        #     delta_NII = gap × Δr × remain_yf  (per repricing tenor bucket)
+        # This assumes each product's FULL BALANCE stays outstanding for the
+        # entire 12-month NII horizon (rolled over at repriced rates after each
+        # repricing event).  cf.products only covers the CURRENT repricing
+        # period (1-3 months for floating, 2 months from DB for long-term fixed),
+        # so outstanding_m has zeros for the remaining months.
+        # Extend to constant balance whenever SQL gives < 6 months of coverage.
+        # rate_matrix already switches to the market forward rate at t_first_m,
+        # so the run-off NII = constant_balance × rate_matrix replicates the gap
+        # formula exactly without needing a separate renewal term.
+        _sql_out_0   = float(_out_m[0]) if np.any(_out_m > 0) else 0.0
+        _sql_nonzero = int(np.count_nonzero(_out_m))
+        # SQL aggregates ALL loans in a vintage pool; if the first-month
+        # outstanding is >10× the individual-cohort balance the data is
+        # mis-scaled and must be replaced with an analytical schedule.
+        _sql_bad_scale = bal > 0 and _sql_out_0 > 10.0 * bal
+        _has_real_monthly_schedule = _sql_nonzero >= 6 and not _sql_bad_scale
+
+        if bal > 0 and nii_unit != 0.0 and (_sql_nonzero < 6 or _sql_bad_scale):
+            if rep_m >= 12:
+                if rate_typ == "F":
+                    # Fixed-rate with long remaining term: bullet assumption.
+                    # The bond matures after the 12M horizon — full balance
+                    # outstanding for all 12 months, no capital within horizon.
+                    # Annuity profile is wrong here because fixed-rate bonds
+                    # in this bank are bullet instruments, not amortising.
+                    _out_m = np.full(12, bal)
+                    _cap_m = np.zeros(12)
+                else:
+                    # Floating/amortising: derive from analytical annuity.
+                    _ann_coupon = coupon_r if not np.isnan(coupon_r) else max(coeff_b, 0.0)
+                    _out_m, _cap_m = _analytical_monthly_profile(bal, _ann_coupon, int(rep_m))
+            else:
+                # Short-term / bullet: constant outstanding.
+                _out_m = np.full(12, bal)
+                if _sql_bad_scale:
+                    _cap_m = np.zeros(12)   # reset mis-scaled SQL capital
+
+        # Floating products already roll the whole balance through rate_matrix,
+        # so adding monthly capital renewal double-counts repricing unless the
+        # product is explicitly modelled as an amortising runoff bucket.
+        _keep_float_renewal = (
+            rate_typ == "V"
+            and sid == "A"
+            and pc in _AMORTISING_FLOAT_RENEWAL_PRODUCTS
+            and _has_real_monthly_schedule
+        )
+        if rate_typ == "V" and not _keep_float_renewal:
+            _cap_m = np.zeros(12)
+        else:
+            # Bullet capital fill: for SHORT-TERM FIXED-RATE products where SQL
+            # records no amortisation, place the full repayment in the maturity
+            # month so the renewal stream captures reinvestment at new market rates.
+            if (rep_m < 12 and bal > 0 and nii_unit != 0.0
+                    and np.sum(np.abs(_cap_m)) < 0.01 * bal):
+                _cap_m = np.zeros(12)
+                _cap_m[min(int(rep_m) - 1, 11)] = bal
+
+        _interest_yf_m = _out_m / 12.0
+        _cap_remain_m = _cap_m * np.array([(12 - m - 0.5) / 12.0 for m in range(12)], dtype=float)
+        _eff_rate_m = monthly_effective_rate.get(ck)
+        _eff_renewal_rate_m = monthly_effective_renewal_rate.get(ck)
+        if _eff_rate_m is not None and _has_real_monthly_schedule:
+            _interest_yf_m = monthly_interest_yf.get(ck, _interest_yf_m)
+        if _eff_renewal_rate_m is not None and _keep_float_renewal:
+            _cap_remain_m = monthly_capital_remain.get(ck, _cap_remain_m)
+        if rate_typ == "V" and not _keep_float_renewal:
+            _cap_remain_m = np.zeros(12)
+
         out_frac_m = _out_m / bal if bal > 0 else np.zeros(12)
         cap_frac_m = _cap_m / bal if bal > 0 else np.zeros(12)
+        interest_yf_frac_m = _interest_yf_m / bal if bal > 0 else np.zeros(12)
+        cap_remain_frac_m = _cap_remain_m / bal if bal > 0 else np.zeros(12)
         locked_rt   = monthly_locked_rt.get(ck, 0.0)
         t_first_m   = monthly_t_first.get(ck, 999.0)
+        locked_frac_m = monthly_locked_frac.get(ck, np.zeros(12))
+        locked_rate_m = monthly_locked_rate_m.get(ck, np.zeros(12))
+        float_base_eff_m = monthly_float_base_eff_m.get(ck, np.zeros(12))
+        float_base_fwd_m = monthly_float_base_fwd_m.get(ck, np.zeros(12))
+        effective_rate_m = (
+            np.asarray(_eff_rate_m, dtype=float)
+            if _eff_rate_m is not None and _has_real_monthly_schedule
+            else np.zeros((12, len(["base"] + SHOCKED_SCENARIO_IDS)), dtype=float)
+        )
+        effective_renewal_rate_m = (
+            np.asarray(_eff_renewal_rate_m, dtype=float)
+            if _eff_renewal_rate_m is not None and _keep_float_renewal
+            else np.zeros((12, len(["base"] + SHOCKED_SCENARIO_IDS)), dtype=float)
+        )
 
         entry = {
             "cohort_id":           _make_cohort_id(row),
@@ -1364,8 +2228,17 @@ def build_product_params() -> None:
             # schedule-based monthly profile
             "cohort_outstanding_m": out_frac_m,
             "cohort_capital_m":     cap_frac_m,
+            "cohort_interest_yf_m":  interest_yf_frac_m,
+            "cohort_capital_remain_m": cap_remain_frac_m,
             "cohort_locked_rate":   locked_rt,
             "cohort_t_first_m":     t_first_m,
+            "cohort_locked_frac_m":  locked_frac_m,
+            "cohort_locked_rate_m":  locked_rate_m,
+            "cohort_float_base_eff_m": float_base_eff_m,
+            "cohort_float_base_fwd_m": float_base_fwd_m,
+            "cohort_effective_rate_m": effective_rate_m,
+            "cohort_effective_renewal_rate_m": effective_renewal_rate_m,
+            "cohort_has_real_monthly_schedule": bool(_has_real_monthly_schedule),
         }
         coh_rows.append(entry)
 
@@ -1380,6 +2253,20 @@ def build_product_params() -> None:
                     .groupby(_PROD_KEY)["pv_total"].sum().to_dict())
     sng_eve_pdn  = (sng_eve[sng_eve["scenario_id"] == "par_dn"]
                     .groupby(_PROD_KEY)["pv_total"].sum().to_dict())
+
+    # Products whose NII is rate-sensitive in the exact IRRBB model.
+    # Only these get cohort_outstanding_m = ones(12) for approach B.
+    # Equity, non-rate products, and IRS legs with zero exact delta stay at zeros.
+    _sng_nii_base_flat = {
+        (str(r["product_code"]), str(r["bs_side"]), str(r["currency"])): float(r["nii_total"])
+        for _, r in sng_nii[sng_nii["scenario_id"] == "base"].iterrows()
+    }
+    sng_has_delta: set = set()
+    for _, r in sng_nii[sng_nii["scenario_id"] != "base"].iterrows():
+        k3 = (str(r["product_code"]), str(r["bs_side"]), str(r["currency"]))
+        nii_b_k = _sng_nii_base_flat.get(k3, 0.0)
+        if abs(float(r["nii_total"]) - nii_b_k) > 1.0:
+            sng_has_delta.add(k3)
 
     sng_rows = []
     for _, srow in sng_bal.iterrows():
@@ -1423,6 +2310,22 @@ def build_product_params() -> None:
             if not np.isnan(r.get("client_floor",np.nan)): cli_floor = float(r["client_floor"])
             if not np.isnan(r.get("client_cap",  np.nan)): cli_cap   = float(r["client_cap"])
 
+        # IRS products: use swap-schedule-derived outstanding fractions and
+        # dominant fixing frequency instead of generic ones(12).
+        # Non-IRS single-row products with rate sensitivity get ones(12).
+        _irs_key = (pc, sid, ccy)
+        if _irs_key in irs_out_profiles:
+            _sng_out_m, _sng_rep_m = irs_out_profiles[_irs_key]
+            _sng_t1 = 0.0          # locking encoded in outstanding_m; no virtual lock
+        elif (pc, sid, ccy) in sng_has_delta:
+            _sng_out_m = np.ones(12)
+            _sng_rep_m = 12.0
+            _sng_t1    = 999.0
+        else:
+            _sng_out_m = np.zeros(12)
+            _sng_rep_m = 12.0
+            _sng_t1    = 999.0
+
         entry = {
             "cohort_id":           f"{pc}_{sid}_{ccy}",
             "product_code":        pc,
@@ -1444,7 +2347,7 @@ def build_product_params() -> None:
             "rsf_factor":          rsf_f,
             "inflow_30d_frac":     0.0,
             "amort_frac_1y":       0.0,
-            "repricing_tenor_m":   12.0,
+            "repricing_tenor_m":   float(_sng_rep_m),
             "rate_type":           None,
             "coupon_rate":         None,
             "nii_reprice_frac":    0.0,
@@ -1452,11 +2355,19 @@ def build_product_params() -> None:
             "coeff_b":             coeff_b,
             "client_floor":        cli_floor,
             "client_cap":          cli_cap,
-            # schedule fields — zero/999 for single-row products
-            "cohort_outstanding_m": np.zeros(12),
-            "cohort_capital_m":     np.zeros(12),
-            "cohort_locked_rate":   0.0,
-            "cohort_t_first_m":     999.0,
+            "cohort_outstanding_m": _sng_out_m,
+            "cohort_capital_m":    np.zeros(12),
+            "cohort_interest_yf_m": _sng_out_m / 12.0,
+            "cohort_capital_remain_m": np.zeros(12),
+            "cohort_locked_rate":  0.0,
+            "cohort_t_first_m":    _sng_t1,
+            "cohort_locked_frac_m": np.zeros(12),
+            "cohort_locked_rate_m": np.zeros(12),
+            "cohort_float_base_eff_m": np.zeros(12),
+            "cohort_float_base_fwd_m": np.zeros(12),
+            "cohort_effective_rate_m": np.zeros((12, len(["base"] + SHOCKED_SCENARIO_IDS))),
+            "cohort_effective_renewal_rate_m": np.zeros((12, len(["base"] + SHOCKED_SCENARIO_IDS))),
+            "cohort_has_real_monthly_schedule": False,
         }
         sng_rows.append(entry)
 
@@ -1636,6 +2547,14 @@ def build_product_params() -> None:
         r if r is not None else np.zeros(12)
         for r in params_df["cohort_capital_m"]
     ]).astype(float)
+    cohort_interest_yf_m = np.vstack([
+        r if r is not None else np.zeros(12)
+        for r in params_df["cohort_interest_yf_m"]
+    ]).astype(float)
+    cohort_capital_remain_m = np.vstack([
+        r if r is not None else np.zeros(12)
+        for r in params_df["cohort_capital_remain_m"]
+    ]).astype(float)
     cohort_locked_rate = params_df["cohort_locked_rate"].fillna(0.0).to_numpy(dtype=float)
     cohort_t_first_m   = params_df["cohort_t_first_m"].fillna(999.0).to_numpy(dtype=float)
 
@@ -1691,8 +2610,24 @@ def build_product_params() -> None:
             rt   = _rt_arr[i]
             ci   = _ccy_idx[i]
             base_disc = ct.disc_factors[_base_s, ci]
+            _eff_rm_i = np.asarray(
+                all_rows[i].get("cohort_effective_rate_m", np.zeros((12, _cr_n_scen))),
+                dtype=float,
+            )
+            if (
+                _eff_rm_i.shape == (12, _cr_n_scen)
+                and np.any(cohort_interest_yf_m[i] > 1e-12)
+                and np.any(_eff_rm_i > 0.0)
+            ):
+                _rate_matrix[i, :, :] = _eff_rm_i
+                continue
 
             if rt == "F":
+                # Fixed-rate products: rate is locked at the contracted coupon
+                # for the entire outstanding period.  No scenario sensitivity
+                # arises from the locked coupon → zero delta NII from run-off.
+                # (Repricing/renewal delta would require knowing the actual
+                # maturity distribution per cohort, which is not available here.)
                 _rate_matrix[i, :, :] = _coupon_arr[i]
             else:
                 t1 = int(_t1_arr[i])
@@ -1702,9 +2637,6 @@ def build_product_params() -> None:
                 base_eff = _locked_arr[i]   # contracted rate for locked CFs
 
                 # Cohort-specific margin for the floating period.
-                # Use the outstanding-weighted average margin from cf.products
-                # rather than the product-level coeff_b so the stable-margin base
-                # matches what was actually earned on the floating CFs.
                 cb_float = float(_cb_arr[i])
                 if all_rows[i].get("is_cohort") and rt != "F":
                     _ck_i = (str(all_rows[i]["product_code"]),
@@ -1714,31 +2646,109 @@ def build_product_params() -> None:
                              int(all_rows[i].get("start_month") or 0))
                     cb_float = cohort_float_margins.get(_ck_i, cb_float)
 
-                for m in range(12):
-                    if m < t1:
-                        _rate_matrix[i, m, :] = base_eff
+                # When t_first is missing (SQL default 999) AND the locked rate
+                # is zero, derive t_first from cohort start date + repricing tenor.
+                # For a floating bond repricing every F months, the next fixing is:
+                #   t1 = F - (months_since_start % F)   [or 0 if months_since_start is divisible by F]
+                # This avoids blanket t1=0 (Fix 2) which overestimates sensitivity
+                # by treating all 12 months as floating when only the post-t1 months are.
+                if t1 >= 12 and ca > 0.0 and abs(base_eff) < 1e-10:
+                    s_year  = int(all_rows[i].get("start_year") or 0)
+                    s_month = int(all_rows[i].get("start_month") or 0)
+                    if s_year > 0 and s_month > 0 and F >= 2:
+                        rep_m   = REPORT_DATE.year * 12 + REPORT_DATE.month
+                        sta_m   = s_year * 12 + s_month
+                        into_F  = int(rep_m - sta_m) % int(F)
+                        t1      = 0 if into_F == 0 else int(F) - into_F
                     else:
-                        k      = int((m - t1) / F)
-                        ev_t   = int(t1 + k * F)
-                        fwd_b  = _fwd_F(base_disc, ev_t, F)
-                        # Use stable-margin formula directly so floor/cap clips at the
-                        # correct client-rate level regardless of historical base_eff.
-                        _rate_matrix[i, m, 0] = np.clip(ca * fwd_b + cb_float, fl, cp)
+                        t1 = 0   # F=1 (monthly) or unknown start: reprice immediately
+                    base_eff = np.clip(
+                        ca * _fwd_F(base_disc, max(1, t1), int(F)) + cb_float, fl, cp
+                    )
+
+                lock_frac_m = np.asarray(
+                    all_rows[i].get("cohort_locked_frac_m", np.zeros(12)),
+                    dtype=float,
+                )
+                lock_rate_m = np.asarray(
+                    all_rows[i].get("cohort_locked_rate_m", np.zeros(12)),
+                    dtype=float,
+                )
+                float_base_eff_m = np.asarray(
+                    all_rows[i].get("cohort_float_base_eff_m", np.zeros(12)),
+                    dtype=float,
+                )
+                float_base_fwd_m = np.asarray(
+                    all_rows[i].get("cohort_float_base_fwd_m", np.zeros(12)),
+                    dtype=float,
+                )
+                if lock_frac_m.shape != (12,) or not np.isfinite(lock_frac_m).all():
+                    lock_frac_m = np.zeros(12)
+                if lock_rate_m.shape != (12,) or not np.isfinite(lock_rate_m).all():
+                    lock_rate_m = np.zeros(12)
+                if float_base_eff_m.shape != (12,) or not np.isfinite(float_base_eff_m).all():
+                    float_base_eff_m = np.zeros(12)
+                if float_base_fwd_m.shape != (12,) or not np.isfinite(float_base_fwd_m).all():
+                    float_base_fwd_m = np.zeros(12)
+
+                use_monthly_lock_mix = (
+                    str(rt) == "V"
+                    and bool(all_rows[i].get("cohort_has_real_monthly_schedule", False))
+                    and np.any(lock_frac_m > 1e-8)
+                )
+
+                if use_monthly_lock_mix:
+                    for m in range(12):
+                        lf = float(np.clip(lock_frac_m[m], 0.0, 1.0))
+                        lr = float(lock_rate_m[m]) if lock_rate_m[m] > 0 else float(base_eff)
+
+                        if m < t1:
+                            ev_t = max(1, t1)
+                        else:
+                            k = int((m - t1) / F)
+                            ev_t = int(t1 + k * F)
+                        fwd_b = _fwd_F(base_disc, ev_t, F)
+                        fb_m = float(float_base_fwd_m[m]) if float_base_fwd_m[m] > 0 else fwd_b
+                        be_m = (
+                            float(float_base_eff_m[m])
+                            if float_base_eff_m[m] > 0
+                            else np.clip(ca * fb_m + cb_float, fl, cp)
+                        )
+                        float_base = np.clip(be_m + ca * (fwd_b - fb_m), fl, cp)
+                        _rate_matrix[i, m, 0] = lf * lr + (1.0 - lf) * float_base
                         for rs, scen in enumerate(_cr_rate_scen[1:], start=1):
                             if scen not in _ct_scenarios:
                                 _rate_matrix[i, m, rs] = _rate_matrix[i, m, 0]
                                 continue
                             sh_disc = ct.disc_factors[_ct_scenarios.index(scen), ci]
-                            fwd_sh  = _fwd_F(sh_disc, ev_t, F)
-                            _rate_matrix[i, m, rs] = np.clip(
-                                ca * fwd_sh + cb_float, fl, cp)
+                            fwd_sh = _fwd_F(sh_disc, ev_t, F)
+                            float_sh = np.clip(be_m + ca * (fwd_sh - fb_m), fl, cp)
+                            _rate_matrix[i, m, rs] = lf * lr + (1.0 - lf) * float_sh
+                else:
+                    for m in range(12):
+                        if m < t1:
+                            _rate_matrix[i, m, :] = base_eff
+                        else:
+                            k      = int((m - t1) / F)
+                            ev_t   = int(t1 + k * F)
+                            fwd_b  = _fwd_F(base_disc, ev_t, F)
+                            _rate_matrix[i, m, 0] = np.clip(ca * fwd_b + cb_float, fl, cp)
+                            for rs, scen in enumerate(_cr_rate_scen[1:], start=1):
+                                if scen not in _ct_scenarios:
+                                    _rate_matrix[i, m, rs] = _rate_matrix[i, m, 0]
+                                    continue
+                                sh_disc = ct.disc_factors[_ct_scenarios.index(scen), ci]
+                                fwd_sh  = _fwd_F(sh_disc, ev_t, F)
+                                _rate_matrix[i, m, rs] = np.clip(
+                                    ca * fwd_sh + cb_float, fl, cp)
 
         print(f"  rate_matrix built: shape {_rate_matrix.shape}")
 
         # ── renewal_rate_matrix[n, 12, n_scen] ───────────────────────────────
         # Rate applied to capital repaid in month m — new-business formula:
         # renewal_rate = clip(ca * fwd_at_m + cb, floor, cap)
-        # fwd_at_m uses the midpoint of month m (m + 0.5) as the look-up tenor.
+        # Use the same accrual-period convention as the daily NII engine: capital
+        # paid in bucket m inherits the one-month forward over month m.
         _renewal_rate_matrix = np.zeros((n, 12, _cr_n_scen), dtype=float)
         for i in range(n):
             ci  = _ccy_idx[i]
@@ -1752,15 +2762,26 @@ def build_product_params() -> None:
                         int(all_rows[i].get("start_month") or 0))
                 cb = cohort_float_margins.get(ck_i, cb)
             base_disc_i = ct.disc_factors[_base_s, ci]
+            _eff_rr_i = np.asarray(
+                all_rows[i].get("cohort_effective_renewal_rate_m", np.zeros((12, _cr_n_scen))),
+                dtype=float,
+            )
+            if (
+                _eff_rr_i.shape == (12, _cr_n_scen)
+                and np.any(cohort_capital_remain_m[i] > 1e-12)
+                and np.any(_eff_rr_i > 0.0)
+            ):
+                _renewal_rate_matrix[i, :, :] = _eff_rr_i
+                continue
             for m in range(12):
-                fwd_b_m = _fwd_F(base_disc_i, m + 1, 1)
+                fwd_b_m = _fwd_F(base_disc_i, m, 1)
                 _renewal_rate_matrix[i, m, 0] = np.clip(ca * fwd_b_m + cb, fl, cp)
                 for rs, scen in enumerate(_cr_rate_scen[1:], start=1):
                     if scen not in _ct_scenarios:
                         _renewal_rate_matrix[i, m, rs] = _renewal_rate_matrix[i, m, 0]
                         continue
                     sh_disc = ct.disc_factors[_ct_scenarios.index(scen), ci]
-                    fwd_sh_m = _fwd_F(sh_disc, m + 1, 1)
+                    fwd_sh_m = _fwd_F(sh_disc, m, 1)
                     _renewal_rate_matrix[i, m, rs] = np.clip(ca * fwd_sh_m + cb, fl, cp)
 
         print(f"  renewal_rate_matrix built: shape {_renewal_rate_matrix.shape}")
@@ -1791,8 +2812,9 @@ def build_product_params() -> None:
         # covers the full remaining life of the product.
         # Threshold: use analytical when database CFs cover < 25% of the
         # product's remaining repricing tenor.
-        _cf_grps: list = []   # one DataFrame (or None) per row index
-        _BUCKET_M = 3         # quarterly buckets for analytical schedule
+        _cf_grps: list = []        # one DataFrame (or None) per row index
+        _eve_eff_grps: list = []   # optional (month_idx, pv_by_scenario) per row
+        _BUCKET_M = 1              # monthly buckets; keep timing close to exact EVE
 
         _rep_m_arr = params_df["repricing_tenor_m"].fillna(12.0).to_numpy(dtype=float)
         _cpn_arr2  = np.where(params_df["coupon_rate"].notna(),
@@ -1801,9 +2823,15 @@ def build_product_params() -> None:
         for i, row in enumerate(all_rows):
             if not row["is_cohort"]:
                 _cf_grps.append(None)
+                _eve_eff_grps.append(None)
                 continue
             ck  = (row["product_code"], row["bs_side"], row["currency"],
                    int(row["start_year"]), int(row["start_month"]))
+            eff_eve = monthly_effective_eve_pv.get(ck)
+            _eve_eff_grps.append(eff_eve)
+            if eff_eve is not None:
+                _cf_grps.append(None)
+                continue
             grp = coh_cf_q_groups.get(ck)
             bal = float(row["balance_amt"])
             rt_i = str(row.get("rate_type", ""))
@@ -1826,22 +2854,37 @@ def build_product_params() -> None:
             _cf_grps.append(grp)
 
         _max_q = max(
-            (len(g) for g in _cf_grps if g is not None and not g.empty),
-            default=0
+            [len(g) for g in _cf_grps if g is not None and not g.empty]
+            + [len(e[0]) for e in _eve_eff_grps if e is not None]
+            + [0]
         )
         _max_q = max(_max_q, 1)
         _cf_cap  = np.zeros((n, _max_q), dtype=float)
         _cf_tot  = np.zeros((n, _max_q), dtype=float)
         _cf_yf   = np.zeros((n, _max_q), dtype=float)
         _cf_nq   = np.zeros(n, dtype=int)
+        _eve_pv_frac = np.zeros((n, _max_q, _cr_n_scen), dtype=float)
 
         for i, row in enumerate(all_rows):
             if not row["is_cohort"]:
                 continue
+            eff_eve = _eve_eff_grps[i]
+            bal = float(row["balance_amt"])
+            if eff_eve is not None and bal > 0:
+                m_idx_eff, pv_eff = eff_eve
+                m_idx_eff = np.asarray(m_idx_eff, dtype=int)
+                pv_eff = np.asarray(pv_eff, dtype=float)
+                nq = min(len(m_idx_eff), _max_q)
+                if nq <= 0:
+                    continue
+                _cf_nq[i] = nq
+                _cf_yf[i, :nq] = (m_idx_eff[:nq] + 0.5) / 12.0
+                _cf_tot[i, :nq] = pv_eff[:nq, 0] / bal
+                _eve_pv_frac[i, :nq, :] = pv_eff[:nq, :] / bal
+                continue
             grp = _cf_grps[i]
             if grp is None or grp.empty:
                 continue
-            bal = float(row["balance_amt"])
             if bal <= 0:
                 continue
             m_idx  = grp["month_bucket_idx"].to_numpy(dtype=int)
@@ -1904,6 +2947,7 @@ def build_product_params() -> None:
         _cf_nq                = np.zeros(n, dtype=int)
         _ccy_idx              = np.zeros(n, dtype=int)
         _cohort_disc_q        = np.zeros((n, 1, 1), dtype=float)
+        _eve_pv_frac          = np.zeros((n, 1, 1), dtype=float)
 
     # ─────────────────────────────────────────────────────────────────────────
     # Save .npz
@@ -1951,6 +2995,8 @@ def build_product_params() -> None:
         balance_arr          = balance_arr,
         cohort_outstanding_m = cohort_outstanding_m,
         cohort_capital_m     = cohort_capital_m,
+        cohort_interest_yf_m = cohort_interest_yf_m,
+        cohort_capital_remain_m = cohort_capital_remain_m,
         cohort_locked_rate   = cohort_locked_rate,
         cohort_t_first_m     = cohort_t_first_m,
         # CohortRates (cr_*) — CF-based NII/EVE tables
@@ -1964,6 +3010,7 @@ def build_product_params() -> None:
         cr_ccy_idx            = _ccy_idx,
         cr_rate_scenario_ids  = np.array(_cr_rate_scen if _cr_ok else ["base"]),
         cr_cohort_disc_q      = _cohort_disc_q,
+        cr_eve_pv_frac        = _eve_pv_frac,
     )
     print(f"Saved product_params.npz -> {NPZ_OUT}")
 

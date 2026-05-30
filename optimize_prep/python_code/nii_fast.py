@@ -2,222 +2,314 @@
 =============
 Fast NII computation for the optimization hot path.
 
-Two levels of approximation
----------------------------
+Per-product NII model
+---------------------
+Base NII:
+    NII = amounts @ nii_unit_rate
+    Calibrated from the full IRRBB pipeline — exact at calibration point.
 
-Level 1 — unit-rate linear model (default, fastest):
-    NII(w) = Σ_i amounts[i] × nii_unit_rate[i]
+Delta NII under a shocked scenario:
+    Cohort products (1000-5000, all rate types):
+        Uses the aggregated monthly CF schedule stored in cohort_outstanding_m.
+        For each calendar month m (0..11):
+            locked months (m < t_first_int):  delta = 0 (rate already fixed)
+            floating months (m >= t_first_int):
+                fixing event k covers months [t_first + k*F, t_first + (k+1)*F)
+                rate_k = F-month forward rate at event time from disc curve
+                delta_m = outstanding_frac[m] × clip(base_k + coeff_a×Δrate_k, floor, cap)
+                          − outstanding_frac[m] × base_k
+        delta NII = amounts × sign × Σ_m delta_m / 12
 
-    Where nii_unit_rate[i] = (nii_interest + nii_renewal) / balance at the
-    current market conditions, extracted from irrbb.nii_results.
+    Single-row / behavioural products (is_cohort=False):
+        amounts @ delta_nii_unit[:, s]
+        Calibrated from the exact IRRBB pipeline per scenario.
 
-    This is exact at the current balance sheet and accurate near it.
-    It treats each product's NII per PLN of balance as a constant (linear
-    in amounts).  Time: O(n) dot product — microseconds.
-
-Level 2 — repricing gap + renewal model (more accurate for large shifts):
-    Approximates NII by separating the book into:
-    a) Existing CFs within the horizon (earning eff_rate on average balance)
-    b) Renewal of maturing/amortising capital at the shocked forward rate
-
-    Activated by passing fwd_curve argument (360-element array from CurveTensors).
-
-    For each product i:
-        nii_interest[i] = amounts[i] × eff_rate × min(repricing_tenor/12, horizon) × (1 - amort/2)
-        nii_renewal[i]  = amounts[i] × amort_frac × renewal_rate × avg_remain_yf
-
-    where:
-        eff_rate      = nii_unit_rate[i] / horizon_yf  (effective rate from base)
-        renewal_rate  = max(floor, min(cap, a × fwd_curve[repricing_m - 1] + b))
-        avg_remain_yf = (horizon_yf - repricing_tenor / 12) / 2, clipped ≥ 0
-
-All functions accept and return plain floats (or per-currency dicts).
-No pandas, no SQL in the hot path.
+Time: O(12 × n_groups) per scenario — microseconds.
 """
 from __future__ import annotations
 
 import numpy as np
 from bs_vector import BalanceSheetParams, CurveTensors
 
-HORIZON_YF = 1.0   # 12-month NII horizon
+HORIZON_YF = 1.0
+_HORIZON_M = 12.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Level 1 — linear unit-rate model
+# Schedule-based delta NII helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def compute_nii_base_fast(
+def _f_fwd_rate(disc: np.ndarray, event_m: float, F: float, disc_len: int) -> float:
+    """Annualised F-month forward rate at event_m months from disc curve.
+
+    disc[i] = discount factor at month i+1 (0-indexed).
+    """
+    _EPS = 1e-15
+    idx_s = max(0, min(int(round(event_m)) - 1, disc_len - 1))
+    idx_e = max(0, min(int(round(event_m + F)) - 1, disc_len - 1))
+    return (disc[idx_s] / max(disc[idx_e], _EPS) - 1.0) * 12.0 / F
+
+
+def _cohort_delta_nii_sched(
+    amounts: np.ndarray,         # (m,) PLN balance
+    outstanding_m: np.ndarray,   # (m, 12) normalised outstanding per month
+    t_first_int: int,            # months to first repricing (locked months: 0..t_first_int-1)
+    F: float,                    # fixing frequency in months
+    coeff_a: np.ndarray,         # (m,)
+    coeff_b: np.ndarray,         # (m,) spread / margin added to forward rate
+    floor_: np.ndarray,          # (m,)
+    cap_: np.ndarray,            # (m,)
+    sign: np.ndarray,            # (m,)
+    disc_shocked: np.ndarray,    # (disc_len,)
+    disc_base: np.ndarray,       # (disc_len,)
+) -> np.ndarray:
+    """Delta NII (PLN) for cohorts sharing the same (F, t_first_int).
+
+    Locked months (0 .. t_first_int-1): rate is fixed → delta = 0.
+    Floating months (t_first_int .. 11): stable-margin formula applied to both
+        base and shocked curves so floor/cap clips at the correct client-rate level.
+        base_client  = clip(ca * fwd_base  + cb, floor, cap)
+        shock_client = clip(ca * fwd_shock + cb, floor, cap)
+        delta        = shock_client - base_client
+    """
+    disc_len = len(disc_base)
+    F = max(F, 1.0)
+    delta_w = np.zeros(len(amounts))  # weighted rate delta per cohort
+
+    for m in range(t_first_int, 12):
+        k = int((m - t_first_int) / F)
+        event_t = t_first_int + k * F
+
+        base_fwd    = _f_fwd_rate(disc_base,    event_t, F, disc_len)
+        shocked_fwd = _f_fwd_rate(disc_shocked, event_t, F, disc_len)
+
+        base_client    = np.clip(coeff_a * base_fwd    + coeff_b, floor_, cap_)
+        shocked_client = np.clip(coeff_a * shocked_fwd + coeff_b, floor_, cap_)
+        delta_r = shocked_client - base_client
+
+        delta_w += outstanding_m[:, m] * delta_r / 12.0
+
+    return amounts * delta_w * sign
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Public API
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compute_nii(
     amounts: np.ndarray,
     params: BalanceSheetParams,
+    curves: CurveTensors,
+    horizon_yf: float = HORIZON_YF,
+    currency: str = "PLN",
 ) -> float:
-    """Base NII at current market conditions (level 1).
-
-    NII = Σ amounts[i] × nii_unit_rate[i]
+    """NII for a single base scenario (base curves == shocked curves).
 
     Parameters
     ----------
-    amounts : float64 (n,) — PLN balance per product
-    params  : BalanceSheetParams
+    amounts  : float64 (n,) -- PLN balance per product
+    params   : BalanceSheetParams
+    curves   : CurveTensors (base disc curves are used for both base and shocked)
+    horizon_yf : NII horizon in year fractions (default 1Y)
 
-    Returns
-    -------
-    Total NII in PLN.
+    Returns scalar NII in PLN.
     """
     return float(np.dot(amounts, params.nii_unit_rate))
 
 
-def compute_delta_nii_fast(
+def compute_nii_scenarios(
     amounts: np.ndarray,
     params: BalanceSheetParams,
-    scenario_id: str,
-) -> float:
-    """Delta NII for a shocked scenario (level 1).
+    curves: CurveTensors,
+    horizon_yf: float = HORIZON_YF,
+    currency: str = "PLN",
+) -> dict[str, float]:
+    """NII for base and all shocked scenarios.
 
-    delta_NII = Σ amounts[i] × delta_nii_unit[i, s]
-    where s = scenario index for scenario_id.
+    All cohort products (fixed and floating) use the schedule-based delta NII:
+        - months < t_first_int : locked rate, delta = 0
+        - months >= t_first_int: F-month forward rate from disc curve
 
-    Returns
-    -------
-    delta_NII in PLN (negative = loss).
+    Single-row and behavioural products (is_cohort=False) use calibrated
+    delta_nii_unit from the IRRBB pipeline.
+
+    Returns dict: 'base' -> NII in PLN, scenario_id -> delta_NII in PLN.
     """
+    horizon_m = int(round(horizon_yf * _HORIZON_M))   # 12
+    base_disc = curves.get_disc_curve("base", currency)
+
+    base_nii  = float(np.dot(amounts, params.nii_unit_rate))
+
+    # Single-row products: calibrated delta (no schedule)
+    mask_sng = ~params.is_cohort
+
+    # Floor / cap arrays (−∞ / +∞ where not specified)
+    floor_arr = np.where(np.isfinite(params.client_floor), params.client_floor, -np.inf)
+    cap_arr   = np.where(np.isfinite(params.client_cap),   params.client_cap,    np.inf)
+
+    # ── Pre-group cohort products by (F, t_first_int) — scenario-independent ─
+    cohort_groups: dict[tuple, np.ndarray] = {}   # (F, t1_int) -> global gidx
+
+    # Cohort products skipped by the schedule model (t1 >= horizon) fall back
+    # to calibrated delta_nii_unit — same as single-row products.  This covers
+    # fixed-coupon bonds (3100) and NMD deposits (7060/5000) where t_first=999.
+    mask_locked = np.zeros(len(amounts), dtype=bool)
+
+    if params.is_cohort.any():
+        # t_first_int clamped to [1, 999]; groups with t1 >= horizon_m are
+        # entirely locked within the horizon — use calibrated fallback.
+        t1_int_arr = np.clip(
+            np.round(params.cohort_t_first_m).astype(int), 1, 999
+        )
+        mask_locked = params.is_cohort & (t1_int_arr >= horizon_m)
+        for F in np.unique(params.repricing_tenor_m[params.is_cohort]):
+            mask_F  = params.is_cohort & (params.repricing_tenor_m == F)
+            gidx_F  = np.where(mask_F)[0]
+            t1_F    = t1_int_arr[mask_F]
+            for t1 in np.unique(t1_F):
+                if t1 >= horizon_m:
+                    continue          # handled by calibrated fallback
+                sub  = t1_F == t1
+                gidx = gidx_F[sub]
+                cohort_groups[(F, int(t1))] = gidx
+
+    # Combined mask: single-row/behavioural + cohorts locked past horizon
+    mask_calib = mask_sng | mask_locked
+
+    result: dict[str, float] = {"base": base_nii}
+
+    for s_idx, scen in enumerate(params.scenario_ids):
+        scen = str(scen)
+        shocked_disc = curves.get_disc_curve(scen, currency)
+
+        # Calibrated delta for single-row/behavioural and locked-out cohorts
+        delta_sng = float(
+            np.dot(amounts[mask_calib], params.delta_nii_unit[mask_calib, s_idx])
+        )
+
+        # Schedule-based delta for all cohort products
+        delta_coh = 0.0
+        for (F, t1), gidx in cohort_groups.items():
+            d = _cohort_delta_nii_sched(
+                amounts[gidx],
+                params.cohort_outstanding_m[gidx, :],
+                t1, F,
+                params.coeff_a[gidx],
+                params.coeff_b[gidx],
+                floor_arr[gidx],
+                cap_arr[gidx],
+                params.sign[gidx],
+                shocked_disc, base_disc,
+            )
+            delta_coh += float(d.sum())
+
+        result[scen] = delta_sng + delta_coh
+
+    return result
+
+
+def compute_sot_nii_pct(delta_nii: float, tier1_capital: float) -> float:
+    """EBA SOT NII metric: delta_NII / Tier1 capital x 100.  Threshold: > -5%."""
+    return delta_nii / tier1_capital * 100.0 if tier1_capital > 0 else float("nan")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Convenience wrappers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compute_nii_base_fast(amounts: np.ndarray, params) -> float:
+    """Base NII = amounts @ nii_unit_rate."""
+    return float(np.dot(amounts, params.nii_unit_rate))
+
+
+def compute_delta_nii_fast(amounts: np.ndarray, params, scenario_id: str) -> float:
+    """delta_NII for one calibrated scenario (fixed/single-row only, no curves)."""
     s = params.scenario_index(scenario_id)
     return float(np.dot(amounts, params.delta_nii_unit[:, s]))
 
 
-def compute_nii_shocked_fast(
-    amounts: np.ndarray,
-    params: BalanceSheetParams,
-    scenario_id: str,
-) -> float:
-    """Absolute NII under shocked scenario (level 1).
-
-    = NII_base + delta_NII(scenario)
-    """
-    base  = compute_nii_base_fast(amounts, params)
-    delta = compute_delta_nii_fast(amounts, params, scenario_id)
-    return base + delta
-
-
 def compute_nii_all_scenarios(
     amounts: np.ndarray,
-    params: BalanceSheetParams,
+    params,
+    curves=None,
+    horizon_yf: float = HORIZON_YF,
+    currency: str = "PLN",
 ) -> dict[str, float]:
-    """Compute base NII and delta_NII for all scenarios.
+    """NII for all scenarios.
 
-    Returns dict:
-        'base'    → base NII
-        scenario_id → delta_NII for each shocked scenario
+    Uses schedule-based delta NII for cohort products when curves is provided.
+    Falls back to calibrated delta_nii_unit for all products when curves is None.
     """
-    base = compute_nii_base_fast(amounts, params)
-    # delta_nii_unit shape: (n, S)
-    delta_vec = params.delta_nii_unit.T @ amounts   # (S,)
-    result = {"base": base}
-    for s_idx, scen in enumerate(params.scenario_ids):
-        result[str(scen)] = float(delta_vec[s_idx])
-    return result
+    if curves is None or not params.is_cohort.any():
+        base = float(np.dot(amounts, params.nii_unit_rate))
+        result: dict[str, float] = {"base": base}
+        for s_idx, scen in enumerate(params.scenario_ids):
+            result[str(scen)] = float(np.dot(amounts, params.delta_nii_unit[:, s_idx]))
+        return result
+    return compute_nii_scenarios(amounts, params, curves, horizon_yf, currency)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Level 2 — repricing gap + renewal model
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _renewal_rate(
-    repricing_m: np.ndarray,   # (n,) months to repricing
-    coeff_a: np.ndarray,       # (n,)
-    coeff_b: np.ndarray,       # (n,)
-    client_floor: np.ndarray,  # (n,)
-    client_cap: np.ndarray,    # (n,)
-    fwd_curve: np.ndarray,     # (360,) annualised fwd rates
-) -> np.ndarray:
-    """Compute per-product client renewal rate using the fwd curve.
-
-    renewal_rate[i] = clip(a[i] × fwd_curve[month[i] - 1] + b[i], floor, cap)
-
-    For products with repricing_m > 360 (ultra-long fixed): uses last fwd rate.
-    """
-    m_idx = np.clip(repricing_m.astype(int) - 1, 0, len(fwd_curve) - 1)
-    fwd   = fwd_curve[m_idx]
-    rate  = coeff_a * fwd + coeff_b
-    rate  = np.maximum(client_floor, rate)
-    rate  = np.minimum(client_cap,   rate)
-    return rate
-
-
-def compute_nii_repricing_fast(
+def compute_nii_schedule_base_by_product(
     amounts: np.ndarray,
     params: BalanceSheetParams,
-    fwd_curve: np.ndarray,        # (360,) annualised fwd rates for this scenario/currency
-    horizon_yf: float = HORIZON_YF,
-    currency_filter: str | None = None,
-) -> float:
-    """NII using repricing gap + renewal model (level 2).
+    curves: CurveTensors,
+    currency: str = "PLN",
+) -> dict[tuple, float]:
+    """Base NII per (product_code, bs_side, currency) using the schedule formula.
 
-    Separates the book into:
-    1. Pre-repricing interest: existing rate earned until repricing (or horizon, whichever first)
-    2. Post-repricing renewal: maturing/repriced capital × market renewal rate × remaining horizon
+    Cohort products: computes Σ_m outstanding_m × clip(ca×fwd_b+cb, fl, cp) × sign / 12
+    using the same stable-margin formula as the delta computation.  The result
+    will differ from the calibrated nii_unit_rate for products where the locked
+    rate history diverges from the current forward curve.
 
-    This is more accurate than the unit-rate model when the balance sheet
-    weights shift significantly away from the current structure.
+    Single-row / behavioural products: falls back to calibrated nii_unit_rate
+    (no CF schedule available for these products).
 
-    Parameters
-    ----------
-    amounts        : float64 (n,) — PLN balance per product
-    params         : BalanceSheetParams
-    fwd_curve      : (360,) annualised fwd rate grid for the scenario and currency
-    horizon_yf     : NII horizon in year fractions (default 1Y)
-    currency_filter: if set, only includes products for that currency
-
-    Returns
-    -------
-    Scalar NII in PLN.
+    Returns dict: (product_code, bs_side, currency) → base NII in PLN.
+    The difference  exact_base − schedule_base  is the per-product bias that can
+    be applied to shift shocked-scenario NII estimates.
     """
-    mask = np.ones(len(amounts), dtype=bool)
-    if currency_filter is not None:
-        mask = params.currency == currency_filter
+    base_disc = curves.get_disc_curve("base", currency)
+    disc_len  = len(base_disc)
+    floor_arr = np.where(np.isfinite(params.client_floor), params.client_floor, -np.inf)
+    cap_arr   = np.where(np.isfinite(params.client_cap),   params.client_cap,    np.inf)
 
-    a      = amounts * mask
-    sign   = params.sign
-    repric = params.repricing_tenor_m             # months to repricing
-    repric_yf = np.clip(repric / 12.0, 0.0, horizon_yf)  # yf to repricing (within horizon)
-    remain_yf = np.clip(horizon_yf - repric_yf, 0.0, None)  # remaining yf after repricing
+    result: dict[tuple, float] = {}
 
-    # eff_rate per unit from the base unit-rate (= NII/balance = eff_rate × horizon_yf approximately)
-    eff_rate = np.where(horizon_yf > 0, params.nii_unit_rate / horizon_yf, 0.0)
+    for i in range(len(amounts)):
+        k   = (str(params.product_code[i]), str(params.bs_side[i]), str(params.currency[i]))
+        bal = float(amounts[i])
+        if bal == 0.0:
+            result.setdefault(k, 0.0)
+            continue
 
-    # Average balance during pre-repricing period (account for 50% amortisation simple approx)
-    avg_balance_factor = 1.0 - params.amort_frac_1y * 0.5
+        if not params.is_cohort[i]:
+            result[k] = result.get(k, 0.0) + bal * float(params.nii_unit_rate[i])
+            continue
 
-    # Component 1: interest from existing positions (pre-repricing)
-    nii_interest = a * eff_rate * repric_yf * avg_balance_factor * sign
+        sign_i = float(params.sign[i])
+        t1     = int(np.clip(round(params.cohort_t_first_m[i]), 1, 999))
+        F      = max(float(params.repricing_tenor_m[i]), 1.0)
+        ca     = float(params.coeff_a[i])
+        cb     = float(params.coeff_b[i])
+        fl     = float(floor_arr[i])
+        cp     = float(cap_arr[i])
+        lk_rt  = float(params.cohort_locked_rate[i])
 
-    # Component 2: renewal interest on amortised/repriced capital
-    renewal_rt = _renewal_rate(
-        repric,
-        params.coeff_a,
-        params.coeff_b,
-        params.client_floor,
-        params.client_cap,
-        fwd_curve,
-    )
-    # Amount that renews at market rate
-    renewing_amount = a * params.amort_frac_1y
-    # Average remain_yf for renewal (simple: from repricing to horizon end)
-    avg_remain = remain_yf * 0.5   # assumes evenly distributed repayments in remain period
-    nii_renewal = renewing_amount * renewal_rt * avg_remain * sign
+        w = 0.0
+        for m in range(12):
+            out_m = float(params.cohort_outstanding_m[i, m])
+            if out_m == 0.0:
+                continue
+            if m < t1:
+                rate = lk_rt
+            else:
+                kk   = int((m - t1) / F)
+                ev_t = int(t1 + kk * F)
+                fwd  = _f_fwd_rate(base_disc, ev_t, F, disc_len)
+                rate = float(np.clip(ca * fwd + cb, fl, cp))
+            w += out_m * rate / 12.0
 
-    return float(np.sum(nii_interest + nii_renewal))
+        result[k] = result.get(k, 0.0) + bal * sign_i * w
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SOT delta-NII regulatory metric
-# ─────────────────────────────────────────────────────────────────────────────
-
-def compute_sot_nii_pct(
-    delta_nii: float,
-    tier1_capital: float,
-) -> float:
-    """EBA SOT NII metric: delta_NII / Tier1 capital × 100.
-
-    EBA threshold: must not be < -5%.
-    """
-    return delta_nii / tier1_capital * 100.0 if tier1_capital > 0 else float("nan")
+    return result

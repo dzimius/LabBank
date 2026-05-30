@@ -204,21 +204,16 @@ if not shocked_summary.empty and not base_summary.empty:
 # NOTE: irrbb.irrbb_report is written exclusively by eba_sot_workflow (final step).
 # eve_results (schedule-level) is the intermediate output consumed by eba_sot_workflow.
 
-# ── 6b. Shocked CF tables: cf.products_par_dn + cf.products_worst_eve ─────────
-print("Writing shocked CF schedules to SQL...")
+# ── 6b. EVE analytical CF tables by scenario group ─────────────────────────────
+# eve_base_scenario, eve_par_scenarios, eve_short_scenarios, eve_step_flat_scenarios
+# NII analytical tables are written by nii_calc_workflow (run that first).
+print("Writing EVE analytical CF tables to SQL...")
 
-# Identify worst EVE scenario (largest negative delta_eve across all currencies)
-worst_eve_sid = "par_up"   # sensible fallback
-if not shocked_summary.empty and "delta_eve" in shocked_summary.columns:
-    worst_row     = shocked_summary.loc[shocked_summary["delta_eve"].idxmin()]
-    worst_eve_sid = str(worst_row["scenario_id"])
-    print(f"  Worst EVE scenario: {worst_eve_sid} "
-          f"(delta_eve = {worst_row['delta_eve']:+,.0f})")
+for _t in ("eve_base_scenario", "eve_par_scenarios",
+           "eve_short_scenarios", "eve_step_flat_scenarios"):
+    sql_setup.reset_shocked_cf_products(_t, table_type="eve")
 
-sql_setup.reset_shocked_cf_products("products_par_dn")
-sql_setup.reset_shocked_cf_products("products_worst_eve")
-
-# Write base scenario first so both tables contain base + shocked rows for direct comparison
+# Base scenario
 _base_cf = eve_obj.compute_base_cf_detail(all_beh, scenario_id="base")
 _base_disc_parts = []
 for ccy, curve_name in DISC_CURVE_MAP.items():
@@ -229,18 +224,80 @@ for ccy, curve_name in DISC_CURVE_MAP.items():
     except Exception:
         pass
 _base_disc = pd.concat(_base_disc_parts).sort_index() if _base_disc_parts else None
-for _table_name in ("products_par_dn", "products_worst_eve"):
-    sql_setup.write_shocked_cf_products(
-        _base_cf, config.report_date, _table_name,
-        shocked_disc_df=_base_disc,
-        disc_curve_map=DISC_CURVE_MAP,
-    )
-print(f"  base     : {len(_base_cf):,} base CF rows written to both tables")
+sql_setup.write_shocked_cf_products(
+    _base_cf, config.report_date, "eve_base_scenario",
+    shocked_disc_df=_base_disc,
+    disc_curve_map=DISC_CURVE_MAP,
+    table_type="eve",
+)
+print(f"  eve_base_scenario: {len(_base_cf):,} CF rows (base)")
 
-_scenarios_to_write = [("par_dn", "products_par_dn"),
-                       (worst_eve_sid, "products_worst_eve")]
+# Shocked scenarios grouped by table
+_EVE_GROUPS = [
+    ("eve_par_scenarios",       ["par_up", "par_dn"]),
+    ("eve_short_scenarios",     ["sr_up",  "sr_dn"]),
+    ("eve_step_flat_scenarios", ["steep",  "flat"]),
+]
 
-for _scenario_id, _table_name in _scenarios_to_write:
+for _eve_table, _scenario_ids in _EVE_GROUPS:
+    for _scenario_id in _scenario_ids:
+        _disc_parts = []
+        for ccy, curve_name in DISC_CURVE_MAP.items():
+            try:
+                _disc_parts.append(
+                    esc.load_irrbb_disc_curve(
+                        sql_setup.engine, curve_name, _scenario_id, config.report_date
+                    )
+                )
+            except Exception:
+                pass
+        if not _disc_parts:
+            print(f"  Skipping '{_scenario_id}': no disc curves.")
+            continue
+
+        _shocked_disc = pd.concat(_disc_parts).sort_index()
+        _cf_detail = eve_obj.compute_shocked_cf_detail(
+            all_beh,
+            shocked_disc_df = _shocked_disc,
+            disc_curve_map  = DISC_CURVE_MAP,
+            scenario_id     = _scenario_id,
+            eve_floor_rate  = EVE_FLOOR,
+            caps_map        = CAPS_MAP,
+            floors_map      = FLOORS_MAP,
+            coeff_a_map     = COEFF_A_MAP,
+            coeff_b_map     = COEFF_B_MAP,
+        )
+        sql_setup.write_shocked_cf_products(
+            _cf_detail, config.report_date, _eve_table,
+            shocked_disc_df=_shocked_disc,
+            disc_curve_map=DISC_CURVE_MAP,
+            table_type="eve",
+        )
+        print(f"  {_eve_table}: {len(_cf_detail):,} CF rows (scenario: {_scenario_id})")
+
+# ── 6c. EVE own scenarios: cf.eve_own_scenarios ────────────────────────────────
+# own_100_up/dn: ±100 bps parallel (stress / sensitivity)
+# own_1_up/dn:   ±1 bps parallel   (PV01 approximation)
+# NII own table (nii_own_scenarios) is written by nii_calc_workflow.
+sql_setup.reset_shocked_cf_products("eve_own_scenarios", table_type="eve")
+
+# Build own shocked curves and append to irrbb.curves (replace=False keeps EBA curves intact)
+_own_curves_df = esc.build_own_shocked_curves(mkt_df, config.report_date, nii_floor_rate=EVE_FLOOR)
+esc.write_irrbb_curves(sql_setup.engine, _own_curves_df, config.report_date, replace=False)
+print(f"  Own scenario curves written to irrbb.curves "
+      f"({len(esc.OWN_SCENARIO_IDS)} scenarios: {esc.OWN_SCENARIO_IDS})")
+
+# Write base to eve_own_scenarios
+sql_setup.write_shocked_cf_products(
+    _base_cf, config.report_date, "eve_own_scenarios",
+    shocked_disc_df=_base_disc,
+    disc_curve_map=DISC_CURVE_MAP,
+    table_type="eve",
+)
+print(f"  eve_own_scenarios: {len(_base_cf):,} CF rows (base)")
+
+# Write 4 own shocked scenarios to eve_own_scenarios
+for _scenario_id in esc.OWN_SCENARIO_IDS:
     _disc_parts = []
     for ccy, curve_name in DISC_CURVE_MAP.items():
         try:
@@ -252,9 +309,8 @@ for _scenario_id, _table_name in _scenarios_to_write:
         except Exception:
             pass
     if not _disc_parts:
-        print(f"  Skipping {_table_name}: no disc curves for '{_scenario_id}'.")
+        print(f"  Skipping '{_scenario_id}': no disc curves.")
         continue
-
     _shocked_disc = pd.concat(_disc_parts).sort_index()
     _cf_detail = eve_obj.compute_shocked_cf_detail(
         all_beh,
@@ -268,12 +324,13 @@ for _scenario_id, _table_name in _scenarios_to_write:
         coeff_b_map     = COEFF_B_MAP,
     )
     sql_setup.write_shocked_cf_products(
-        _cf_detail, config.report_date, _table_name,
+        _cf_detail, config.report_date, "eve_own_scenarios",
         shocked_disc_df=_shocked_disc,
         disc_curve_map=DISC_CURVE_MAP,
+        table_type="eve",
     )
-    print(f"  {_table_name}: {len(_cf_detail):,} CF rows written "
-          f"(scenario: {_scenario_id})")
+    print(f"  eve_own_scenarios: {len(_cf_detail):,} CF rows "
+          f"(scenario: {_scenario_id}  [{esc.OWN_SCENARIO_LABELS[_scenario_id]}])")
 
 # ── 7. Write to Excel ──────────────────────────────────────────────────────────
 output_path = "output/eve_results.xlsx"

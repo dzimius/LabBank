@@ -23,10 +23,11 @@ metadata = MetaData(schema=None)
 
 # Schema mapping: which schema each table lives in
 TABLE_SCHEMAS: dict[str, str] = {
-    "curves":        "mkt",
-    "fixings":       "mkt",
-    "models_loan":   "bs",
-    "models_deposit":"bs",
+    "curves":             "mkt",
+    "fixings":            "mkt",
+    "models_loan":        "bs",
+    "models_deposit_ir":  "bs",
+    "models_deposit_liq": "bs",
 }
 
 def _ensure_schemas() -> None:
@@ -71,8 +72,17 @@ Loan_mod = Table(
     schema="bs",
 )
 
-Depo_mod = Table(
-    "models_deposit", metadata,
+Depo_mod_ir = Table(
+    "models_deposit_ir", metadata,
+    Column("report_date", Date, nullable=False),
+    Column("product_code", String(4), nullable=False),
+    Column("tenor", String(4), nullable=False),
+    Column("outstanding", DECIMAL(18, 2), nullable=False),
+    schema="bs",
+)
+
+Depo_mod_liq = Table(
+    "models_deposit_liq", metadata,
     Column("report_date", Date, nullable=False),
     Column("product_code", String(4), nullable=False),
     Column("tenor", String(4), nullable=False),
@@ -81,12 +91,12 @@ Depo_mod = Table(
 )
 
 
-
 TABLES = {
-    "curves": Curves,
-    "fixings": Fixing,
-    "models_loan": Loan_mod,
-    "models_deposit": Depo_mod
+    "curves":             Curves,
+    "fixings":            Fixing,
+    "models_loan":        Loan_mod,
+    "models_deposit_ir":  Depo_mod_ir,
+    "models_deposit_liq": Depo_mod_liq,
 }
 
 def append_df_to_table(df: pd.DataFrame, table_name: str) -> None:

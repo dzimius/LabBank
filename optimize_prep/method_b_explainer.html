@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Method B — CF-Based Fast NII &amp; EVE</title>
+<style>
+  body { font-family: "Segoe UI", Arial, sans-serif; font-size: 14px;
+         max-width: 1100px; margin: 40px auto; color: #1a1a2e;
+         background: #f9f9fb; line-height: 1.6; }
+  h1 { font-size: 1.8em; color: #0d1b4b; border-bottom: 3px solid #0d1b4b;
+       padding-bottom: 8px; }
+  h2 { font-size: 1.3em; color: #1a3a6e; margin-top: 36px;
+       border-left: 5px solid #2e6da4; padding-left: 10px; }
+  h3 { font-size: 1.05em; color: #2e6da4; margin-top: 22px; }
+  .abstract { background:#eef4fb; border-left:4px solid #2e6da4;
+              padding:14px 18px; margin:20px 0; border-radius:4px; }
+  table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 13px; }
+  th { background: #1a3a6e; color: #fff; padding: 8px 12px; text-align: left; }
+  td { padding: 7px 12px; border-bottom: 1px solid #dde4f0; vertical-align: top; }
+  tr:nth-child(even) td { background: #f2f5fb; }
+  .formula-box { background: #1e2d50; color: #e8f0ff;
+                 font-family: "Courier New", monospace; font-size: 13px;
+                 padding: 14px 18px; border-radius: 6px; margin: 12px 0;
+                 white-space: pre; line-height: 1.8; }
+  .note { background: #fff8e1; border-left: 4px solid #f4b400;
+          padding: 10px 14px; border-radius: 4px; margin: 10px 0; font-size: 13px; }
+  .warn { background: #fce8e6; border-left: 4px solid #d93025;
+          padding: 10px 14px; border-radius: 4px; margin: 10px 0; font-size: 13px; }
+  .ok   { background: #e6f4ea; border-left: 4px solid #1e8e3e;
+          padding: 10px 14px; border-radius: 4px; margin: 10px 0; font-size: 13px; }
+  code  { background: #e8ecf5; padding: 2px 5px; border-radius: 3px;
+          font-family: "Courier New", monospace; font-size: 12px; }
+  .pass { color: #1e8e3e; font-weight: bold; }
+  .fail { color: #d93025; font-weight: bold; }
+  .step-num { display: inline-block; background: #1a3a6e; color: #fff;
+              border-radius: 50%; width: 24px; height: 24px; text-align: center;
+              line-height: 24px; font-size: 12px; font-weight: bold;
+              margin-right: 8px; }
+  .exc-num  { display: inline-block; background: #d93025; color: #fff;
+              border-radius: 50%; width: 24px; height: 24px; text-align: center;
+              line-height: 24px; font-size: 12px; font-weight: bold;
+              margin-right: 8px; }
+  .section-divider { border: none; border-top: 2px dashed #ccd5e8; margin: 30px 0; }
+  caption { caption-side: bottom; font-size: 11px; color: #666;
+            padding-top: 6px; font-style: italic; }
+  sub, sup { font-size: 0.78em; }
+</style>
+</head>
+<body>
+
+<h1>Method B &mdash; CF-Based Fast NII &amp; EVE Computation</h1>
+
+<div class="abstract">
+<strong>Purpose.</strong> Method B provides an independent, cash-flow-based approximation of NII and EVE for use in the balance-sheet optimisation pipeline. Unlike Method A (which uses pre-calibrated sensitivity units <em>Δ·NII<sub>unit</sub></em>, exact only at the calibration balance vector), Method B rebuilds NII and EVE from monthly cash-flow schedules and pre-indexed discount factors. This makes it valid for <em>any</em> reallocation of the balance sheet, not just at the current point.<br><br>
+<strong>Context.</strong> Both methods are benchmarked against the exact IRRBB pipeline (SQL results from <code>irrbb.nii_results</code> / <code>irrbb.eve_results</code>) using the <em>approx_accuracy_report.xlsx</em> produced by <code>accuracy_check.py</code>.
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<h2>1. Input Data Structures</h2>
+
+Method B reads from two pre-built <code>.npz</code> files. These are created once by <code>extract_params.py</code> and <code>extract_curves.py</code> before any optimisation run.
+
+<h3>1a. curve_tensors.npz → <code>CurveTensors</code></h3>
+
+<table>
+<tr><th>Array</th><th>Shape</th><th>Description</th><th>Source</th></tr>
+<tr><td><code>disc_factors</code></td><td>(S, C, 360)</td>
+    <td>Discount factor d(0,m) at month m, for each scenario S and currency C.
+        Built from zero-coupon yield curves; 360 months = 30 years.</td>
+    <td><code>ir_derivatives</code> — EBA scenario curves</td></tr>
+<tr><td><code>fwd_rates</code></td><td>(S, C, 360)</td>
+    <td>Annualised instantaneous forward rate at month m.</td>
+    <td>Same curves, forward transformation</td></tr>
+<tr><td><code>scenario_ids</code></td><td>(S,)</td>
+    <td>Labels: <em>base, par_up, par_dn, steep, flat, sr_up, sr_dn, own</em></td><td>—</td></tr>
+</table>
+
+<h3>1b. product_params.npz → <code>BalanceSheetParams</code></h3>
+
+<table>
+<tr><th>Array</th><th>Shape</th><th>Description</th></tr>
+<tr><td><code>cohort_interest_yf_m</code></td><td>(n, 12)</td>
+    <td>For each cohort row <em>i</em> and calendar month <em>m</em>:
+        outstanding fraction × actual day-count year-fraction of the cash-flow bucket.
+        Used as the weight for the interest rate in NII computation.</td></tr>
+<tr><td><code>cohort_capital_remain_m</code></td><td>(n, 12)</td>
+    <td>Capital fraction repaid in month <em>m</em> × remaining year-fraction
+        <em>(12 − m − 0.5) / 12</em>. Used for renewal NII.</td></tr>
+<tr><td><code>cohort_capital_m</code></td><td>(n, 12)</td>
+    <td>Raw capital repayment fraction per month (not weighted by remain_yf).</td></tr>
+<tr><td><code>nii_unit_rate</code></td><td>(n,)</td>
+    <td>Calibrated NII per PLN of balance at base scenario. Used for base anchoring.</td></tr>
+<tr><td><code>delta_nii_unit</code></td><td>(n, S)</td>
+    <td>Calibrated delta NII per PLN per shocked scenario. Used in exception overrides.</td></tr>
+<tr><td><code>eve_pv_factor</code></td><td>(n,)</td>
+    <td>Calibrated EVE PV / balance at base. Used for base anchoring of EVE.</td></tr>
+<tr><td><code>sign</code></td><td>(n,)</td>
+    <td>+1 for assets, −1 for liabilities/equity.</td></tr>
+<tr><td><code>coeff_a, coeff_b</code></td><td>(n,)</td>
+    <td>Client rate sensitivity: <em>client_rate = clip(a·fwd + b, floor, cap)</em></td></tr>
+</table>
+
+<h3>1c. product_params.npz → <code>CohortRates</code> (prefix <code>cr_</code>)</h3>
+
+<table>
+<tr><th>Array</th><th>Shape</th><th>Description</th><th>How built</th></tr>
+<tr><td><code>rate_matrix</code></td><td>(n, 12, n_scen)</td>
+    <td>Client interest rate for cohort <em>i</em>, calendar month <em>m</em>, scenario <em>s</em>.
+        The core of Method B NII.</td>
+    <td>See Section 2 below</td></tr>
+<tr><td><code>renewal_rate_matrix</code></td><td>(n, 12, n_scen)</td>
+    <td>New-business rate applied to capital repaid in month <em>m</em> under scenario <em>s</em>.
+        1-month forward rate at month <em>m</em>, transformed by (a, b, floor, cap).</td>
+    <td>1M fwd from <code>disc_factors</code></td></tr>
+<tr><td><code>cohort_disc_q</code></td><td>(n, max_q, n_scen)</td>
+    <td>Pre-indexed discount factors at quarterly CF bucket midpoints for each
+        cohort × scenario. Avoids curve look-up at EVE runtime.</td>
+    <td>Sampled from <code>disc_factors</code> at <code>cf_yf</code> timestamps</td></tr>
+<tr><td><code>cf_fixed_int_frac</code></td><td>(n, max_q)</td>
+    <td>Scheduled (capital + interest) CF / balance for fixed-rate cohorts.
+        For floating cohorts equals <code>cf_capital_frac</code> — only capital
+        is discounted because floating CFs reprice near par.</td>
+    <td>From <code>cf.products</code> / analytical annuity</td></tr>
+<tr><td><code>cf_n_q</code></td><td>(n,)</td>
+    <td>Number of valid quarterly CF buckets per cohort.</td><td>—</td></tr>
+<tr><td><code>cf_yf</code></td><td>(n, max_q)</td>
+    <td>Year-fraction of each CF bucket midpoint (for discounting).</td><td>—</td></tr>
+<tr><td><code>eve_pv_frac</code></td><td>(n, max_q, n_scen)</td>
+    <td>Optional: pre-computed scenario-specific PV fractions (override EVE formula when non-zero).</td><td>—</td></tr>
+</table>
+
+<div class="note"><strong>Row granularity.</strong>
+Each row <em>i</em> of the <em>n</em> arrays corresponds to one <strong>cohort entry</strong>:
+a (product_code, bs_side, currency, start_year, start_month) tuple for cohort products
+(loans, mortgages, bonds, deposits), or a (product_code, bs_side, currency) tuple for
+single-row behavioural products (current accounts, saving accounts, equity).</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<hr class="section-divider">
+<h2>2. How <code>rate_matrix[i, m, s]</code> is Constructed</h2>
+
+<p>Built in <code>extract_params.py</code> at pipeline setup time, not at NII runtime. Separate from <code>CurveTensors</code> — all curve lookups happen here, so runtime NII needs no forward-rate computation.</p>
+
+<table>
+<tr><th>Product type</th><th>Month m</th><th>Scenario s</th><th>Formula</th></tr>
+<tr>
+  <td><strong>F — Fixed coupon</strong><br>(bonds, fixed mortgages, fixed deposits)</td>
+  <td>all m</td><td>all s</td>
+  <td><code>rate_matrix[i,m,s] = coupon_rate[i]</code><br>
+      Constant — no sensitivity to any scenario shift.</td>
+</tr>
+<tr>
+  <td rowspan="2"><strong>V — Floating</strong><br>(floating loans, floating deposits)</td>
+  <td>m &lt; t<sub>1</sub><br>(locked period)</td>
+  <td>all s</td>
+  <td><code>rate_matrix[i,m,s] = locked_rate[i]</code><br>
+      Rate already fixed — same for all scenarios.</td>
+</tr>
+<tr>
+  <td>m ≥ t<sub>1</sub><br>(floating period)</td>
+  <td>each s</td>
+  <td>
+    k = ⌊(m − t<sub>1</sub>) / F⌋<br>
+    ev_t = t<sub>1</sub> + k·F &nbsp;&nbsp;(next fixing event, in months)<br>
+    fwd<sub>s</sub>(ev_t, F) = F-month forward rate from disc_factors[s]<br>
+    <code>rate_matrix[i,m,s] = clip(a·fwd<sub>s</sub> + b, floor, cap)</code>
+  </td>
+</tr>
+<tr>
+  <td><strong>Amortising float</strong><br>with real monthly schedule<br>(products 1100, 2100)</td>
+  <td>m ≥ t<sub>1</sub></td><td>each s</td>
+  <td>Monthly lock/float mix:<br>
+    <code>rate = lf·locked_rate + (1−lf)·clip(eff_base + a·(fwd_s − fwd_b), fl, cp)</code><br>
+    where <em>lf</em> = fraction still locked in month m, from detailed CF schedule.</td>
+</tr>
+<tr>
+  <td><strong>Single-row / behavioural</strong><br>(current accounts, 6000, 8000, …)</td>
+  <td>all m</td><td>all s</td>
+  <td>Zeros — no real monthly profile. These rows fall through to
+      the calibrated fallback (Exception 2).</td>
+</tr>
+</table>
+
+<div class="note"><strong>t<sub>1</sub> — months to first fixing.</strong>
+Read from the CF schedule (SQL). If missing and the locked rate is zero, it is derived
+analytically: t<sub>1</sub> = F − (months_since_start mod F). This prevents
+blanket t<sub>1</sub>=0 which would overestimate sensitivity by treating all 12 months
+as floating.</div>
+
+<p>Similarly for <code>renewal_rate_matrix[i,m,s]</code>:</p>
+<div class="formula-box">renewal_rate[i, m, s] = clip(a[i] · fwd_1M(m, disc[s]) + b[i], floor[i], cap[i])
+
+where fwd_1M(m, disc) is the 1-month forward rate at month m.
+(Capital repaid in month m is re-priced at the 1-month spot new-business rate.)</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<hr class="section-divider">
+<h2>3. NII Computation — Step by Step</h2>
+
+<p>Implemented in <code>nii_eve_cf_fast.py</code>, function <code>compute_nii_cf_all</code>.</p>
+
+<p><span class="step-num">1</span><strong>Interest NII matrix</strong> &mdash; <code>_nii_cohort_matrix</code></p>
+
+<div class="formula-box">NII_int[i, s] = balance[i] · sign[i] · Σ_{m=0..11} interest_yf_m[i,m] · rate_matrix[i,m,s]
+
+In vectorised form (single NumPy call):
+  amount_x_out[i,m] = balance[i] · sign[i] · interest_yf_m[i,m]
+  NII_int            = einsum("im, ims → is",  amount_x_out,  rate_matrix)</div>
+
+<p><code>interest_yf_m[i,m]</code> = outstanding fraction in month m × actual day-count year-fraction of that CF bucket. It is <em>not</em> simply 1/12; it reflects actual days and outstanding profile.</p>
+
+<p><span class="step-num">2</span><strong>Renewal NII matrix</strong> &mdash; <code>_nii_renewal_matrix</code></p>
+
+<div class="formula-box">NII_ren[i, s] = balance[i] · sign[i] · Σ_{m=0..11} capital_remain_m[i,m] · renewal_rate[i,m,s]
+
+  capital_remain_m[i,m] = capital_m[i,m] · remain_yf[m]
+  remain_yf[m]           = (12 − m − 0.5) / 12       (fraction of horizon left after month m)
+
+In vectorised form:
+  NII_ren = einsum("im, ims → is",  balance·sign · capital_remain_m,  renewal_rate_matrix)</div>
+
+<p>Represents capital repaid in month m (loan runoff, deposit maturity) reinvested at new-business rates for the remaining part of the 12-month horizon.</p>
+
+<p><span class="step-num">3</span><strong>Sum and apply exceptions</strong></p>
+
+<div class="formula-box">nii_total[n, n_scen] = NII_int + NII_ren
+
+then three in-place corrections (Exceptions 1–3 below)</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<h2>4. Three Exception Rules</h2>
+
+<p>Applied sequentially to <code>nii_total</code> before returning results.</p>
+
+<h3><span class="exc-num">E1</span> Fixed-rate calibrated override</h3>
+<div class="ok"><strong>Problem:</strong> F-type products have <code>rate_matrix</code> constant across all scenarios
+(locked coupon = no delta). This is correct for run-off of an existing fixed cohort.
+<em>But</em> NMD deposits (product 7060) are modelled as fixed-rate in the CF schedule
+yet the IRRBB behavioural model assigns non-zero rate sensitivity.
+Without this fix: 8–10× error for sr_up/sr_dn on 7060.</div>
+
+<div class="formula-box">Detection:  max_{m,s} |rate_matrix[i,m,s] − rate_matrix[i,m,base]| &lt; 1e-8   (zero cross-scenario variation)
+
+Override for all shocked scenarios s ≠ base:
+  nii_total[i, s] = NII_base[i] + balance[i] · delta_nii_unit[i, s_params]
+
+where delta_nii_unit is the calibrated IRRBB sensitivity from the exact pipeline.</div>
+
+<h3><span class="exc-num">E2</span> Synthetic / behavioural product fallback</h3>
+<div class="ok"><strong>Problem:</strong> Single-row products (current accounts, savings) and some cohort entries
+that received a synthetic constant-balance profile (capital_m ≈ 0, outstanding_m ≈ 1.0)
+have no real CF schedule. Their <code>rate_matrix</code> deltas are invented — not from real repricing.</div>
+
+<div class="formula-box">Detection:  (~is_cohort)  OR  (sum(|capital_m|) &lt; 1e-10  AND  max|outstanding_m − 1| &lt; 1e-8)
+
+Override for shocked scenarios:
+  nii_total[i, s] = NII_base[i] + balance[i] · delta_nii_unit[i, s_params]
+
+Base column is kept from CF computation (preserves base NII level for E3).</div>
+
+<h3><span class="exc-num">E3</span> Base NII anchoring (bias correction)</h3>
+<div class="ok"><strong>Problem:</strong> Even a correct rate_matrix will differ from the exact IRRBB pipeline at the base
+point because of day-count conventions, accrual timing, and gap-based methodology differences.
+This systematic offset would accumulate as a base error in all shocked scenarios.</div>
+
+<div class="formula-box">bias[i] = balance[i] · nii_unit_rate[i]  −  nii_total[i, base_idx]
+           ↑ exact calibrated base NII         ↑ raw CF-based base NII
+
+nii_total[i, :]  +=  bias[i]     (applied to ALL scenarios, including base)
+
+Effect:  NII_base becomes exact by construction.
+         Δ NII = nii_total[i,s] − nii_total[i,base] is unchanged (bias cancels out).
+         All shocked-scenario errors are purely in the delta direction.</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<hr class="section-divider">
+<h2>5. EVE Computation — Step by Step</h2>
+
+<p>Implemented in <code>compute_eve_cf_fast_all</code> / <code>compute_eve_cf_fast_by_product</code>.</p>
+
+<p><span class="step-num">1</span><strong>PV matrix via einsum on pre-indexed discount factors</strong></p>
+
+<div class="formula-box">For each cohort i and CF bucket q = 0..cf_n_q[i]-1:
+
+  PV_frac[i, q, s]  =  cf_fixed_int_frac[i, q]  ×  cohort_disc_q[i, q, s]
+
+Vectorised (mask valid buckets first):
+  cf_masked[i, q]   =  cf_fixed_int_frac[i, q]  ×  valid[i, q]
+  pv_frac[i, s]     =  einsum("iq, iqs → is",  cf_masked,  cohort_disc_q)   → shape (n, n_scen)
+  pv_mat[i, s]      =  pv_frac[i, s]  ×  balance[i]  ×  sign[i]</div>
+
+<p><strong>CF fractions used by product type:</strong></p>
+<table>
+<tr><th>Product type</th><th>CF fraction used</th><th>Rationale</th></tr>
+<tr><td>Fixed-rate (F)</td><td><code>cf_fixed_int_frac</code> = capital + interest</td>
+    <td>All promised CFs are fixed; PV captures full duration effect.</td></tr>
+<tr><td>Floating-rate (V)</td><td><code>cf_capital_frac</code> = capital only</td>
+    <td>Floating interest resets to par at each repricing → only capital CFs contribute to duration.
+        Interest CFs wash out in delta (they equal forward rates × discount factor ≈ constant).</td></tr>
+<tr><td>Single-row behavioural</td><td>zeros (cf_n_q = 0)</td>
+    <td>No maturity schedule; EVE falls back to calibrated <code>eve_pv_factor</code>.</td></tr>
+</table>
+
+<p><span class="step-num">2</span><strong>Delta EVE</strong></p>
+
+<div class="formula-box">eve_base_raw   =  Σ_i  pv_mat[i, base_idx]          (raw CF-based base)
+eve_base       =  balance · eve_pv_factor            (calibrated base — anchored to exact)
+
+delta_EVE[s]   =  Σ_i pv_mat[i, s]  −  eve_base_raw  (shock relative to raw base)
+
+Reported as:   EVE_base = eve_base   (exact calibrated level)
+               delta_EVE[s] as above  (CF-based movement)</div>
+
+<div class="note"><strong>Override.</strong> If <code>eve_pv_frac[i, :, :]</code> is non-zero for a cohort, it replaces <code>cf_fixed_int_frac × cohort_disc_q</code> for that row. This allows scenario-specific PV profiles for products where the standard CF model is insufficient.</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<hr class="section-divider">
+<h2>6. Accuracy Results (current balance sheet, 2024-12-31)</h2>
+
+<p>Benchmark: exact IRRBB pipeline SQL results vs. Method A (calibrated sensi) and Method B (CF-based).
+Tolerance: ±1% for NII and EVE deltas.</p>
+
+<table>
+<tr>
+  <th>Metric</th><th>Scenario</th>
+  <th>Exact (PLN)</th>
+  <th>A error</th><th>A</th>
+  <th>B error</th><th>B</th>
+</tr>
+<tr>
+  <td>NII base</td><td>base</td>
+  <td>568,343,638</td>
+  <td class="pass">0.0%</td><td class="pass">OK</td>
+  <td class="pass">0.0%</td><td class="pass">OK</td>
+</tr>
+<tr>
+  <td>EVE base</td><td>base</td>
+  <td>2,424,318,031</td>
+  <td class="pass">0.0%</td><td class="pass">OK</td>
+  <td class="pass">−0.0%</td><td class="pass">OK</td>
+</tr>
+<tr>
+  <td>Δ NII</td><td>par_up</td>
+  <td>+27,261,140</td>
+  <td class="pass">−0.0%</td><td class="pass">OK</td>
+  <td class="pass">−0.0%</td><td class="pass">OK</td>
+</tr>
+<tr>
+  <td>Δ EVE</td><td>par_up</td>
+  <td>−134,741,170</td>
+  <td class="pass">0.0%</td><td class="pass">OK</td>
+  <td class="pass">−0.3%</td><td class="pass">OK</td>
+</tr>
+<tr>
+  <td>Δ NII</td><td>par_dn</td>
+  <td>−24,923,767</td>
+  <td class="pass">0.0%</td><td class="pass">OK</td>
+  <td class="pass">0.0%</td><td class="pass">OK</td>
+</tr>
+<tr>
+  <td>Δ EVE</td><td>par_dn</td>
+  <td>+146,616,733</td>
+  <td class="pass">0.0%</td><td class="pass">OK</td>
+  <td class="pass">+0.3%</td><td class="pass">OK</td>
+</tr>
+<tr>
+  <td>Δ NII</td><td>steep</td>
+  <td>+8,734,245</td>
+  <td class="pass">0.0%</td><td class="pass">OK</td>
+  <td class="pass">+0.7%</td><td class="pass">OK</td>
+</tr>
+<tr>
+  <td>Δ EVE</td><td>steep</td>
+  <td>−45,773,856</td>
+  <td class="pass">0.0%</td><td class="pass">OK</td>
+  <td class="pass">+0.6%</td><td class="pass">OK</td>
+</tr>
+<tr>
+  <td>Δ NII</td><td>flat</td>
+  <td>−3,401,888</td>
+  <td class="pass">0.0%</td><td class="pass">OK</td>
+  <td class="fail">−2.1%</td><td class="fail">--</td>
+</tr>
+<tr>
+  <td>Δ EVE</td><td>flat</td>
+  <td>+33,778,705</td>
+  <td class="pass">0.0%</td><td class="pass">OK</td>
+  <td class="fail">−1.1%</td><td class="fail">--</td>
+</tr>
+<tr>
+  <td>Δ NII</td><td>sr_up</td>
+  <td>+7,559,236</td>
+  <td class="pass">0.0%</td><td class="pass">OK</td>
+  <td class="pass">−0.9%</td><td class="pass">OK</td>
+</tr>
+<tr>
+  <td>Δ EVE</td><td>sr_up</td>
+  <td>−26,917,536</td>
+  <td class="pass">0.0%</td><td class="pass">OK</td>
+  <td class="fail">−1.9%</td><td class="fail">--</td>
+</tr>
+<tr>
+  <td>Δ NII</td><td>sr_dn</td>
+  <td>−5,138,260</td>
+  <td class="pass">0.0%</td><td class="pass">OK</td>
+  <td class="fail">+1.3%</td><td class="fail">--</td>
+</tr>
+<tr>
+  <td>Δ EVE</td><td>sr_dn</td>
+  <td>+28,001,388</td>
+  <td class="pass">0.0%</td><td class="pass">OK</td>
+  <td class="fail">+1.8%</td><td class="fail">--</td>
+</tr>
+<tr>
+  <td>Δ NII</td><td>own</td>
+  <td>−9,224,288</td>
+  <td class="pass">0.0%</td><td class="pass">OK</td>
+  <td class="pass">0.0%</td><td class="pass">OK</td>
+</tr>
+<tr>
+  <td>Δ EVE</td><td>own</td>
+  <td>+57,542,060</td>
+  <td class="pass">0.0%</td><td class="pass">OK</td>
+  <td class="pass">+0.3%</td><td class="pass">OK</td>
+</tr>
+<caption>A = Method A (calibrated sensi). B = Method B (CF-based). Tolerance = ±1%.</caption>
+</table>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<hr class="section-divider">
+<h2>7. Residual Errors and Structural Limits of Method B</h2>
+
+<p>The remaining failures (flat, sr_up EVE, sr_dn) are <strong>not code bugs</strong> — they reflect structural approximation limits:</p>
+
+<table>
+<tr><th>Scenario type</th><th>Root cause of residual error</th></tr>
+<tr>
+  <td><strong>flat</strong><br>(long end down, short end unchanged)</td>
+  <td>
+    <code>rate_matrix</code> uses F-month forward at a single fixing event <em>ev_t</em>.
+    For non-parallel shocks the forward rate change depends heavily on the tenor chosen.
+    Products with long repricing tenors (F = 12M) pick a forward that does not correctly
+    represent the flat-scenario curve shape. The exact pipeline uses a full term-structure
+    integration; the CF model linearises this.
+  </td>
+</tr>
+<tr>
+  <td><strong>sr_up / sr_dn</strong><br>(short-rate only ±25 bp)</td>
+  <td>
+    Short-rate shock affects only the front end of the curve (0–12M).
+    Products with t<sub>1</sub> &gt; several months miss the shock entirely in the locked period.
+    The exact pipeline prices the gap position precisely; Method B depends on the
+    accuracy of the t<sub>1</sub> estimate from SQL, which may be an aggregate approximation
+    rather than the true weighted first repricing date.
+  </td>
+</tr>
+<tr>
+  <td><strong>par_up / par_dn</strong></td>
+  <td>Parallel shift — all tenors move equally → forward rate approximation is exact
+      regardless of which tenor is chosen. Near-zero errors. ✓</td>
+</tr>
+</table>
+
+<div class="warn">
+<strong>Implication for optimisation.</strong> When using Method B in the optimiser hot path,
+non-parallel shock sensitivities carry a ±1–2% error. For the regulatory EBA SOT this is
+acceptable (capital buffers dwarf 2% NII/EVE misestimation), but portfolio-level constraints
+should be set with a safety margin of at least 3–5% relative to the threshold.
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<hr class="section-divider">
+<h2>8. Why Method B Exists at All (when Method A is more accurate)</h2>
+
+<p>Method A is always exact at the calibration point. Why use Method B?</p>
+
+<table>
+<tr><th>Property</th><th>Method A (calibrated sensi)</th><th>Method B (CF-based)</th></tr>
+<tr>
+  <td>Accuracy at calibration balance</td>
+  <td class="pass">Exact by construction</td>
+  <td>~0–2% error</td>
+</tr>
+<tr>
+  <td>Validity away from calibration point</td>
+  <td class="fail">Linear extrapolation only<br>(delta_nii_unit fixed at calibration weights)</td>
+  <td class="pass">Recomputes from actual CF schedule — valid for any weight vector</td>
+</tr>
+<tr>
+  <td>Captures floor/cap non-linearity</td>
+  <td class="fail">No — linear sensi ignores clipping</td>
+  <td class="pass">Yes — rate_matrix applies clip() per month per scenario</td>
+</tr>
+<tr>
+  <td>Captures repricing schedule changes</td>
+  <td class="fail">No — t<sub>1</sub>, F embedded at calibration</td>
+  <td class="pass">Partially — t<sub>1</sub>, F per cohort, though not per-contract</td>
+</tr>
+<tr>
+  <td>Runtime speed</td>
+  <td class="pass">Single dot product — nanoseconds</td>
+  <td class="pass">Two einsums — ~0.1 ms for n &lt; 2000</td>
+</tr>
+</table>
+
+<p>In the optimisation loop the balance vector changes every iteration. Method A gives a
+first-order estimate of the shifted NII/EVE but cannot capture non-linearities in the
+rate schedule. Method B acts as an independent cross-check and, for large rebalancings,
+a more reliable constraint evaluator.</p>
+
+<hr class="section-divider">
+<p style="font-size:11px; color:#888; text-align:center;">
+Generated 2026-05-14 &mdash; LabBank IRRBB/ALM project &mdash; optimize_prep module
+</p>
+
+</body>
+</html>

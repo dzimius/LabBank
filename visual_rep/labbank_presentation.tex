@@ -1,0 +1,665 @@
+% ─────────────────────────────────────────────────────────────────────────────
+% LabBank — ALM System Presentation
+% Compile: pdflatex labbank_presentation.tex  (twice for ToC)
+% Assets:  run make_beamer_assets.py first → produces beamer_assets/*.png
+% ─────────────────────────────────────────────────────────────────────────────
+\documentclass[aspectratio=169,10pt]{beamer}
+
+\usetheme{Madrid}
+\usecolortheme{default}
+
+% ── Custom colours ────────────────────────────────────────────────────────────
+\definecolor{labblue}{RGB}{21,  101, 192}   % asset blue
+\definecolor{labred} {RGB}{198,  40,  40}   % liability red
+\definecolor{labgrn} {RGB}{ 46, 125,  50}   % net green
+\definecolor{labpur} {RGB}{106,  27, 154}   % equity purple
+\definecolor{labdark}{RGB}{ 26,  35, 126}   % deep navy (header)
+\definecolor{labgrey}{RGB}{ 96, 125, 139}   % muted grey
+
+\setbeamercolor{palette primary}  {bg=labdark, fg=white}
+\setbeamercolor{palette secondary}{bg=labblue, fg=white}
+\setbeamercolor{palette tertiary} {bg=labblue!60, fg=white}
+\setbeamercolor{structure}        {fg=labblue}
+\setbeamercolor{frametitle}       {bg=labdark, fg=white}
+\setbeamercolor{title}            {bg=labdark, fg=white}
+\setbeamercolor{alerted text}     {fg=labred}
+\setbeamercolor{block title}      {bg=labblue!15, fg=labdark}
+\setbeamercolor{block body}       {bg=labblue!5,  fg=black}
+\setbeamercolor{block title alerted}{bg=labred!15, fg=labred!80!black}
+\setbeamercolor{block body alerted} {bg=labred!5,  fg=black}
+\setbeamercolor{block title example}{bg=labgrn!15, fg=labgrn!70!black}
+\setbeamercolor{block body example} {bg=labgrn!5,  fg=black}
+
+% ── Packages ─────────────────────────────────────────────────────────────────
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, shapes.geometric}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{microtype}
+\usepackage{hyperref}
+
+\hypersetup{colorlinks=false}
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{footline}[frame number]
+
+% ── Convenience macros ────────────────────────────────────────────────────────
+\newcommand{\imgfull}[2][0.96\textwidth]{%
+  \begin{center}\includegraphics[width=#1]{beamer_assets/#2}\end{center}}
+\newcommand{\pos}[1]{\textcolor{labgrn}{\textbf{#1}}}
+\newcommand{\neg}[1]{\textcolor{labred}{\textbf{#1}}}
+\newcommand{\hi} [1]{\textcolor{labblue}{\textbf{#1}}}
+\newcommand{\formula}[1]{\colorbox{labblue!8}{\(#1\)}}
+
+% ─────────────────────────────────────────────────────────────────────────────
+% TITLE
+% ─────────────────────────────────────────────────────────────────────────────
+\title[LabBank — ALM System]{\textbf{LabBank}\\[4pt]
+  \large A Laboratory Banking ALM System}
+\subtitle{Balance Sheet · Cash Flows · IRRBB · Liquidity Risk · Reporting}
+\author{ALM \& Risk Analytics}
+\date{Report date: 2024-12-31}
+\institute{LabBank Project}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\begin{document}
+% ─────────────────────────────────────────────────────────────────────────────
+
+% ── Slide 1 — Title ───────────────────────────────────────────────────────────
+\begin{frame}[plain]
+  \titlepage
+  \vspace{-6pt}
+  \begin{center}
+    \small\textcolor{labgrey}{Currency: PLN \quad|\quad
+      Risk framework: EBA IRRBB Guidelines (2018)\quad|\quad
+      Audience: ALM / Risk Analytics}
+  \end{center}
+\end{frame}
+
+% ── Slide 2 — Outline ─────────────────────────────────────────────────────────
+\begin{frame}{Agenda}
+  \tableofcontents
+\end{frame}
+
+% =============================================================================
+\section{Project Overview}
+% =============================================================================
+
+% ── Slide 3 — What is LabBank ─────────────────────────────────────────────────
+\begin{frame}{What is LabBank?}
+
+  \begin{columns}[T]
+    \column{0.54\textwidth}
+      \textbf{LabBank is an end-to-end ALM modelling system} built around a
+      synthetic but realistic bank balance sheet.
+      It computes the key regulatory and management risk metrics from first
+      principles — starting from raw transactions and market curves, producing
+      auditable, SQL-backed results.
+
+      \vspace{8pt}
+      \textbf{Why it exists}
+      \begin{itemize}
+        \item Demonstrate how IRRBB and liquidity risk measures can be derived
+              from elementary cash flow aggregation.
+        \item Provide a \textit{transparent}, fully reproducible reference
+              implementation — every number traces back to a SQL table or a
+              Python calculation.
+        \item Support education in quantitative ALM for practitioners who want
+              to understand the mechanics rather than treat metrics as black-box
+              outputs.
+      \end{itemize}
+
+    \column{0.42\textwidth}
+      \begin{block}{What LabBank computes}
+        \small
+        \begin{tabular}{ll}
+          \toprule
+          \textbf{Module} & \textbf{Output} \\
+          \midrule
+          Balance sheet   & Transactions, rates \\
+          Cash flows      & CF schedules, NII \\
+          IR derivatives  & Swap CFs, gap adj. \\
+          IRRBB           & NII, EVE, EBA SOT \\
+          Liquidity       & LCR, NSFR \\
+          Reporting       & HTML, PDF, Power BI \\
+          \bottomrule
+        \end{tabular}
+      \end{block}
+
+      \begin{alertblock}{Scope note}
+        \small Balance sheet \textbf{optimisation} is the planned next phase.
+        Methods are not yet fully implemented and are \textit{outside} the
+        scope of this presentation.
+      \end{alertblock}
+  \end{columns}
+\end{frame}
+
+% =============================================================================
+\section{System Architecture}
+% =============================================================================
+
+% ── Slide 4 — Architecture ────────────────────────────────────────────────────
+\begin{frame}{System Architecture}
+
+  \imgfull{pipeline.png}
+
+  \vspace{2pt}
+  \small
+  Each module writes to a dedicated \textbf{SQL Server schema} and exposes
+  clean tabular outputs to downstream modules.
+  The final reporting layer consumes all schemas to produce HTML/PDF reports.
+  SQL acts as the integration bus: modules are independently runnable and
+  results are fully auditable at every step.
+\end{frame}
+
+% ── Slide 5 — SQL Schema ──────────────────────────────────────────────────────
+\begin{frame}{Data Model — SQL Schemas}
+
+  \imgfull[0.88\textwidth]{sql_schema.png}
+
+  \small\vspace{2pt}
+  Six schemas separate concerns cleanly.
+  \texttt{dbo} and \texttt{schemat} hold raw inputs; \texttt{mkt} holds
+  market curves; \texttt{cf}, \texttt{irrbb}, and \texttt{results} hold
+  calculated outputs.
+  Every calculation reads from upstream schemas — no hidden side-effects.
+\end{frame}
+
+% =============================================================================
+\section{Balance Sheet}
+% =============================================================================
+
+% ── Slide 6 — BS Construction ─────────────────────────────────────────────────
+\begin{frame}{Balance Sheet Construction}
+
+  \begin{columns}[T]
+    \column{0.48\textwidth}
+      \textbf{Input} (\texttt{bank\_data.xlsx})
+      \begin{itemize}
+        \item Product definitions: code, name, side (A/L).
+        \item Balance amounts by product and currency.
+        \item Contractual rates, maturity dates, repricing frequencies.
+        \item Behavioural parameters: prepayment speeds for loans,
+              decay rates for non-maturity deposits (NMD).
+        \item Equity (Tier 1 capital) — used as regulatory denominator
+              in the SOT.
+      \end{itemize}
+
+      \vspace{6pt}
+      \textbf{Rate types}
+      \begin{description}[labelwidth=1.8cm]
+        \item[\texttt{Fixed (F)}]  Rate contractually locked until maturity.
+        \item[\texttt{Variable (V)}] Resets periodically to WIBOR + spread.
+        \item[\texttt{Admin (A)}]  Floored at 0\%; moves with policy at the
+                                    bank's discretion (e.g.\ current accounts).
+      \end{description}
+
+    \column{0.48\textwidth}
+      \textbf{Output tables produced}
+
+      \begin{exampleblock}{\texttt{dbo.transactions}}
+        Master balance sheet — one row per product per report date.
+        Columns: \texttt{balance\_amt}, \texttt{client\_rt},
+        \texttt{rate\_type}, \texttt{bs\_side}, \texttt{currency}.
+      \end{exampleblock}
+
+      \begin{exampleblock}{\texttt{schemat.loans / deposits}}
+        Product-level schedules with individual contractual maturities,
+        coupon dates, and behavioural run-off parameters.
+      \end{exampleblock}
+
+      \vspace{4pt}
+      \textbf{Multi-currency:} PLN is the reporting currency.
+        EUR and USD positions are modelled separately with their own
+        discount and forward curves.
+  \end{columns}
+\end{frame}
+
+% ── Slide 7 — BS Structure chart ──────────────────────────────────────────────
+\begin{frame}{Balance Sheet Structure}
+
+  \imgfull{bs_structure.png}
+
+  \vspace{2pt}
+  \small
+  \begin{columns}
+    \column{0.48\textwidth}
+      \textbf{Asset side:} mortgages (fixed \& float), consumer loans,
+      bond/securities portfolio, interbank placements.
+    \column{0.48\textwidth}
+      \textbf{Liability side:} term deposits, savings accounts, current
+      accounts, issued bonds, plus equity (Tier 1 capital).
+  \end{columns}
+  \vspace{4pt}
+  Key metrics: \hi{NIM 5.35\%} \quad|\quad
+               Avg asset yield \hi{8.16\%} \quad|\quad
+               Cost of funds \hi{3.35\%} \quad|\quad
+               Interest spread \hi{4.81\%}
+\end{frame}
+
+% ── Slide 8 — Rate type exposure ──────────────────────────────────────────────
+\begin{frame}{Rate Type Exposure}
+
+  \imgfull{rate_type.png}
+
+  \small\vspace{2pt}
+  Rate type determines \textbf{how fast} a position reprices when market
+  rates move:
+  \begin{itemize}
+    \item \textbf{Fixed-rate positions} produce stable income regardless of
+          rate moves — but their \textit{economic value} changes (EVE risk).
+    \item \textbf{Variable-rate positions} reprice quickly — NII changes
+          almost immediately when WIBOR shifts (NII risk).
+    \item \textbf{Admin-rate liabilities} (current accounts) are floored at
+          0\% and move slowly, creating a structural hedge in falling-rate
+          environments.
+  \end{itemize}
+  The mix between fixed and variable drives the bank's position on the
+  \textbf{NII vs EVE trade-off}, central to IRRBB management.
+\end{frame}
+
+% =============================================================================
+\section{Cash Flows}
+% =============================================================================
+
+% ── Slide 9 — CF Engine ───────────────────────────────────────────────────────
+\begin{frame}{Cash Flow Engine}
+
+  \begin{columns}[T]
+    \column{0.50\textwidth}
+      \textbf{What the CF engine does}
+
+      For each product on the balance sheet it generates a full schedule of:
+      \begin{enumerate}
+        \item \textbf{Capital cash flows} — contractual amortisation plus
+              behavioural adjustments (early repayments, deposit decay).
+        \item \textbf{Interest cash flows} — coupon payments at the
+              contractual client rate, separately tracked by tenor bucket.
+      \end{enumerate}
+
+      \vspace{6pt}
+      \textbf{Behavioural modelling}
+      \begin{itemize}
+        \item \textit{Loans:} constant prepayment rate (CPR) applied monthly
+              to the outstanding balance.
+        \item \textit{Non-maturity deposits (NMD):} exponential decay model
+              — a fraction of the balance is assumed to leave each month,
+              the remainder is treated as sticky long-term funding.
+        \item \textit{Admin-rate floor:} interest on current accounts is
+              capped at 0\% and never passes through to the client as
+              a negative rate.
+      \end{itemize}
+
+    \column{0.46\textwidth}
+      \textbf{Output: \texttt{cf.nii\_base\_scenario}}
+
+      One row per (product, tenor bucket, scenario).  Key columns:
+
+      \vspace{4pt}
+      \small
+      \begin{tabular}{ll}
+        \toprule
+        Column & Meaning \\
+        \midrule
+        \texttt{beh\_outstanding} & Behavioural balance outstanding \\
+        \texttt{client\_rt}       & Contracted client rate \\
+        \texttt{fwd\_rt}          & Market forward rate (same tenor) \\
+        \texttt{margin}           & \texttt{client\_rt} $-$ \texttt{fwd\_rt} \\
+        \texttt{nii\_interest}    & Income from existing CFs (locked) \\
+        \texttt{nii\_renewal}     & Income from maturing capital \\
+                                  & reinvested at market rates \\
+        \texttt{nii\_total}       & Sum of the two \\
+        \bottomrule
+      \end{tabular}
+
+      \vspace{6pt}
+      \normalsize
+      This table is the \textit{single source of truth} for both NII
+      reporting and scenario analysis.
+  \end{columns}
+\end{frame}
+
+% ── Slide 10 — NII Bridge ─────────────────────────────────────────────────────
+\begin{frame}{NII: Locked Interest vs Renewal}
+
+  \imgfull{nii_bridge.png}
+
+  \small\vspace{2pt}
+  \begin{columns}
+    \column{0.48\textwidth}
+      \textbf{Locked interest} (\texttt{nii\_interest}): income from cash
+      flows already contracted — rate and notional are fixed.
+      This part is \textit{immune to rate shocks}.
+    \column{0.48\textwidth}
+      \textbf{Renewal} (\texttt{nii\_renewal}): income from maturing capital
+      that is reinvested at current market rates within the 1-year horizon.
+      This part \textit{reprices with the curve} and drives NII sensitivity.
+  \end{columns}
+\end{frame}
+
+% =============================================================================
+\section{Repricing Gap \& IR Derivatives}
+% =============================================================================
+
+% ── Slide 11 — Repricing gap ──────────────────────────────────────────────────
+\begin{frame}{Repricing Gap and Interest Rate Swaps}
+
+  \imgfull{repricing_gap.png}
+
+  \small\vspace{2pt}
+  \textbf{Repricing gap} = net volume of assets minus liabilities
+  repricing in each tenor bucket.
+  A \pos{positive} gap means more assets than liabilities reprice in that
+  bucket — the bank \textit{benefits} from a rate increase.
+  A \neg{negative} gap signals liability-sensitive exposure — the bank is
+  hurt by rising rates in that bucket.
+
+  \vspace{4pt}
+  \textbf{IRS book:} interest rate swaps shift the gap without changing
+  the balance sheet.
+  A \textit{receive-fixed} swap converts variable-rate liabilities into
+  fixed-rate obligations, reducing short-term asset sensitivity.
+\end{frame}
+
+% =============================================================================
+\section{IRRBB — NII and EVE}
+% =============================================================================
+
+% ── Slide 12 — NII Waterfall ──────────────────────────────────────────────────
+\begin{frame}{Net Interest Income — Product Breakdown}
+
+  \imgfull{nii_waterfall.png}
+
+  \small\vspace{2pt}
+  Interest income accumulates from asset products (mortgages, loans,
+  securities), then interest expense from liability products (deposits,
+  bonds) is subtracted to arrive at Net Interest Income.
+  This waterfall makes the \textbf{product-level contribution} explicit —
+  key for pricing decisions and product strategy.
+\end{frame}
+
+% ── Slide 13 — EVE ────────────────────────────────────────────────────────────
+\begin{frame}{Economic Value of Equity (EVE)}
+
+  \begin{columns}[T]
+    \column{0.46\textwidth}
+      \textbf{Definition}
+
+      EVE is the present value of all future cash flows under a
+      \textit{run-off} assumption — no new business, existing book
+      winds down to maturity:
+      \[
+        \mathrm{EVE} = \sum_{i} \mathrm{CF}_i \cdot d(t_i)
+      \]
+      where $d(t_i)$ is the discount factor at tenor $t_i$.
+
+      \vspace{8pt}
+      \textbf{What ΔEVE tells us}
+
+      When the yield curve shifts, the discount factors change and so
+      does the present value of the book.
+      \[
+        \Delta\mathrm{EVE} = \mathrm{EVE}_{\text{shocked}}
+                           - \mathrm{EVE}_{\text{base}}
+      \]
+      A \neg{negative} ΔEVE means the bank's economic net worth falls
+      under that rate scenario — long-maturity fixed assets lose value
+      faster than liabilities shorten.
+
+    \column{0.50\textwidth}
+      \imgfull[0.97\textwidth]{eve_results.png}
+  \end{columns}
+\end{frame}
+
+% =============================================================================
+\section{EBA Shock Scenarios \& SOT}
+% =============================================================================
+
+% ── Slide 14 — Shock curves ───────────────────────────────────────────────────
+\begin{frame}{EBA IRRBB Shock Scenarios}
+
+  \imgfull{shock_curves.png}
+
+  \vspace{2pt}
+  \small
+  EBA Guidelines (2018) prescribe \textbf{six supervisory shock scenarios}
+  applied to each currency's yield curve:
+
+  \vspace{4pt}
+  \begin{columns}
+    \column{0.48\textwidth}
+      \begin{itemize}
+        \item \hi{Parallel up} (+250 bps across all tenors)
+        \item \hi{Parallel down} (−250 bps across all tenors)
+        \item \hi{Steepener} (short rates down, long rates up)
+      \end{itemize}
+    \column{0.48\textwidth}
+      \begin{itemize}
+        \item \hi{Flattener} (short rates up, long rates down)
+        \item \hi{Short rate up} (+350 bps at the short end)
+        \item \hi{Short rate down} (−350 bps at the short end)
+      \end{itemize}
+  \end{columns}
+
+  \vspace{4pt}
+  Shocks are floored at 0\% for each tenor.
+  Each scenario produces a full set of ΔEVE and ΔNII figures
+  used in the Supervisory Outlier Test.
+\end{frame}
+
+% ── Slide 15 — SOT ────────────────────────────────────────────────────────────
+\begin{frame}{Supervisory Outlier Test (SOT)}
+
+  \begin{columns}[T]
+    \column{0.44\textwidth}
+      \textbf{Methodology}
+
+      The SOT applies a \textbf{50\% haircut per tenor bucket} to any
+      scenario leg that produces a \textit{gain}:
+      \[
+        \Delta\mathrm{EVE}^{\text{reg}} = \sum_{b}
+          \min\!\bigl(\Delta\mathrm{EVE}_b,\;0\bigr)
+          + 0.5 \cdot \max\!\bigl(\Delta\mathrm{EVE}_b,\;0\bigr)
+      \]
+      The haircut is applied \textit{at bucket level}, not on the total —
+      preventing netting of gains in one bucket against losses in another.
+
+      \vspace{6pt}
+      \textbf{Thresholds (EBA)}
+      \begin{itemize}
+        \item EVE SOT: $\Delta\mathrm{EVE}^{\text{reg}} / T_1 < -15\%$
+              \neg{\(\Rightarrow\) BREACH}
+        \item NII SOT: $\Delta\mathrm{NII}^{\text{reg}} / T_1 < -5\%$
+              \neg{\(\Rightarrow\) BREACH}
+      \end{itemize}
+      Results are written to \texttt{irrbb.irrbb\_report}.
+
+    \column{0.52\textwidth}
+      \imgfull[0.97\textwidth]{eba_sot.png}
+  \end{columns}
+\end{frame}
+
+% =============================================================================
+\section{Liquidity Risk}
+% =============================================================================
+
+% ── Slide 16 — LCR / NSFR ────────────────────────────────────────────────────
+\begin{frame}{Liquidity Coverage Ratio \& Net Stable Funding Ratio}
+
+  \begin{columns}[T]
+    \column{0.44\textwidth}
+      \textbf{LCR — 30-day stress horizon}
+      \[
+        \mathrm{LCR} = \frac{\mathrm{HQLA}}
+                            {\text{Net outflows}_{30\text{d}}}
+                       \geq 100\%
+      \]
+      HQLA (High-Quality Liquid Assets) = Level 1 liquid assets:
+      cash, central bank reserves, sovereign bonds.
+      Net outflows = stressed deposit run-off and interbank maturities
+      within 30 days.
+
+      \vspace{8pt}
+      \textbf{NSFR — 1-year structural funding}
+      \[
+        \mathrm{NSFR} = \frac{\mathrm{ASF}}{\mathrm{RSF}} \geq 100\%
+      \]
+      ASF (Available Stable Funding) is weighted by funding stability
+      (equity \& long-term debt score highest).
+      RSF (Required Stable Funding) is weighted by asset liquidity
+      (loans and illiquid assets score highest).
+
+    \column{0.52\textwidth}
+      \imgfull[0.97\textwidth]{lcr_nsfr.png}
+  \end{columns}
+\end{frame}
+
+% ── Slide 17 — Liquidity Gap ──────────────────────────────────────────────────
+\begin{frame}{Behavioural Liquidity Gap}
+
+  \imgfull{liq_gap.png}
+
+  \small\vspace{2pt}
+  The liquidity gap shows the net cash position across the full
+  tenor ladder up to 60 months, using \textbf{behavioural} rather than
+  contractual cash flows (loan prepayments included, NMD decay applied).
+  A sustained \neg{negative cumulative gap} identifies the point at which
+  the bank would need to seek additional funding — the primary input for
+  contingency funding planning.
+\end{frame}
+
+% =============================================================================
+\section{Reporting Pipeline}
+% =============================================================================
+
+% ── Slide 18 — Reporting ──────────────────────────────────────────────────────
+\begin{frame}{Integrated Reporting}
+
+  \begin{columns}[T]
+    \column{0.48\textwidth}
+      \textbf{bank\_report (ALM \& Compliance)}
+
+      Jupyter notebook executed against live SQL data and
+      exported to \texttt{HTML / PDF}:
+      \begin{itemize}
+        \item Yield curves and EBA shocked scenarios
+        \item Repricing gap ladder with IRS overlay
+        \item Behavioural liquidity gap (60M horizon)
+        \item NII by scenario (all 7 shocks)
+        \item EVE by scenario (run-off PV)
+        \item EBA SOT: ΔEVE \% and ΔNII \% vs Tier 1
+        \item LCR \& NSFR by currency
+        \item Non-linearity analysis (convexity check)
+      \end{itemize}
+
+    \column{0.48\textwidth}
+      \textbf{finance\_report (Finance / CFO)}
+
+      Programmatically generated notebook via
+      \texttt{make\_finance\_report.py}:
+      \begin{itemize}
+        \item Executive P\&L summary (NIM, spread, NII)
+        \item Interest income \& expense waterfall
+        \item Product margin vs benchmark (bps spread)
+        \item Funding cost structure (pie + cost rates)
+        \item Fixed vs variable rate mix
+        \item NII bridge: locked interest vs renewal
+        \item Margin profile over time (by tenor bucket)
+        \item Rate sensitivity (business view)
+      \end{itemize}
+
+      \vspace{4pt}
+      \textbf{Power BI:} \texttt{ir\_gap.pbix} provides interactive
+      repricing gap exploration connected to the live SQL database.
+  \end{columns}
+\end{frame}
+
+% =============================================================================
+\section{NII Scenario Analysis}
+% =============================================================================
+
+% ── Slide 19 — NII scenarios ──────────────────────────────────────────────────
+\begin{frame}{NII Across EBA Shock Scenarios}
+
+  \imgfull{nii_scenarios.png}
+
+  \small\vspace{2pt}
+  NII decomposes into \textbf{locked interest} (immune to shocks, shown
+  solid) and \textbf{renewal} (rate-sensitive, shown hatched).
+  The delta shown above each bar is the change versus the base scenario.
+  \textbf{Asset-sensitive balance sheets} benefit from parallel-up shocks;
+  \textbf{liability-sensitive} balance sheets benefit from parallel-down.
+\end{frame}
+
+% =============================================================================
+\section{Conclusions \& Roadmap}
+% =============================================================================
+
+% ── Slide 20 — Conclusions ────────────────────────────────────────────────────
+\begin{frame}{Conclusions \& What Comes Next}
+
+  \begin{columns}[T]
+    \column{0.52\textwidth}
+      \textbf{What LabBank delivers today}
+      \begin{itemize}
+        \item Full end-to-end ALM pipeline from raw transactions to
+              regulatory risk metrics — reproducible, SQL-backed,
+              auditable at every step.
+        \item EBA-compliant IRRBB: correct shock construction, per-bucket
+              SOT haircut, multi-currency curves.
+        \item Behavioural realism: loan prepayment, NMD decay,
+              admin-rate floor — not purely contractual.
+        \item NII and EVE computed consistently from the \textit{same}
+              cash flow schedules, eliminating reconciliation gaps.
+        \item Dual reporting: ALM/Compliance view and Finance/CFO view,
+              both auto-generated from live SQL.
+        \item Interactive gap analysis via Power BI.
+      \end{itemize}
+
+    \column{0.44\textwidth}
+      \textbf{Planned: balance sheet optimisation}
+
+      The next phase will add a fast approximation layer
+      (\texttt{optimize\_prep}) that pre-computes vectorised
+      sensitivity formulas, enabling:
+      \begin{itemize}
+        \item Portfolio optimisation subject to SOT, LCR, and NSFR
+              constraints.
+        \item Efficient frontier analysis for NIM vs ΔEVE.
+        \item Hedging strategy evaluation (IRS overlay selection).
+      \end{itemize}
+
+      Methods are currently in development and not yet
+      production-ready.
+
+      \vspace{8pt}
+      \begin{exampleblock}{LabBank as an educational tool}
+        \small Every formula in this presentation has a direct SQL or
+        Python equivalent in the codebase.
+        The system is designed to make ALM maths \textit{concrete} —
+        not abstract — by connecting equations to actual data rows.
+      \end{exampleblock}
+  \end{columns}
+\end{frame}
+
+% ── Final slide ───────────────────────────────────────────────────────────────
+\begin{frame}[plain]
+  \begin{center}
+    \vspace{20pt}
+    {\Large\textbf{\textcolor{labdark}{LabBank}}}\\[8pt]
+    {\large\textcolor{labgrey}{Laboratory Banking ALM System}}\\[20pt]
+    \begin{tabular}{ll}
+      \textbf{Modules:}    & Balance sheet · Cash flows · IRRBB · Liquidity \\[4pt]
+      \textbf{Framework:}  & EBA IRRBB Guidelines (2018) \\[4pt]
+      \textbf{Technology:} & Python · SQL Server · Jupyter · Power BI \\[4pt]
+      \textbf{Next:}       & Balance sheet optimisation \\
+    \end{tabular}
+    \vspace{20pt}\\
+    \textcolor{labgrey}{\small Report date: 2024-12-31 \quad|\quad Currency: PLN}
+  \end{center}
+\end{frame}
+
+\end{document}

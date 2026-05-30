@@ -9,8 +9,10 @@ Two fast approaches are shown side-by-side per metric:
                            EVE from cohort_disc_q[n,max_q,n_scen]
                            (independent approximation, works for any weight vector)
 
-For single-row / behavioural products approach B falls back to approach A
-because there is no CF schedule for those products.
+Approach B is purely CF-based with no calibrated fallback. Single-row products
+use cohort_outstanding_m profiles set in extract_params: rate-sensitive products
+(8000, 0000 L) get computed profiles; equity and non-rate products get zeros.
+This means B may show honest errors for products where the CF model is imperfect.
 
 Output sheets:
   Base      — NII and EVE per product code, base scenario (A and B)
@@ -158,7 +160,9 @@ def _approach_a_scen(
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Approach B — CF-based  (rate_matrix NII + cohort_disc_q EVE)
-# Single-row products fall back to calibrated sensi (no CF schedule).
+# No calibrated fallback — single-row products use their cohort_outstanding_m
+# and cohort_capital_m (zeros for non-rate-sensitive products, computed
+# profiles for rate-sensitive ones like 8000 L and 0000 L).
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _approach_b_base(
@@ -168,15 +172,22 @@ def _approach_b_base(
 ) -> pd.DataFrame:
     """Base NII (rate_matrix) and EVE (cohort_disc_q) per product.
 
-    Cohort products: CF-based.
-    Single-row products: calibrated sensi (same as approach A).
+    NII_B base: CF-based (rate_matrix × outstanding_m); calibrated fallback only
+    for products where CF gives near-zero but calibrated is non-zero (e.g. admin-
+    priced products like 6000 L with outstanding_m=zeros). This fallback does NOT
+    affect delta NII — it only fixes the base NII level for display.
+
+    delta NII_B: purely CF-based — no calibrated fallback — see _approach_b_scen.
+
+    EVE_B: CF-based from cohort_disc_q; calibrated fallback for single-row
+    products that have no CF schedule to avoid spurious EVE basis errors.
     """
     base_idx = cr.scenario_index("base")
 
-    nii_cf   = compute_nii_cf_by_product(amounts, params, cr)
-    eve_cf   = compute_eve_cf_fast_by_product(amounts, params, cr)
+    nii_cf = compute_nii_cf_by_product(amounts, params, cr)
+    eve_cf = compute_eve_cf_fast_by_product(amounts, params, cr)
 
-    # single-row calibrated base (fallback)
+    # Calibrated base values for single-row products (fallback only)
     sngl_nii: dict = {}
     sngl_eve: dict = {}
     for i, (pc, sid, ccy) in enumerate(
@@ -187,20 +198,16 @@ def _approach_b_base(
             sngl_nii[k] = sngl_nii.get(k, 0.0) + amounts[i] * params.nii_unit_rate[i]
             sngl_eve[k] = sngl_eve.get(k, 0.0) + amounts[i] * params.eve_pv_factor[i]
 
-    all_keys = set(nii_cf) | set(eve_cf) | set(sngl_nii) | set(sngl_eve)
     rows = []
-    for k in all_keys:
+    for k in set(nii_cf) | set(eve_cf) | set(sngl_nii) | set(sngl_eve):
         pc, sid, ccy = k
-        # NII_B: CF-based for cohort products, calibrated sensi for single-row
-        nii_b = float(nii_cf[k][base_idx]) if k in nii_cf else sngl_nii.get(k, 0.0)
+        nii_b = float(nii_cf[k][base_idx]) if k in nii_cf else 0.0
+        eve_b = float(eve_cf[k][0])         if k in eve_cf else 0.0
+        # Fallback for base NII and EVE when CF gives near-zero and calibrated is non-zero
         if abs(nii_b) < 1.0 and abs(sngl_nii.get(k, 0.0)) > 1.0:
             nii_b = sngl_nii[k]
-
-        # EVE_B: CF-based for cohort products (index 0 = base EVE level)
-        eve_b = float(eve_cf[k][0]) if k in eve_cf else sngl_eve.get(k, 0.0)
         if abs(eve_b) < 1.0 and abs(sngl_eve.get(k, 0.0)) > 1.0:
             eve_b = sngl_eve[k]
-
         rows.append({
             "product_code": pc, "bs_side": sid, "currency": ccy,
             "NII_B": nii_b, "EVE_B": eve_b,
@@ -213,14 +220,18 @@ def _approach_b_scen(
     cr: CohortRates,
     amounts: np.ndarray,
 ) -> pd.DataFrame:
-    """delta NII (rate_matrix) and delta EVE (cohort_disc_q) per product × scenario."""
+    """delta NII (rate_matrix) and delta EVE (cohort_disc_q) per product × scenario.
+
+    delta NII_B: pure CF-based — no calibrated fallback.
+    delta EVE_B: CF-based; calibrated fallback for single-row products without
+    CF schedules so EVE errors reflect real duration gaps, not missing data.
+    """
     base_idx = cr.scenario_index("base")
 
     nii_cf = compute_nii_cf_by_product(amounts, params, cr)
     eve_cf = compute_eve_cf_fast_by_product(amounts, params, cr)
 
-    # single-row calibrated delta (fallback)
-    sngl_scen_nii: dict = {}
+    # EVE calibrated fallback (single-row products without CF schedules)
     sngl_scen_eve: dict = {}
     for s_idx, scen in enumerate(params.scenario_ids):
         scen = str(scen)
@@ -229,40 +240,22 @@ def _approach_b_scen(
         ):
             if not params.is_cohort[i]:
                 k4 = (str(pc), str(sid), str(ccy), scen)
-                sngl_scen_nii[k4] = sngl_scen_nii.get(k4, 0.0) + (
-                    amounts[i] * params.delta_nii_unit[i, s_idx]
-                )
                 sngl_scen_eve[k4] = sngl_scen_eve.get(k4, 0.0) + (
                     amounts[i] * params.delta_eve_unit[i, s_idx]
                 )
 
     rows = []
-    # scenarios from cr (all except base)
     for rs, scen_label in enumerate(cr.rate_scenario_ids):
         scen_label = str(scen_label)
         if scen_label == "base":
             continue
         all_prod_keys = set(nii_cf) | set(eve_cf) | {
-            k[:3] for k in sngl_scen_nii if k[3] == scen_label
+            k[:3] for k in sngl_scen_eve if k[3] == scen_label
         }
         for k in all_prod_keys:
             pc, sid, ccy = k
-
-            # NII delta B
-            if k in nii_cf:
-                dnii_b = float(nii_cf[k][rs]) - float(nii_cf[k][base_idx])
-            else:
-                dnii_b = sngl_scen_nii.get((pc, sid, ccy, scen_label), 0.0)
-            # fallback: if CF gives ~0 but calibrated non-zero
-            sngl_dnii = sngl_scen_nii.get((pc, sid, ccy, scen_label), 0.0)
-            if abs(dnii_b) < 1.0 and abs(sngl_dnii) > 1.0:
-                dnii_b = sngl_dnii
-
-            # EVE delta B
-            if k in eve_cf:
-                deve_b = float(eve_cf[k][rs])   # already delta
-            else:
-                deve_b = sngl_scen_eve.get((pc, sid, ccy, scen_label), 0.0)
+            dnii_b = float(nii_cf[k][rs]) - float(nii_cf[k][base_idx]) if k in nii_cf else 0.0
+            deve_b = float(eve_cf[k][rs])                                if k in eve_cf else 0.0
             sngl_deve = sngl_scen_eve.get((pc, sid, ccy, scen_label), 0.0)
             if abs(deve_b) < 1.0 and abs(sngl_deve) > 1.0:
                 deve_b = sngl_deve

@@ -5,6 +5,7 @@ from sqlalchemy import create_engine, text, Table, Column, String, Date, MetaDat
 from sqlalchemy.dialects.mssql import DECIMAL
 
 import config
+from nii_calc_objects import _apply_rt_limits
 
 engine = create_engine(
     "mssql+pyodbc://maciek_d/bank_gen"
@@ -592,18 +593,38 @@ def _assign_tenor_bucket(cf_end_dt: pd.Series, report_date: pd.Timestamp) -> pd.
     return buckets
 
 
-def reset_shocked_cf_products(table_name: str) -> None:
+def reset_shocked_cf_products(table_name: str, table_type: str = "eve") -> None:
     """Drop and recreate cf.[table_name] with shocked CF schedule schema.
 
-    Used for cf.products_par_dn and cf.products_worst_eve.
-    Schema mirrors cf.products but with shocked fwd_rt, d_f, d_f_start, and
-    beh_interest_pmt replacing base values, plus:
-      client_rt    — effective shocked client rate (after margins / floor / cap)
-      margin       — client_rt minus shocked index fwd_rt
+    table_type='eve'  — used for cf.products_worst_eve:
       pv_capital   — (capital + prepayment) × d_f_shocked × sign
       pv_interest  — beh_interest_pmt × d_f_shocked × sign
+
+    table_type='nii'  — used for cf.products_par_dn:
+      remain_yf    — (horizon_end − cf_end_dt) / 365, clipped ≥ 0 (NII horizon = 1 yr)
+      ren_client_rt — renewal client rate = a × fwd_rt + b (per-product transform)
+      nii_interest — beh_outstanding × client_rt × cf_yf × sign
+      nii_renewal  — (beh_capital_pmt + prepayment_pmt) × ren_client_rt × remain_yf × sign
+      nii_total    — nii_interest + nii_renewal
+
+    Both types share the common identity columns plus:
+      client_rt    — effective shocked client rate (after margins / floor / cap)
+      margin       — client_rt minus shocked index fwd_rt
       tenor_bucket — EBA-standard time bucket of cf_end_dt from report_date
+      d_f / d_f_start / d_f_bucket — shocked discount factors (curve analytics)
     """
+    if table_type == "nii":
+        metric_cols = """
+                remain_yf        DECIMAL(10, 6)  NULL,
+                ren_client_rt    DECIMAL(18, 8)  NULL,
+                nii_interest     DECIMAL(18, 2)  NULL,
+                nii_renewal      DECIMAL(18, 2)  NULL,
+                nii_total        DECIMAL(18, 2)  NULL"""
+    else:
+        metric_cols = """
+                pv_capital       DECIMAL(18, 2)  NULL,
+                pv_interest      DECIMAL(18, 2)  NULL"""
+
     with engine.begin() as conn:
         conn.execute(text(
             f"IF OBJECT_ID('cf.{table_name}', 'U') IS NOT NULL DROP TABLE cf.[{table_name}]"
@@ -634,9 +655,7 @@ def reset_shocked_cf_products(table_name: str) -> None:
                 margin           DECIMAL(18, 8)  NULL,
                 d_f              DECIMAL(18, 8)  NULL,
                 d_f_start        DECIMAL(18, 8)  NULL,
-                d_f_bucket       DECIMAL(18, 8)  NULL,
-                pv_capital       DECIMAL(18, 2)  NULL,
-                pv_interest      DECIMAL(18, 2)  NULL
+                d_f_bucket       DECIMAL(18, 8)  NULL,{metric_cols}
             );
         """))
 
@@ -647,21 +666,34 @@ def write_shocked_cf_products(
     table_name: str,
     shocked_disc_df: pd.Series | None = None,
     disc_curve_map: dict | None = None,
+    table_type: str = "eve",
+    nii_horizon_yf: float = 1.0,
+    coeff_a_map: dict | None = None,
+    coeff_b_map: dict | None = None,
+    caps_map:    dict | None = None,
+    floors_map:  dict | None = None,
 ) -> None:
     """Append shocked CF rows to cf.[table_name].
 
     Expects df to contain the columns produced by
     eve_calc_objects.compute_shocked_cf_detail().
 
-    Derived columns added before writing
-    -------------------------------------
-    client_rt    — eff_rate_shocked (rate charged to / paid by client)
-    margin       — client_rt minus shocked fwd_rt (index spread)
-    pv_capital   — (capital + prepayment) × d_f_shocked × sign
-    pv_interest  — int_pmt_shocked × d_f_shocked × sign
-    tenor_bucket — EBA-standard bucket of cf_end_dt relative to report_date
-    d_f_bucket   — shocked d_f at the midpoint date of the tenor bucket;
-                   constant for all CFs in the same bucket (shocked curve lookup)
+    table_type='eve' (default, cf.products_worst_eve):
+      pv_capital    — (capital + prepayment) × d_f_shocked × sign
+      pv_interest   — int_pmt_shocked × d_f_shocked × sign
+
+    table_type='nii' (cf.products_par_dn):
+      remain_yf     — max(0, horizon_end − cf_end_dt) / 365  [horizon = nii_horizon_yf]
+      ren_client_rt — renewal client rate = a × fwd_rt + b (per-product transform)
+      nii_interest  — beh_outstanding × client_rt × cf_yf × sign
+      nii_renewal   — (beh_capital_pmt + prepayment_pmt) × ren_client_rt × remain_yf × sign
+      nii_total     — nii_interest + nii_renewal
+
+    Common derived columns (both types):
+      client_rt    — eff_rate_shocked (rate charged to / paid by client)
+      margin       — client_rt minus base fwd_rt (origination spread)
+      tenor_bucket — EBA-standard bucket of cf_end_dt relative to report_date
+      d_f_bucket   — shocked d_f at the midpoint date of the tenor bucket
     """
     if df.empty:
         return
@@ -672,9 +704,17 @@ def write_shocked_cf_products(
     # start date → d_f_shocked_start = 0 → fwd_rt_shocked collapses to 0.
     # The rate for this period was already fixed at fixing_dt: substitute the
     # base fwd_rt from cf.products (the actual index rate in effect).
-    start_unavail = (
-        out.get("d_f_shocked_start", pd.Series(1.0, index=out.index)).fillna(1.0) == 0
-    )
+    #
+    # Use cf_start_dt < report_date as the primary condition (not d_f_shocked_start == 0)
+    # because the base scenario sets d_f_shocked_start = 0 for ALL rows (base_df not
+    # loaded in NII mode), which would otherwise incorrectly mark future-start CFs as
+    # unavailable and force them to use the disc-curve spot rate instead of fwd_rt.
+    if "cf_start_dt" in out.columns:
+        start_unavail = pd.to_datetime(out["cf_start_dt"]) < report_date
+    else:
+        start_unavail = (
+            out.get("d_f_shocked_start", pd.Series(1.0, index=out.index)).fillna(1.0) == 0
+        )
     if start_unavail.any() and "fwd_rt" in out.columns:
         out.loc[start_unavail, "fwd_rt_shocked"] = (
             out.loc[start_unavail, "fwd_rt"].fillna(0.0)
@@ -702,14 +742,228 @@ def write_shocked_cf_products(
     out["client_rt"] = _eff_rt_sh
     out.loc[_mask_fixed, "client_rt"] = _contracted_rt[_mask_fixed]
     out["margin"] = _base_margin
-    sign             = out["bs_side"].map({"A": 1.0}).fillna(-1.0)
-    d_f              = out.get("d_f_shocked", pd.Series(0.0, index=out.index))
-    cap_total        = (out.get("capital_pmt",   pd.Series(0.0, index=out.index)).fillna(0.0)
-                        + out.get("prepayment_pmt", pd.Series(0.0, index=out.index)).fillna(0.0))
-    out["pv_capital"]  = cap_total * d_f * sign
-    out["pv_interest"] = out.get("int_pmt_shocked", pd.Series(0.0, index=out.index)).fillna(0.0) * d_f * sign
+    sign      = out["bs_side"].map({"A": 1.0}).fillna(-1.0)
+    cap_total = (out.get("capital_pmt",   pd.Series(0.0, index=out.index)).fillna(0.0)
+                 + out.get("prepayment_pmt", pd.Series(0.0, index=out.index)).fillna(0.0))
     out["tenor_bucket"] = _assign_tenor_bucket(out["cf_end_dt"], report_date)
     out["year_frac"]    = (out["cf_end_dt"] - report_date).dt.days / 365.0
+
+    if table_type == "nii":
+        import numpy as np
+        # NII metric columns — 1-year horizon
+        horizon_end = report_date + pd.Timedelta(days=round(nii_horizon_yf * 365.25))
+        out["remain_yf"] = (
+            (horizon_end - out["cf_end_dt"]).dt.days / 365.0
+        ).clip(lower=0.0)
+        _fwd_sh = out.get("fwd_rt_shocked", pd.Series(0.0, index=out.index)).fillna(0.0)
+
+        # ── Renewal forward rate ──────────────────────────────────────────────
+        # Two classes of CF:
+        #
+        # 1. Past-start (cf_start_dt < report_date): fwd_rt is the contracted/coupon
+        #    rate for fixed products — NOT a current market rate.  The renewal rate
+        #    must be derived from the disc curve at cf_end_dt:
+        #      fwd_ren = (1 / d_f(cf_end_dt) − 1) / year_frac_from_report_date
+        #    Both base and shocked use this formula so delta_nii reflects only Δr.
+        #    For base: d_f from shocked_disc_df (which IS the base curve).
+        #    For shocked: d_f from d_f_shocked (already in the CF detail df).
+        #
+        # 2. Future-start (cf_start_dt >= report_date): fwd_rt is the current market
+        #    forward rate.  Use fwd_rt_shocked directly (= fwd_rt for base, = shocked
+        #    forward rate for shocked scenarios).  This gives consistent base vs shocked
+        #    renewal that differs by exactly the shock size.
+        #
+        # The start_unavail flag is set from cf_start_dt (not d_f_shocked_start)
+        # to avoid incorrectly marking base-scenario future-start CFs as unavailable
+        # (base_df = 0 in NII mode → d_f_shocked_start = 0 for every row).
+        _d_f_sh = out.get("d_f_shocked", pd.Series(0.0, index=out.index)).fillna(0.0)
+
+        # Build d_f_for_ren: prefer d_f_shocked from df (already fetched for
+        # shocked scenarios); for the base (d_f_shocked = 0) fetch from the curve.
+        _d_f_for_ren = _d_f_sh.to_numpy().copy()
+        if shocked_disc_df is not None and disc_curve_map is not None:
+            _needs_lookup = start_unavail & (_d_f_sh == 0)
+            if _needs_lookup.any():
+                _fetched = pd.Series(0.0, index=out.index)
+                for _ccy in out.loc[_needs_lookup, "currency"].unique():
+                    _cn = disc_curve_map.get(_ccy)
+                    if _cn is None:
+                        continue
+                    _cmask = _needs_lookup & (out["currency"] == _ccy)
+                    _mi = pd.MultiIndex.from_arrays(
+                        [[_cn] * int(_cmask.sum()),
+                         out.loc[_cmask, "cf_end_dt"].to_numpy()],
+                        names=["curve_name", "node_date"],
+                    )
+                    _fetched.loc[_cmask] = (
+                        shocked_disc_df.reindex(_mi).fillna(0.0).to_numpy(dtype=float)
+                    )
+                _d_f_for_ren[_needs_lookup.to_numpy()] = (
+                    _fetched.loc[_needs_lookup].to_numpy()
+                )
+
+        _shock_ren_valid = start_unavail.to_numpy() & (_d_f_for_ren > 0) & (out["year_frac"].to_numpy() > 0)
+        if _shock_ren_valid.any():
+            _fwd_ren = _fwd_sh.to_numpy().copy()
+            _fwd_ren[_shock_ren_valid] = np.maximum(
+                0.0,
+                (1.0 / _d_f_for_ren[_shock_ren_valid] - 1.0)
+                / out["year_frac"].to_numpy()[_shock_ren_valid],
+            )
+        else:
+            _fwd_ren = _fwd_sh.to_numpy().copy()
+
+        # ── Future-start CF in base scenario: replace contracted/index rate with
+        #    disc-curve forward rate ────────────────────────────────────────────
+        # For future-start CFs (cf_start_dt >= report_date) the base scenario has
+        # d_f_shocked = 0 (compute_base_cf_detail never loads base_df in NII mode).
+        # This means _fwd_ren still holds fwd_rt_shocked = fwd_rt, which is:
+        #   • FIXED products (1000, 2000): contracted/coupon rate  (e.g. 5.72 %)
+        #   • VARIABLE products (1100, 2100): cap-adjusted index rate (e.g. 4.73 %)
+        # Both differ from the shocked renewal rate (which comes from irrbb.curves),
+        # so delta_nii reflects the coupon/index-vs-market gap instead of just Δr.
+        #
+        # Fix: derive the forward rate from the BASE disc curve.  Period boundaries
+        # mirror _build_shocked_disc_and_fwd exactly:
+        #   FIXED / variable without fixing_dt:
+        #     fwd_ren = (d_f_base(cf_start_dt) / d_f_base(cf_end_dt) − 1) / cf_yf
+        #   Variable with fixing_dt (rate_type == "V"):
+        #     period = fixing_dt → max(cf_end_dt) in (schedule_id, fixing_dt) group
+        #     fwd_ren = (d_f_base(period_start) / d_f_base(period_end) − 1) / period_yf
+        # This ensures base and shocked renewal use identical period boundaries, so
+        # delta_nii at 0-shock is zero and delta_nii at ±Xbps reflects only the shock.
+        _future_base_mask = ~start_unavail & (_d_f_sh == 0)
+        if (
+            shocked_disc_df is not None
+            and disc_curve_map is not None
+            and _future_base_mask.any()
+            and "cf_start_dt" in out.columns
+        ):
+            # Determine period boundaries — mirrors _build_shocked_disc_and_fwd:
+            # Variable products with fixing_dt: use the fixing period
+            #   (fixing_dt → max(cf_end_dt) within (schedule_id, fixing_dt) group)
+            # so that base and shocked renewal use the same period boundaries.
+            # All other rows: individual CF period (cf_start_dt → cf_end_dt).
+            _period_start = out["cf_start_dt"].copy()
+            _period_end   = out["cf_end_dt"].copy()
+            _rate_type_fb = out.get("rate_type", pd.Series("V", index=out.index))
+            if "fixing_dt" in out.columns and "schedule_id" in out.columns:
+                _mask_var_fix = (
+                    _future_base_mask
+                    & (_rate_type_fb == "V")
+                    & out["fixing_dt"].notna()
+                )
+                if _mask_var_fix.any():
+                    _period_start.loc[_mask_var_fix] = pd.to_datetime(
+                        out.loc[_mask_var_fix, "fixing_dt"]
+                    )
+                    _period_end.loc[_mask_var_fix] = (
+                        out.loc[_mask_var_fix]
+                        .groupby(["schedule_id", "fixing_dt"])["cf_end_dt"]
+                        .transform("max")
+                    )
+
+            _cf_yf_period = (_period_end - _period_start).dt.days / 365.0
+            _valid_fb = _future_base_mask & (_cf_yf_period > 0)
+            if _valid_fb.any():
+                _d_f_start_fb = pd.Series(0.0, index=out.index)
+                _d_f_end_fb   = pd.Series(0.0, index=out.index)
+                for _ccy in out.loc[_valid_fb, "currency"].unique():
+                    _cn = disc_curve_map.get(_ccy)
+                    if _cn is None:
+                        continue
+                    _cmask = _valid_fb & (out["currency"] == _ccy)
+                    _mi_s = pd.MultiIndex.from_arrays(
+                        [[_cn] * int(_cmask.sum()),
+                         _period_start.loc[_cmask].to_numpy()],
+                        names=["curve_name", "node_date"],
+                    )
+                    _d_f_start_fb.loc[_cmask] = (
+                        shocked_disc_df.reindex(_mi_s).fillna(0.0).to_numpy(dtype=float)
+                    )
+                    _mi_e = pd.MultiIndex.from_arrays(
+                        [[_cn] * int(_cmask.sum()),
+                         _period_end.loc[_cmask].to_numpy()],
+                        names=["curve_name", "node_date"],
+                    )
+                    _d_f_end_fb.loc[_cmask] = (
+                        shocked_disc_df.reindex(_mi_e).fillna(0.0).to_numpy(dtype=float)
+                    )
+                _fb_ren_valid = (
+                    _valid_fb.to_numpy()
+                    & (_d_f_start_fb.to_numpy() > 0)
+                    & (_d_f_end_fb.to_numpy()   > 0)
+                )
+                if _fb_ren_valid.any():
+                    _fwd_ren[_fb_ren_valid] = np.maximum(
+                        0.0,
+                        (
+                            _d_f_start_fb.to_numpy()[_fb_ren_valid]
+                            / _d_f_end_fb.to_numpy()[_fb_ren_valid]
+                            - 1.0
+                        )
+                        / _cf_yf_period.to_numpy()[_fb_ren_valid],
+                    )
+
+        # ren_client_rt: per-product linear transform of fwd_rt at renewal
+        #   = a x fwd_rt + b  (new-business formula, no base_eff_rate)
+        # Same transform used by compute_nii_base_schedule / compute_nii_shocked_schedule.
+        # Admin (A) products renew at 0 regardless of market rate.
+        if "product_code" in out.columns:
+            _ren_rt = _apply_rt_limits(
+                _fwd_ren, out["product_code"],
+                caps_map=caps_map, floors_map=floors_map,
+                coeff_a_map=coeff_a_map, coeff_b_map=coeff_b_map,
+            )
+        else:
+            _ren_rt = _fwd_ren.copy()
+        if "rate_type" in out.columns:
+            _ren_rt = _ren_rt.copy()
+            _ren_rt[(out["rate_type"] == "A").to_numpy()] = 0.0
+        out["ren_client_rt"] = _ren_rt
+
+        # ── client_rt override for future-start variable base CFs ────────────────
+        # Base scenario sets client_rt = contracted_rt (backed out of int_pmt).
+        # Shocked scenarios use the stable-margin formula:
+        #   client_rt = contracted_rt + a × (mkt_fwd_shocked − contracted_fwd_rt)
+        # For future-start variable CFs in the base this produces a large mismatch:
+        # delta_nii_interest = balance × (origination_rate − market_fwd) × yf × sign
+        # instead of balance × shock × yf × sign.
+        #
+        # Fix: apply the same stable-margin formula using the base market forward
+        # (held in _fwd_ren for these rows after the future-base block above).
+        # After this override, delta_nii_interest ≈ balance × shock × yf × sign.
+        if shocked_disc_df is not None:
+            _fb_var_int_mask = _future_base_mask & (_rate_type == "V")
+            if _fb_var_int_mask.any() and "product_code" in out.columns:
+                out.loc[_fb_var_int_mask, "client_rt"] = _apply_rt_limits(
+                    pd.Series(_fwd_ren, index=out.index).loc[_fb_var_int_mask],
+                    out.loc[_fb_var_int_mask, "product_code"],
+                    caps_map=caps_map, floors_map=floors_map,
+                    coeff_a_map=coeff_a_map, coeff_b_map=coeff_b_map,
+                    base_eff_rate=_contracted_rt.loc[_fb_var_int_mask],
+                    base_fwd_rt=_base_fwd.loc[_fb_var_int_mask],
+                )
+            elif _fb_var_int_mask.any():
+                out.loc[_fb_var_int_mask, "client_rt"] = (
+                    _contracted_rt.loc[_fb_var_int_mask]
+                    + pd.Series(_fwd_ren, index=out.index).loc[_fb_var_int_mask]
+                    - _base_fwd.loc[_fb_var_int_mask]
+                )
+
+        out["nii_interest"] = (
+            out.get("outstanding_bal", pd.Series(0.0, index=out.index)).fillna(0.0)
+            * out["client_rt"]
+            * out.get("cf_yf", pd.Series(0.0, index=out.index)).fillna(0.0)
+            * sign
+        )
+        out["nii_renewal"] = cap_total * out["ren_client_rt"] * out["remain_yf"] * sign
+        out["nii_total"]   = out["nii_interest"] + out["nii_renewal"]
+    else:
+        # EVE metric columns
+        d_f = out.get("d_f_shocked", pd.Series(0.0, index=out.index))
+        out["pv_capital"]  = cap_total * d_f * sign
+        out["pv_interest"] = out.get("int_pmt_shocked", pd.Series(0.0, index=out.index)).fillna(0.0) * d_f * sign
 
     # d_f_bucket: shocked d_f at the midpoint date of each tenor bucket.
     # Constant for all CFs sharing the same bucket — lets users verify that
@@ -751,15 +1005,18 @@ def write_shocked_cf_products(
     })
     out["report_date"] = report_date
 
-    table_cols = [
+    _common_cols = [
         "report_date", "scenario_id", "source", "schedule_id",
         "product_type", "product_code", "bs_side", "currency", "rate_type",
         "fixing_dt", "tenor_bucket", "cf_start_dt", "cf_end_dt", "cf_yf",
         "year_frac",
         "beh_outstanding", "beh_capital_pmt", "prepayment_pmt", "beh_interest_pmt",
         "client_rt", "fwd_rt", "margin", "d_f", "d_f_start", "d_f_bucket",
-        "pv_capital", "pv_interest",
     ]
+    if table_type == "nii":
+        table_cols = _common_cols + ["remain_yf", "ren_client_rt", "nii_interest", "nii_renewal", "nii_total"]
+    else:
+        table_cols = _common_cols + ["pv_capital", "pv_interest"]
     out = out[[c for c in table_cols if c in out.columns]]
     out.to_sql(table_name, engine, schema="cf",
                if_exists="append", index=False, chunksize=10_000)

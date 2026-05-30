@@ -7,7 +7,7 @@ Computes EVE and NII SOT per EBA/GL/2018/02 Annex III with the 50%
 supervisory haircut applied at the TIME-BUCKET level — NOT at the total.
 
 Produces output/eba_sot_results.xlsx:
-  EVE_SOT_detail  — per (scenario, currency, EBA bucket): net_cf, d_f_base,
+  EVE_SOT_detail  — per (scenario, currency, EBA bucket): net_cf, d_f_base,okay
                     d_f_shocked, delta_pv, delta_pv_reg
   EVE_SOT_summary — per (scenario, currency): ΔEVE, ΔEVE_reg, sot_eve_pct,
                     sot_eve_pct_reg

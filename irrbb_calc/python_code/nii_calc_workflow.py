@@ -23,6 +23,7 @@ import pandas as pd
 import config
 import sql_setup
 import nii_calc_objects as nii_obj
+import eve_calc_objects as eve_obj
 import eba_shock_curves as esc
 import eba_sot_objects as sot
 
@@ -85,6 +86,12 @@ print(f"  Written {len(shocked_df):,} rows to irrbb.curves "
       f"({len(esc.ALL_SCENARIO_IDS)} scenarios × "
       f"{mkt_df.groupby('curve_name').ngroups} curves)")
 
+# Append own scenarios (±100 bps, ±1 bps) to irrbb.curves
+_own_curves_df = esc.build_own_shocked_curves(mkt_df, config.report_date, nii_floor_rate=NII_FLOOR)
+esc.write_irrbb_curves(sql_setup.engine, _own_curves_df, config.report_date, replace=False)
+print(f"  Appended {len(_own_curves_df):,} own-scenario rows to irrbb.curves "
+      f"({esc.OWN_SCENARIO_IDS})")
+
 esc.generate_shock_excel(
     mkt_df, config.report_date, CURRENCY,
     output_path="output/irrbb_shock_curves.xlsx",
@@ -110,6 +117,23 @@ except Exception:
     swap_df = pd.DataFrame()
 all_beh = pd.concat([beh_df, swap_df], ignore_index=True) if not swap_df.empty else beh_df
 
+# Load the base discount curve once — used for renewal rate derivation in
+# compute_nii_base_schedule (same formula as shocked scenario).
+_base_disc_parts_step3 = []
+for _ccy, _curve_name in DISC_CURVE_MAP.items():
+    try:
+        _base_disc_parts_step3.append(
+            esc.load_irrbb_disc_curve(
+                sql_setup.engine, _curve_name, "base", config.report_date
+            )
+        )
+    except Exception:
+        pass
+_base_disc_step3 = (
+    pd.concat(_base_disc_parts_step3).sort_index()
+    if _base_disc_parts_step3 else None
+)
+
 base_detail, base_summary = nii_obj.compute_nii_base(
     all_beh, config.report_date, horizon_yf=HORIZON_YF,
     caps_map=CAPS_MAP, floors_map=FLOORS_MAP,
@@ -123,6 +147,7 @@ base_sched = nii_obj.compute_nii_base_schedule(
     all_beh, config.report_date, HORIZON_YF,
     caps_map=CAPS_MAP, floors_map=FLOORS_MAP,
     coeff_a_map=COEFF_A_MAP, coeff_b_map=COEFF_B_MAP,
+    base_disc_df=_base_disc_step3, disc_curve_map=DISC_CURVE_MAP,
 )
 sql_setup.write_nii_results(base_sched, config.report_date)
 print(f"  {'base':8s}: NII = {base_sched['nii_total'].sum():+,.0f}  "
@@ -170,6 +195,89 @@ for scenario_id in esc.ALL_SCENARIO_IDS:
 
 shocked_detail = pd.concat(shocked_detail_parts, ignore_index=True) \
                  if shocked_detail_parts else pd.DataFrame()
+
+# ── 4b. NII analytical CF tables ──────────────────────────────────────────────
+# nii_base_scenario  — base rates, horizon-cut CFs
+# nii_par_scenarios  — par_up / par_dn shocked CFs
+# nii_own_scenarios  — own_100_up/dn, own_1_up/dn shocked CFs
+print("Writing NII analytical CF tables to SQL...")
+
+for _t in ("nii_base_scenario", "nii_par_scenarios", "nii_own_scenarios"):
+    sql_setup.reset_shocked_cf_products(_t, table_type="nii")
+
+# Base
+_base_disc_parts = []
+for ccy, curve_name in DISC_CURVE_MAP.items():
+    try:
+        _base_disc_parts.append(
+            esc.load_irrbb_disc_curve(sql_setup.engine, curve_name, "base", config.report_date)
+        )
+    except Exception:
+        pass
+_base_disc = pd.concat(_base_disc_parts).sort_index() if _base_disc_parts else None
+_base_cf = eve_obj.compute_base_cf_detail(all_beh, scenario_id="base")
+sql_setup.write_shocked_cf_products(
+    _base_cf, config.report_date, "nii_base_scenario",
+    shocked_disc_df=_base_disc, disc_curve_map=DISC_CURVE_MAP, table_type="nii",
+    coeff_a_map=COEFF_A_MAP, coeff_b_map=COEFF_B_MAP,
+    caps_map=CAPS_MAP, floors_map=FLOORS_MAP,
+)
+print(f"  nii_base_scenario: {len(_base_cf):,} CF rows (base)")
+
+# par_up / par_dn
+for _sid in ("par_up", "par_dn"):
+    _disc_parts = []
+    for ccy, curve_name in DISC_CURVE_MAP.items():
+        try:
+            _disc_parts.append(
+                esc.load_irrbb_disc_curve(sql_setup.engine, curve_name, _sid, config.report_date)
+            )
+        except Exception:
+            pass
+    if not _disc_parts:
+        continue
+    _disc = pd.concat(_disc_parts).sort_index()
+    _cf = eve_obj.compute_shocked_cf_detail(
+        all_beh, shocked_disc_df=_disc, disc_curve_map=DISC_CURVE_MAP,
+        scenario_id=_sid, eve_floor_rate=NII_FLOOR,
+        caps_map=CAPS_MAP, floors_map=FLOORS_MAP,
+        coeff_a_map=COEFF_A_MAP, coeff_b_map=COEFF_B_MAP,
+    )
+    sql_setup.write_shocked_cf_products(
+        _cf, config.report_date, "nii_par_scenarios",
+        shocked_disc_df=_disc, disc_curve_map=DISC_CURVE_MAP, table_type="nii",
+        coeff_a_map=COEFF_A_MAP, coeff_b_map=COEFF_B_MAP,
+        caps_map=CAPS_MAP, floors_map=FLOORS_MAP,
+    )
+    print(f"  nii_par_scenarios: {len(_cf):,} CF rows (scenario: {_sid})")
+
+# Own scenarios — curves already appended to irrbb.curves in step 1
+for _sid in esc.OWN_SCENARIO_IDS:
+    _disc_parts = []
+    for ccy, curve_name in DISC_CURVE_MAP.items():
+        try:
+            _disc_parts.append(
+                esc.load_irrbb_disc_curve(sql_setup.engine, curve_name, _sid, config.report_date)
+            )
+        except Exception:
+            pass
+    if not _disc_parts:
+        continue
+    _disc = pd.concat(_disc_parts).sort_index()
+    _cf = eve_obj.compute_shocked_cf_detail(
+        all_beh, shocked_disc_df=_disc, disc_curve_map=DISC_CURVE_MAP,
+        scenario_id=_sid, eve_floor_rate=NII_FLOOR,
+        caps_map=CAPS_MAP, floors_map=FLOORS_MAP,
+        coeff_a_map=COEFF_A_MAP, coeff_b_map=COEFF_B_MAP,
+    )
+    sql_setup.write_shocked_cf_products(
+        _cf, config.report_date, "nii_own_scenarios",
+        shocked_disc_df=_disc, disc_curve_map=DISC_CURVE_MAP, table_type="nii",
+        coeff_a_map=COEFF_A_MAP, coeff_b_map=COEFF_B_MAP,
+        caps_map=CAPS_MAP, floors_map=FLOORS_MAP,
+    )
+    print(f"  nii_own_scenarios: {len(_cf):,} CF rows "
+          f"(scenario: {_sid}  [{esc.OWN_SCENARIO_LABELS[_sid]}])")
 
 # ── 5. CF-based delta_nii summary from irrbb.nii_results ──────────────────────
 # delta_nii = nii_shocked - nii_base  (consistent with results.irrbb_report view)

@@ -19,6 +19,7 @@ Requirements
     pip install nbconvert[webpdf]          # for PDF via Chromium
     playwright install chromium            # one-time browser download
 """
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -27,10 +28,21 @@ NOTEBOOK = Path(__file__).with_name("bank_report.ipynb")
 PDF_OUT  = NOTEBOOK.with_suffix(".pdf")
 HTML_OUT = NOTEBOOK.with_suffix(".html")
 
+# Suppress Python runtime warnings (zmq Proactor event loop on Windows, etc.)
+_ENV = {**os.environ, "PYTHONWARNINGS": "ignore::RuntimeWarning"}
 
-def run(cmd: list[str]) -> int:
+
+def run(cmd: list[str], *, capture_stderr: bool = False) -> tuple[int, str]:
+    """Run a subprocess; return (returncode, captured_stderr)."""
     print(f"  $ {' '.join(cmd)}")
-    return subprocess.run(cmd, check=False).returncode
+    result = subprocess.run(
+        cmd,
+        check=False,
+        env=_ENV,
+        stderr=subprocess.PIPE if capture_stderr else None,
+    )
+    stderr_text = result.stderr.decode(errors="replace") if capture_stderr else ""
+    return result.returncode, stderr_text
 
 
 def main() -> None:
@@ -38,11 +50,12 @@ def main() -> None:
 
     # ── 1. Execute the notebook ────────────────────────────────────────────────
     print("Executing notebook…")
-    rc = run([
+    rc, _ = run([
         sys.executable, "-m", "nbconvert",
         "--to", "notebook",
         "--execute",
         "--ExecutePreprocessor.timeout=600",
+        "--log-level=ERROR",          # suppress INFO / WARNING lines
         "--inplace",
         nb,
     ])
@@ -52,24 +65,34 @@ def main() -> None:
 
     # ── 2. Try PDF via webpdf (headless Chromium) ──────────────────────────────
     print("\nConverting to PDF (webpdf)…")
-    rc = run([
+    rc, stderr = run([
         sys.executable, "-m", "nbconvert",
         "--to", "webpdf",
         "--no-input",
+        "--log-level=ERROR",
         "--output", str(PDF_OUT),
         nb,
-    ])
+    ], capture_stderr=True)
+
     if rc == 0:
         print(f"\nDone — PDF saved to: {PDF_OUT}")
         return
 
     # ── 3. Fallback: HTML ──────────────────────────────────────────────────────
-    print("\nwebpdf failed. Falling back to HTML…")
-    print("(To enable PDF export, run: pip install nbconvert[webpdf] && playwright install chromium)")
-    rc = run([
+    if "playwright" in stderr.lower() or "ModuleNotFoundError" in stderr:
+        print("\nwebpdf skipped — Playwright not installed. Falling back to HTML.")
+        print("  Tip: pip install nbconvert[webpdf] && playwright install chromium")
+    else:
+        # Unexpected webpdf failure — surface the actual error
+        print("\nwebpdf failed (unexpected error). Falling back to HTML.")
+        if stderr.strip():
+            print(stderr.strip())
+
+    rc, _ = run([
         sys.executable, "-m", "nbconvert",
         "--to", "html",
         "--no-input",
+        "--log-level=ERROR",
         "--output", str(HTML_OUT),
         nb,
     ])

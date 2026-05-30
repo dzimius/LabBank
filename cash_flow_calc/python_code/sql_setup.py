@@ -59,7 +59,30 @@ Products_d = Table(
     schema="cf",
 )
 
-_CF_TABLES    = ["products"]
+# cf.products_liq — deposit-only LIQ behavioral cashflows.
+# Same row structure as cf.products but without contractual (con_*) and
+# component (comp_*) columns.  Populated from bs.models_deposit_liq.
+Products_d_liq = Table(
+    "products_liq", metadata,
+    Column("schedule_id",      String(8),      primary_key=True, nullable=False),
+    Column("product_type",     String(1),      primary_key=True, nullable=False),
+    Column("product_code",     String(4),      nullable=False),
+    Column("currency",         String(3),      nullable=False),
+    Column("bs_side",          String(1),      nullable=False),
+    Column("cf_start_dt",      Date,           primary_key=True, nullable=False),
+    Column("cf_end_dt",        Date,           nullable=False),
+    Column("cf_yf",            DECIMAL(18, 6), nullable=False),
+    Column("d_f",              DECIMAL(18, 6), nullable=True),
+    Column("fwd_rt",           DECIMAL(18, 6), nullable=True),
+    Column("client_rt",        DECIMAL(18, 6), nullable=True),
+    Column("beh_outstanding",  DECIMAL(18, 2), nullable=True),
+    Column("beh_capital_pmt",  DECIMAL(18, 2), nullable=True),
+    Column("beh_interest_pmt", DECIMAL(18, 2), nullable=True),
+    Column("beh_total_pmt",    DECIMAL(18, 2), nullable=True),
+    schema="cf",
+)
+
+_CF_TABLES    = ["products", "products_liq"]
 _IRRBB_TABLES = ["liq_gap_orig", "liq_gap_beh", "ir_gap_orig", "ir_gap_beh", "ir_gap_beh_a"]
 
 
@@ -211,10 +234,20 @@ def sql_select_models_loan() -> pd.DataFrame:
     return pd.read_sql_query(query, engine, params={"report_date": config.report_date})
 
 
-def sql_select_models_deposit() -> pd.DataFrame:
+def sql_select_models_deposit_ir() -> pd.DataFrame:
     query = text("""
         SELECT product_code, tenor, outstanding
-        FROM bs.models_deposit
+        FROM bs.models_deposit_ir
+        WHERE report_date = :report_date
+        ORDER BY product_code, tenor
+    """)
+    return pd.read_sql_query(query, engine, params={"report_date": config.report_date})
+
+
+def sql_select_models_deposit_liq() -> pd.DataFrame:
+    query = text("""
+        SELECT product_code, tenor, outstanding
+        FROM bs.models_deposit_liq
         WHERE report_date = :report_date
         ORDER BY product_code, tenor
     """)
@@ -332,6 +365,10 @@ def compute_liq_gap(report_date: pd.Timestamp) -> tuple[pd.DataFrame, pd.DataFra
     Cash flows are placed at their payment date (cf_end_dt).
     Tenor buckets: '1D' (overnight), '1M'..'360M', '>30Y'.
     Columns: currency, bs_side, tenor_bucket, cf_end_dt, gap_cf.
+
+    Behavioural LIQ gap uses separate models per product type:
+      - Deposits : LIQ behavioral model from cf.products_liq
+      - Loans / fin_inst: IR behavioral model from cf.products (no separate LIQ model)
     """
     params = {"rd": report_date}
 
@@ -344,12 +381,23 @@ def compute_liq_gap(report_date: pd.Timestamp) -> tuple[pd.DataFrame, pd.DataFra
           AND COALESCE(con_total_pmt, 0) <> 0
     """)
 
+    # Deposits use LIQ model (cf.products_liq); loans + fin_inst use IR beh from cf.products
     beh_query = text("""
+        SELECT currency, bs_side, cf_end_dt,
+               beh_capital_pmt AS capital_pmt,
+               beh_interest_pmt AS int_pmt
+        FROM cf.products_liq
+        WHERE cf_end_dt > :rd
+          AND COALESCE(beh_total_pmt, 0) <> 0
+
+        UNION ALL
+
         SELECT currency, bs_side, cf_end_dt,
                beh_capital_pmt + COALESCE(prepayment_pmt, 0) AS capital_pmt,
                beh_interest_pmt AS int_pmt
         FROM cf.products
         WHERE cf_end_dt > :rd
+          AND product_type IN ('L', 'F')
           AND COALESCE(beh_total_pmt, 0) <> 0
     """)
 

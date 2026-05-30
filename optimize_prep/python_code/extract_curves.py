@@ -1,7 +1,7 @@
 """extract_curves.py
 ====================
 One-time extraction of yield curves from irrbb.curves
-→ opt_prep.monthly_curves SQL table + curve_tensors.npz + Excel
+-> opt_prep.monthly_curves SQL table + curve_tensors.npz + Excel
 
 Reads the shocked and base discount curve grids stored by nii_calc_workflow,
 interpolates them onto a regular monthly grid (month 1 … 360), and saves
@@ -45,28 +45,27 @@ _LABEL_MONTHS = list(range(1, 13)) + list(range(18, 61, 6)) + list(range(72, 121
 
 def _load_irrbb_curves() -> pd.DataFrame:
     query = text("""
-        SELECT scenario_id, curve_name, node_date, d_f
+        SELECT scenario_id, curve_name, n_days, d_f
         FROM   irrbb.curves
         WHERE  report_date = :rd
-        ORDER  BY scenario_id, curve_name, node_date
+        ORDER  BY scenario_id, curve_name, n_days
     """)
     df = pd.read_sql_query(query, engine, params={"rd": REPORT_DATE})
-    df["node_date"] = pd.to_datetime(df["node_date"])
+    df["n_days"] = df["n_days"].astype(float)
     return df
 
 
 def _interpolate_to_monthly(
-    node_dates: pd.Series,
+    n_days: pd.Series,
     d_f_values: pd.Series,
-    report_date: pd.Timestamp,
     n_months: int,
 ) -> np.ndarray:
     """Log-linear interpolation to monthly grid.
 
-    Monthly grid: report_date + m × (365.25/12) days for m = 1 … n_months.
+    Monthly grid: m × (365.25/12) days for m = 1 … n_months.
     Returns float64 array of shape (n_months,).
     """
-    x_nodes  = (node_dates - report_date).dt.days.to_numpy(dtype=float)
+    x_nodes  = n_days.to_numpy(dtype=float)
     y_nodes  = np.log(np.maximum(d_f_values.to_numpy(dtype=float), 1e-12))
     x_target = np.arange(1, n_months + 1) * (365.25 / 12)
     y_interp = np.interp(x_target, x_nodes, y_nodes,
@@ -107,12 +106,12 @@ def build_curve_tensors() -> None:
         scen_df = curves_df[curves_df["scenario_id"] == scen]
         for c_idx, ccy in enumerate(currencies):
             cname  = DISC_CURVE_MAP[ccy]
-            ccy_df = scen_df[scen_df["curve_name"] == cname].sort_values("node_date")
+            ccy_df = scen_df[scen_df["curve_name"] == cname].sort_values("n_days")
             if ccy_df.empty:
                 print(f"  Warning: no curve for scenario={scen}, curve={cname}")
                 continue
             disc = _interpolate_to_monthly(
-                ccy_df["node_date"], ccy_df["d_f"], REPORT_DATE, N_MONTHS)
+                ccy_df["n_days"], ccy_df["d_f"], N_MONTHS)
             fwd  = _disc_to_fwd(disc)
             disc_tensor[s_idx, c_idx] = disc
             fwd_tensor[s_idx, c_idx]  = fwd
@@ -151,7 +150,7 @@ def build_curve_tensors() -> None:
     # Write Excel inspection file
     # ─────────────────────────────────────────────────────────────────────────
     os.makedirs(os.path.dirname(EXCEL_OUT), exist_ok=True)
-    print(f"Writing curves_inspection.xlsx → {EXCEL_OUT}")
+    print(f"Writing curves_inspection.xlsx -> {EXCEL_OUT}")
 
     with pd.ExcelWriter(EXCEL_OUT, engine="openpyxl") as writer:
         for ccy in currencies:
@@ -211,10 +210,10 @@ def build_curve_tensors() -> None:
         report_date   = np.array([str(REPORT_DATE.date())]),
         n_months      = np.array([N_MONTHS]),
     )
-    print(f"Saved curve_tensors.npz → {NPZ_OUT}")
+    print(f"Saved curve_tensors.npz -> {NPZ_OUT}")
 
     # ── console summary ───────────────────────────────────────────────────────
-    print("\n── Curve summary ──────────────────────────────────────────────────")
+    print("\n-- Curve summary --------------------------------------------------")
     for ccy in currencies:
         c_idx = currencies.index(ccy)
         base_idx = scenario_ids.index("base") if "base" in scenario_ids else 0

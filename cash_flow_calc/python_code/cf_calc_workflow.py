@@ -35,9 +35,10 @@ for i, row in uniq_curves.loc[uniq_curves['curve_type'] == 'fwd_curve'].iterrows
     new_df = cf_obj.get_interpolated_curves(row)
     fwd_curves = pd.concat([fwd_curves, new_df])
 
-fixing_history = sql_setup.sql_select_fixings()
-models_loan = sql_setup.sql_select_models_loan()
-models_deposit = sql_setup.sql_select_models_deposit()
+fixing_history     = sql_setup.sql_select_fixings()
+models_loan        = sql_setup.sql_select_models_loan()
+models_deposit_ir  = sql_setup.sql_select_models_deposit_ir()
+models_deposit_liq = sql_setup.sql_select_models_deposit_liq()
 
 # Load floor parameters per product from interest_rt.xlsx
 _ir_df = pd.read_excel('../balance_generate/input_data/interest_rt.xlsx')
@@ -174,6 +175,13 @@ for table_name in cf_obj.dict_cols_loan_fin_inst.keys():
 ### DEPOSITS (term + non-maturity)
 buffer.clear()
 buffer_count = 0
+liq_buffer: list[pd.DataFrame] = []
+liq_buffer_count = 0
+
+def _flush_liq(buf: list) -> None:
+    if buf:
+        sql_setup.write_df(pd.concat(buf, ignore_index=True), 'products_liq', schema='cf', chunksize=50000)
+        buf.clear()
 
 for table_name in cf_obj.dict_cols_deposits.keys():
     chunks = sql_setup.load_sched_params(table_name, cf_obj.dict_cols_deposits[table_name])
@@ -183,14 +191,24 @@ for table_name in cf_obj.dict_cols_deposits.keys():
             cf_obj.gen_deposit_sched(row, config.report_date, disc_df)
             for row in df_in.itertuples(index=False, name="Row")
         ]
-        beh_parts = []
+        beh_parts     = []
+        liq_beh_parts = []
         for row in df_in.itertuples(index=False, name="Row"):
-            product_models = models_deposit[models_deposit['product_code'] == row.product_code]
+            # IR behavioral model (used for NII, EVE, IR gap)
+            product_models_ir = models_deposit_ir[models_deposit_ir['product_code'] == row.product_code]
             part = cf_obj.compute_deposit_beh_schedule(
-                row, config.report_date, disc_df, product_models
+                row, config.report_date, disc_df, product_models_ir
             )
             if part is not None and len(part) > 0:
                 beh_parts.append(part)
+
+            # LIQ behavioral model (used for LCR, NSFR, LIQ gap)
+            product_models_liq = models_deposit_liq[models_deposit_liq['product_code'] == row.product_code]
+            liq_part = cf_obj.compute_deposit_beh_schedule(
+                row, config.report_date, disc_df, product_models_liq
+            )
+            if liq_part is not None and len(liq_part) > 0:
+                liq_beh_parts.append(liq_part)
 
         orig_parts = [p for p in orig_parts if p is not None and len(p) > 0]
         if not orig_parts and not beh_parts:
@@ -204,14 +222,14 @@ for table_name in cf_obj.dict_cols_deposits.keys():
         if not beh_batch.empty:
             beh_batch['total_pmt'] = beh_batch['capital_pmt'] + beh_batch['int_pmt']
 
-        # No beh model for this chunk: treat beh = orig (no behavioural adjustment)
+        # No IR beh model for this chunk: treat beh = orig (no behavioural adjustment)
         if beh_batch.empty:
             beh_batch = orig_batch.copy()
         # No orig (already matured): treat orig = beh
         if orig_batch.empty:
             orig_batch = beh_batch.copy()
 
-        # Full outer join: orig bullet vs N beh tenor-bucket rows per schedule_id
+        # Full outer join: orig bullet vs N IR beh tenor-bucket rows per schedule_id
         merged = cf_obj.merge_cf_orig_beh(orig_batch, beh_batch, how='outer')
         merged = _add_sched_meta(merged, df_in, 'D')
 
@@ -221,8 +239,27 @@ for table_name in cf_obj.dict_cols_deposits.keys():
             _flush(buffer)
             buffer_count = 0
 
+        # LIQ behavioral schedule → cf.products_liq
+        if liq_beh_parts:
+            liq_beh_batch = pd.concat(liq_beh_parts, ignore_index=True)
+            liq_beh_batch['total_pmt'] = liq_beh_batch['capital_pmt'] + liq_beh_batch['int_pmt']
+            liq_beh_batch = liq_beh_batch.rename(columns={
+                'outstanding_bal': 'beh_outstanding',
+                'capital_pmt':     'beh_capital_pmt',
+                'int_pmt':         'beh_interest_pmt',
+                'total_pmt':       'beh_total_pmt',
+            })
+            liq_beh_batch = _add_sched_meta(liq_beh_batch, df_in, 'D')
+            liq_buffer.append(liq_beh_batch)
+            liq_buffer_count += len(liq_beh_batch)
+            if liq_buffer_count >= BUFFER_ROWS:
+                _flush_liq(liq_buffer)
+                liq_buffer_count = 0
+
     _flush(buffer)
+    _flush_liq(liq_buffer)
     buffer_count = 0
+    liq_buffer_count = 0
 
 #####################
 ####### interest rate gap

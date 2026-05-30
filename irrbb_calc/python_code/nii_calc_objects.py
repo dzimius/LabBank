@@ -234,21 +234,38 @@ def compute_nii_shocked(
 
     df["fwd_rt_shocked"] = np.maximum(nii_floor_rate, np.nan_to_num(fwd_rt_shocked, nan=0.0))
 
-    # CFs whose period started before report_date have their rate already fixed.
-    # The shocked curve has no value for that start date → fwd_rt_shocked collapses
-    # to 0, giving eff_rate_shocked = contracted − base_fwd (wrong).
-    # Substitute base fwd_rt so these CFs contribute zero delta to NII interest.
-    if "cf_start_dt" in df.columns and "fwd_rt" in df.columns:
-        locked = df["cf_start_dt"] < report_date
+    # Lock CFs whose rate is already fixed — same two-condition logic as
+    # compute_nii_shocked_schedule (see its comment for full rationale).
+    if "fwd_rt" in df.columns:
+        locked = pd.Series(False, index=df.index)
+        if "cf_start_dt" in df.columns:
+            locked = locked | (df["cf_start_dt"] < report_date)
+        if "fixing_dt" in df.columns:
+            locked = locked | (
+                df["fixing_dt"].notna()
+                & (pd.to_datetime(df["fixing_dt"]) < report_date)
+            )
         if locked.any():
             df.loc[locked, "fwd_rt_shocked"] = df.loc[locked, "fwd_rt"].fillna(0.0)
 
+    # ── Contracted client rate (full rate including margin b) ─────────────────
+    # Back-computed from int_pmt so that base_eff_rate in the stable-margin
+    # formula carries the origination spread (b), matching the approach used
+    # in eve_calc_objects.compute_shocked_cf_detail.
+    # For F products eff_rate already equals contracted_rt; for V products
+    # eff_rate = fwd_rt (pure index, no b) — so we must use contracted_rt.
+    _denom_all = (
+        df["outstanding_bal"].fillna(0.0) * df["cf_yf"].fillna(0.0)
+    ).replace(0.0, float("nan"))
+    _contracted_rt = (df.get("int_pmt", pd.Series(0.0, index=df.index)).fillna(0.0)
+                      / _denom_all).fillna(0.0)
+
     # ── Effective rate per CF (eff_rate_shocked) ───────────────────────────────
-    # F (fixed)          → eff_rate (contracted, unchanged)
-    # V (variable)       → stable-margin: base_client_rt + a*(fwd_shocked - base_fwd) + b
+    # F (fixed)          → contracted_rt (unchanged)
+    # V (variable)       → stable-margin: contracted_rt + a*(fwd_shocked - base_fwd)
     # A (administrative) → 0% regardless of scenario (bank-managed rate)
     rate_type_s = df.get("rate_type", pd.Series("V", index=df.index))
-    df["eff_rate_shocked"] = df["eff_rate"].fillna(0.0)                     # F: contracted
+    df["eff_rate_shocked"] = _contracted_rt                                  # F: contracted
     mask_var   = rate_type_s == "V"
     mask_admin = rate_type_s == "A"
     if mask_var.any() and "product_code" in df.columns:
@@ -256,7 +273,7 @@ def compute_nii_shocked(
             df.loc[mask_var, "fwd_rt_shocked"],
             df.loc[mask_var, "product_code"],
             caps_map, floors_map, coeff_a_map, coeff_b_map,
-            base_eff_rate = df.loc[mask_var, "eff_rate"],
+            base_eff_rate = _contracted_rt.loc[mask_var],
             base_fwd_rt   = df.loc[mask_var, "fwd_rt"],
         )
     elif mask_var.any():
@@ -333,11 +350,25 @@ def compute_nii_base_schedule(
     floors_map:  dict | None = None,
     coeff_a_map: dict | None = None,
     coeff_b_map: dict | None = None,
+    base_disc_df: "pd.Series | None" = None,
+    disc_curve_map: "dict | None" = None,
 ) -> pd.DataFrame:
     """Per-schedule NII for the base scenario (no rate shock).
 
     Groups at (schedule_id, product_type, product_code, currency, bs_side, rate_type).
-    Renewal uses fwd_rt with per-product cap/floor applied (same limits as shocked scenario).
+
+    Renewal rate
+    ------------
+    For CFs whose period started before report_date (cf_start_dt < report_date), fwd_rt
+    in the CF table stores the contracted/coupon rate for fixed products — NOT a current
+    market rate.  When base_disc_df and disc_curve_map are provided, the renewal rate for
+    these rows is derived from the base discount curve instead:
+        fwd_ren = (1 / d_f_base(cf_end_dt) − 1) / (cf_end_dt − report_date).days * 365
+    This is the same formula used in compute_nii_shocked_schedule for shocked scenarios,
+    so delta_nii correctly reflects only the market rate change.
+
+    For CFs starting on or after report_date, and as a fallback when base_disc_df is
+    absent, fwd_rt is used unchanged (current market forward rate for those periods).
 
     Returns
     -------
@@ -349,9 +380,38 @@ def compute_nii_base_schedule(
     df["nii_interest"]  = df["int_pmt"].fillna(0.0) * df["sign"]
     df["remain_yf"]     = ((horizon_end - df["cf_end_dt"]).dt.days / 365.0).clip(lower=0.0)
     df["total_capital"] = df["capital_pmt"].fillna(0.0) + df["prepayment_pmt"].fillna(0.0)
-    # renewal uses fwd_rt (market rate, not contracted) with linear transform + floor/cap
-    # Fixed products renew at current market fwd_rt, variable at a*fwd_rt+b, admin at 0
-    renewal_base = df["fwd_rt"].fillna(0.0) if "fwd_rt" in df.columns else df["eff_rate"].fillna(0.0)
+
+    # Base renewal rate: use fwd_rt by default.
+    # For CFs starting before report_date, fwd_rt may be the contracted rate (fixed
+    # products) rather than the current market rate — override with the disc-curve-derived
+    # spot rate so that base and shocked renewal use the same formula.
+    renewal_base = (df["fwd_rt"].fillna(0.0) if "fwd_rt" in df.columns
+                    else df["eff_rate"].fillna(0.0))
+    if base_disc_df is not None and disc_curve_map is not None and "cf_start_dt" in df.columns:
+        _before_report = df["cf_start_dt"] < report_date
+        _yf_from_report = ((df["cf_end_dt"] - report_date).dt.days / 365.0).clip(lower=0.0)
+        _valid_ren = _before_report & (_yf_from_report > 0)
+        if _valid_ren.any():
+            _d_f_base_end = pd.Series(np.nan, index=df.index)
+            for ccy in df.loc[_valid_ren, "currency"].unique():
+                cn = disc_curve_map.get(ccy)
+                if cn is None:
+                    continue
+                cmask = _valid_ren & (df["currency"] == ccy)
+                mi = pd.MultiIndex.from_arrays(
+                    [[cn] * int(cmask.sum()), df.loc[cmask, "cf_end_dt"].to_numpy()],
+                    names=["curve_name", "node_date"],
+                )
+                _d_f_base_end.loc[cmask] = base_disc_df.reindex(mi).to_numpy(dtype=float)
+            _has_df = _valid_ren & _d_f_base_end.notna() & (_d_f_base_end > 0)
+            if _has_df.any():
+                renewal_base = renewal_base.copy()
+                renewal_base.loc[_has_df] = np.maximum(
+                    0.0,
+                    (1.0 / _d_f_base_end.loc[_has_df].to_numpy() - 1.0)
+                    / _yf_from_report.loc[_has_df].to_numpy(),
+                )
+
     if "product_code" in df.columns:
         renewal_rt = _apply_rt_limits(renewal_base, df["product_code"],
                                       caps_map, floors_map, coeff_a_map, coeff_b_map)
@@ -407,6 +467,7 @@ def compute_nii_shocked_schedule(
         return shocked_disc_df.reindex(idx).to_numpy(dtype=float)
 
     fwd_rt_shocked = np.full(len(df), np.nan)
+    d_f_end_arr   = np.full(len(df), np.nan)   # shocked d_f at cf_end_dt per CF
     for ccy, grp in df.groupby("currency"):
         cn = disc_curve_map.get(ccy)
         if cn is None:
@@ -422,31 +483,72 @@ def compute_nii_shocked_schedule(
                 np.nan,
             )
         fwd_rt_shocked[idx] = fwd
+        d_f_end_arr[idx]    = d_f_end
 
     df["fwd_rt_shocked"] = np.maximum(nii_floor_rate, np.nan_to_num(fwd_rt_shocked, nan=0.0))
 
-    # CFs whose period started before report_date have their rate already fixed.
-    # Substitute base fwd_rt so these CFs contribute zero delta to NII interest.
-    if "cf_start_dt" in df.columns and "fwd_rt" in df.columns:
-        locked = df["cf_start_dt"] < report_date
-        if locked.any():
-            df.loc[locked, "fwd_rt_shocked"] = df.loc[locked, "fwd_rt"].fillna(0.0)
+    # ── Fix fwd_rt_shocked for CFs starting before the shock curve ───────────
+    # When cf_start_dt < report_date, d_f_start is NaN (shocked curve starts at
+    # report_date).  nan_to_num converts NaN → 0, making fwd_rt_shocked = 0 for
+    # these rows.  Substitute base fwd_rt for interest locking — renewal is
+    # handled separately below with the shocked d_f at cf_end_dt.
+    _before_curve = pd.Series(False, index=df.index)
+    if "fwd_rt" in df.columns and "cf_start_dt" in df.columns:
+        _before_curve = df["cf_start_dt"] < report_date
+        if _before_curve.any():
+            df.loc[_before_curve, "fwd_rt_shocked"] = (
+                df.loc[_before_curve, "fwd_rt"].fillna(0.0)
+            )
 
-    # eff_rate_shocked: F=fixed (unchanged), V=stable-margin, A=0%
+    # ── Lock detection for nii_interest ────────────────────────────────────────
+    # Build fwd_rt_for_interest: like fwd_rt_shocked but substitutes base fwd_rt
+    # for CFs whose interest rate is already contractually fixed.
+    # Two cases — both must be caught (see comment in write_shocked_cf_products):
+    #   1. cf_start_dt < report_date  — period already started
+    #   2. fixing_dt   < report_date  — rate set before report_date even if
+    #                                   cf_start_dt is on/after report_date
+    #                                   (annual-reset loan fixed 2024-01-01,
+    #                                    2025 interest CF starts 2024-12-31)
+    # NOTE: fwd_rt_shocked (the full shocked rate) is intentionally kept unchanged
+    # so that renewal uses the shocked market rate — capital that matures renews
+    # at current market conditions regardless of the old fixing date.
+    fwd_rt_for_interest = df["fwd_rt_shocked"].copy()
+    if "fwd_rt" in df.columns:
+        locked = pd.Series(False, index=df.index)
+        if "cf_start_dt" in df.columns:
+            locked = locked | (df["cf_start_dt"] < report_date)
+        if "fixing_dt" in df.columns:
+            locked = locked | (
+                df["fixing_dt"].notna()
+                & (pd.to_datetime(df["fixing_dt"]) < report_date)
+            )
+        if locked.any():
+            fwd_rt_for_interest[locked] = df.loc[locked, "fwd_rt"].fillna(0.0)
+
+    # ── Contracted client rate (full rate including margin b) ─────────────────
+    # Same approach as eve_calc_objects.compute_shocked_cf_detail: back-compute
+    # from int_pmt so that base_eff_rate in the stable-margin formula carries b.
+    _denom_s = (
+        df["outstanding_bal"].fillna(0.0) * df["cf_yf"].fillna(0.0)
+    ).replace(0.0, float("nan"))
+    _contracted_rt_s = (df.get("int_pmt", pd.Series(0.0, index=df.index)).fillna(0.0)
+                        / _denom_s).fillna(0.0)
+
+    # eff_rate_shocked: F=contracted (unchanged), V=stable-margin on locked rate, A=0%
     rate_type_s = df.get("rate_type", pd.Series("V", index=df.index))
-    df["eff_rate_shocked"] = df["eff_rate"].fillna(0.0)           # F: contracted rate
+    df["eff_rate_shocked"] = _contracted_rt_s                      # F: contracted rate
     mask_var   = rate_type_s == "V"
     mask_admin = rate_type_s == "A"
     if mask_var.any() and "product_code" in df.columns:
         df.loc[mask_var, "eff_rate_shocked"] = _apply_rt_limits(
-            df.loc[mask_var, "fwd_rt_shocked"],
+            fwd_rt_for_interest.loc[mask_var],   # ← locking-aware rate for interest
             df.loc[mask_var, "product_code"],
             caps_map, floors_map, coeff_a_map, coeff_b_map,
-            base_eff_rate = df.loc[mask_var, "eff_rate"],
+            base_eff_rate = _contracted_rt_s.loc[mask_var],
             base_fwd_rt   = df.loc[mask_var, "fwd_rt"],
         )
     elif mask_var.any():
-        df.loc[mask_var, "eff_rate_shocked"] = df.loc[mask_var, "fwd_rt_shocked"]
+        df.loc[mask_var, "eff_rate_shocked"] = fwd_rt_for_interest.loc[mask_var]
     df.loc[mask_admin, "eff_rate_shocked"] = 0.0
 
     df["sign"] = np.where(df["bs_side"] == "A", 1.0, -1.0)
@@ -458,15 +560,35 @@ def compute_nii_shocked_schedule(
     )
     df["remain_yf"]     = ((horizon_end - df["cf_end_dt"]).dt.days / 365.0).clip(lower=0.0)
     df["total_capital"] = df["capital_pmt"].fillna(0.0) + df["prepayment_pmt"].fillna(0.0)
-    # renewal rate: always fwd_rt_shocked (market rate at renewal), with transform + limits
-    # Fixed products renew at shocked market rate, not at old contracted rate
+
+    # ── Renewal forward rate ──────────────────────────────────────────────────
+    # Default: fwd_rt_shocked (the CF-period shocked rate).
+    # For start-before-curve CFs fwd_rt_shocked was set to base_fwd_rt (interest
+    # locking).  For renewal, capital maturing from these CFs should re-price at
+    # the shocked market rate, derived from the shocked d_f at cf_end_dt:
+    #   rate = (1/d_f_end - 1) / year_frac_from_report_date
+    # This produces a non-zero delta vs base for fixed-rate bonds and other
+    # start-before-curve products.
+    _yf_from_report = ((df["cf_end_dt"] - report_date).dt.days / 365.0).clip(lower=0.0)
+    _d_f_end_ser    = pd.Series(np.nan_to_num(d_f_end_arr, nan=0.0), index=df.index)
+    _ren_shock_mask = _before_curve & (_d_f_end_ser > 0) & (_yf_from_report > 0)
+    fwd_rt_for_renewal = df["fwd_rt_shocked"].copy()
+    if _ren_shock_mask.any():
+        fwd_rt_for_renewal[_ren_shock_mask] = np.maximum(
+            nii_floor_rate,
+            (1.0 / _d_f_end_ser[_ren_shock_mask] - 1.0)
+            / _yf_from_report[_ren_shock_mask],
+        )
+
+    # Renewal uses fwd_rt_for_renewal (shocked market rate, shock-curve derived)
+    # so that maturing capital renews at current shocked conditions.
     if "product_code" in df.columns:
         renewal_rt_shocked = _apply_rt_limits(
-            df["fwd_rt_shocked"], df["product_code"],
+            fwd_rt_for_renewal, df["product_code"],
             caps_map, floors_map, coeff_a_map, coeff_b_map,
         )
     else:
-        renewal_rt_shocked = df["fwd_rt_shocked"].to_numpy()
+        renewal_rt_shocked = fwd_rt_for_renewal.to_numpy()
     renewal_rt_shocked[mask_admin.to_numpy()] = 0.0
     df["nii_renewal"]   = (
         df["total_capital"] * renewal_rt_shocked * df["remain_yf"] * df["sign"]

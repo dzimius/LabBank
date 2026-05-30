@@ -7,15 +7,16 @@ if __name__ == "__main__":
     report_date = pd.to_datetime('2024-12-31')
     BASE_DIR = "C:/Users/dzimi/Documents/data_engineering/data_projects/git_hub_projects/bank_project/balance_gen_add_data"
     os.chdir(BASE_DIR)
-    curve_file_name = 'input/curve_input.xlsx'
-    fixing_file_name = 'input/fixing_input.xlsx'
-    depo_file_name = 'input/dep_beh_models.xlsx'
-    loan_file_name = 'input/loan_beh_models.xlsx'
+    curve_file_name    = 'input/curve_input.xlsx'
+    fixing_file_name   = 'input/fixing_input.xlsx'
+    depo_ir_file_name  = 'input/dep_beh_models_ir.xlsx'
+    depo_liq_file_name = 'input/dep_beh_models_liq.xlsx'
+    loan_file_name     = 'input/loan_beh_models.xlsx'
     tables = ['loans']
 
     mode = 0
     sql_setup._ensure_schemas()
-    sql_setup.reset_data_models(mode, report_date, ['models_loan', 'models_deposit'])
+    sql_setup.reset_data_models(mode, report_date, ['models_loan', 'models_deposit_ir', 'models_deposit_liq'])
 
     sql_setup.reset_data_remove_always(["mkt.curves", "mkt.fixings", "sched.loans", "sched.fin_inst", "sched.deposits"])
 
@@ -29,10 +30,13 @@ if __name__ == "__main__":
     df_fixing = bs_objs.load_historical_fixings(fixing_file_name)
     sql_setup.append_df_to_table(df_fixing, 'fixings')
 
-###depo beh models
+###depo beh models (IR and LIQ)
 ######################
-    df_depo_beh = bs_objs.depo_beh_models_job(depo_file_name)
-    sql_setup.append_df_to_table(df_depo_beh, 'models_deposit')
+    df_depo_beh_ir = bs_objs.depo_beh_models_job(depo_ir_file_name)
+    sql_setup.append_df_to_table(df_depo_beh_ir, 'models_deposit_ir')
+
+    df_depo_beh_liq = bs_objs.depo_beh_models_job(depo_liq_file_name)
+    sql_setup.append_df_to_table(df_depo_beh_liq, 'models_deposit_liq')
 
     df_loan_beh = bs_objs.loan_beh_models_job(loan_file_name)
     sql_setup.append_df_to_table(df_loan_beh, 'models_loan')

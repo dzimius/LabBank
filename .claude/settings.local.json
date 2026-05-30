@@ -25,7 +25,32 @@
       "Bash(unzip -p bank_data.xlsx xl/worksheets/sheet1.xml)",
       "Bash(unzip -p bank_data.xlsx xl/sharedStrings.xml)",
       "Bash(grep -n \"equity\\\\|retained_earnings\\\\|common_shares\\\\|risk_reserves\" irrbb_calc/python_code/*.py -i)",
-      "Bash(grep -n \"equity\\\\|retained_earnings\\\\|common_shares\\\\|risk_reserves\" balance_generate/python_code/*.py -i)"
+      "Bash(grep -n \"equity\\\\|retained_earnings\\\\|common_shares\\\\|risk_reserves\" balance_generate/python_code/*.py -i)",
+      "Bash(\"/c/Users/dzimi/Documents/data_engineering/data_projects/git_hub_projects/bank_project/venv/Scripts/python.exe\" -m nbconvert --to notebook --execute --ExecutePreprocessor.timeout=600 --inplace bank_report.ipynb)",
+      "Bash(\"/c/Users/dzimi/Documents/data_engineering/data_projects/git_hub_projects/bank_project/venv/Scripts/python.exe\" export_report.py)",
+      "Bash(/c/Users/dzimi/AppData/Local/Programs/Python/Python312/python.exe:*)",
+      "Bash(ls /c/Users/dzimi/Documents/data_engineering/data_projects/git_hub_projects/bank_project/irrbb_calc/python_code/*.duckdb)",
+      "Bash(grep -n \"f'.*\\\\\\\\\\\\\\\\n\\\\|\\\\\\\\\\\\\\\\n.*f'\" \"C:\\\\Users\\\\dzimi\\\\Documents\\\\data_engineering\\\\data_projects\\\\git_hub_projects\\\\bank_project\\\\visual_rep\\\\make_finance_report.py\")",
+      "Bash(grep -n \"'[^']*\\\\\\\\\\\\\\\\n[^']*'\" \"C:\\\\Users\\\\dzimi\\\\Documents\\\\data_engineering\\\\data_projects\\\\git_hub_projects\\\\bank_project\\\\visual_rep\\\\make_finance_report.py\")",
+      "Bash(grep -v \"\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\n\")",
+      "Bash(grep -Pn \"\\(?<!\\\\\\\\\\\\\\\\\\)\\\\\\\\\\\\\\\\n\" \"C:\\\\Users\\\\dzimi\\\\Documents\\\\data_engineering\\\\data_projects\\\\git_hub_projects\\\\bank_project\\\\visual_rep\\\\make_finance_report.py\")",
+      "Bash(grep -v \"^[0-9]*:print\\(f'\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\n\\\\|^[0-9]*:#\\\\|^[0-9]*:    #\")",
+      "Bash(wc *)",
+      "Bash(mkdir -p /c/Users/dzimi/Documents/data_engineering/data_projects/git_hub_projects/bank_project/optimize_prep/python_code)",
+      "Bash(mkdir -p /c/Users/dzimi/Documents/data_engineering/data_projects/git_hub_projects/bank_project/optimize_prep/output)",
+      "Bash(mkdir -p /c/Users/dzimi/Documents/data_engineering/data_projects/git_hub_projects/bank_project/optimize_prep/tests)",
+      "Bash(venv/Scripts/python *)",
+      "Bash(venv/Scripts/pip install *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Read(//c/Users/dzimi/.claude/projects/C--Users-dzimi-Documents-data-engineering-data-projects-git-hub-projects-bank-project/**)",
+      "Bash(grep -v \"^$\")",
+      "Bash(xargs basename *)",
+      "Bash(dir C:\\\\Users\\\\dzimi\\\\Documents\\\\data_engineering\\\\data_projects\\\\git_hub_projects\\\\bank_project\\\\optimize_prep\\\\output\\\\ *)",
+      "Bash(powershell -Command \"Get-Content 'C:\\\\Users\\\\dzimi\\\\.claude\\\\projects\\\\C--Users-dzimi-Documents-data-engineering-data-projects-git-hub-projects-bank-project\\\\a9143657-45b5-4650-9089-e38108911c99.jsonl' | Select-Object -Last 100\")",
+      "Bash(Select-String -Pattern \"\\(PASS|--|exact|Accuracy\\)\")",
+      "Bash(Select-Object -Last 40)"
     ]
   }
 }

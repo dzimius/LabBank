@@ -18,7 +18,7 @@ from __future__ import annotations
 import pandas as pd
 from sqlalchemy import (
     create_engine, text, Table, Column, MetaData,
-    Integer, String, Date,
+    Integer, String, Date, Boolean,
 )
 from sqlalchemy.dialects.mssql import DECIMAL
 
@@ -59,11 +59,18 @@ MonthlyCurves = Table(
 ProductParams = Table(
     "product_params", metadata,
     Column("report_date",       Date,           nullable=False),
+    # Unique optimizer entry identifier  e.g. "1000_A_PLN_2024_01" or "6000_L_PLN"
+    Column("cohort_id",         String(30),     nullable=False),
     # From bs_structure
     Column("product_code",      String(4),      nullable=False),
     Column("product_name",      String(64),     nullable=True),
     Column("bs_side",           String(1),      nullable=False),   # A / L / E
     Column("currency",          String(3),      nullable=False),
+    # True = monthly cohort row, False = single-row / behavioural product
+    Column("is_cohort",         Boolean,        nullable=True),
+    # Monthly cohort start year/month (NULL for single-row / behavioural products)
+    Column("start_year",        Integer,        nullable=True),
+    Column("start_month",       Integer,        nullable=True),
     # Current allocation weight (from bs_structure.bs_percentage)
     Column("bs_pct_current",    DECIMAL(8, 4),  nullable=True),
     # Actual balance at report_date (from schemat.* tables, PLN)
@@ -91,12 +98,16 @@ ProductParams = Table(
     Column("coeff_b",           DECIMAL(10, 6), nullable=True),   # spread (decimal, not bps)
     Column("client_floor",      DECIMAL(10, 6), nullable=True),   # client rate floor
     Column("client_cap",        DECIMAL(10, 6), nullable=True),   # client rate cap (NULL = no cap)
+    # For formula-based NII (cohort products only)
+    Column("rate_type",         String(1),      nullable=True),   # 'F' fixed / 'V' floating; NULL for single-row
+    Column("coupon_rate",       DECIMAL(10, 6), nullable=True),   # contracted rate (fixed cohorts); NULL for floating/single-row
     schema="opt_prep",
 )
 
 ProductScenarioParams = Table(
     "product_scenario_params", metadata,
     Column("report_date",    Date,           nullable=False),
+    Column("cohort_id",      String(30),     nullable=False),
     Column("product_code",   String(4),      nullable=False),
     Column("bs_side",        String(1),      nullable=False),
     Column("currency",       String(3),      nullable=False),
@@ -199,3 +210,60 @@ def write_product_params(df: pd.DataFrame) -> None:
 def write_product_scenario_params(df: pd.DataFrame) -> None:
     """Append rows to opt_prep.product_scenario_params."""
     _write(df, ProductScenarioParams)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# cohort_cf_compare — fast vs exact CF drill-down table
+# ─────────────────────────────────────────────────────────────────────────────
+
+CohortCfCompare = Table(
+    "cohort_cf_compare", metadata,
+    Column("report_date",     Date,           nullable=False),
+    Column("cohort_id",       String(30),     nullable=False),
+    Column("product_code",    String(4),      nullable=False),
+    Column("bs_side",         String(1),      nullable=False),
+    Column("currency",        String(3),      nullable=False),
+    Column("rate_type",       String(1),      nullable=True),
+    # 'fast_m'=monthly NII buckets, 'fast_q'=quarterly EVE buckets, 'exact'=cf.products
+    Column("cf_type",         String(8),      nullable=False),
+    Column("scenario_id",     String(20),     nullable=False),
+    # month 0-11 for fast_m; quarter index for fast_q; NULL for exact
+    Column("bucket_idx",      Integer,        nullable=True),
+    # calendar dates
+    Column("cf_start_dt",     Date,           nullable=True),
+    Column("cf_end_dt",       Date,           nullable=True),
+    # year-fraction from report_date to CF midpoint / end
+    Column("yf_from_report",  DECIMAL(10, 6), nullable=True),
+    # cashflow amounts (PLN, absolute — sign applied via sign column for income/expense)
+    Column("outstanding",     DECIMAL(18, 2), nullable=True),
+    Column("capital_pmt",     DECIMAL(18, 2), nullable=True),
+    Column("interest_pmt",    DECIMAL(18, 2), nullable=True),
+    # rates (decimal, annualised)
+    Column("effective_rate",  DECIMAL(18, 8), nullable=True),
+    Column("fwd_rt",          DECIMAL(18, 8), nullable=True),
+    Column("margin",          DECIMAL(18, 8), nullable=True),
+    # NII components (signed: income +, expense -)
+    Column("nii_interest",    DECIMAL(18, 2), nullable=True),
+    Column("remain_yf",       DECIMAL(10, 6), nullable=True),
+    Column("nii_renewal",     DECIMAL(18, 2), nullable=True),
+    Column("nii_total",       DECIMAL(18, 2), nullable=True),
+    # EVE components (signed)
+    Column("disc_factor",     DECIMAL(18, 8), nullable=True),
+    Column("pv_capital",      DECIMAL(18, 2), nullable=True),
+    Column("pv_interest",     DECIMAL(18, 2), nullable=True),
+    Column("pv_total",        DECIMAL(18, 2), nullable=True),
+    schema="opt_prep",
+)
+
+
+def reset_cohort_cf_compare() -> None:
+    ensure_schema()
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS opt_prep.cohort_cf_compare"))
+    with engine.begin() as conn:
+        metadata.create_all(bind=conn, tables=[CohortCfCompare], checkfirst=False)
+
+
+def write_cohort_cf_compare(df: pd.DataFrame) -> None:
+    """Append rows to opt_prep.cohort_cf_compare."""
+    _write(df, CohortCfCompare)
