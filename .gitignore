@@ -41,6 +41,9 @@ htmlcov/
 .dagster_home/
 .tmp_dagster_home_*/
 
+# Excel lock files (created while a workbook is open)
+~$*.xlsx
+
 # Copyrighted reference material - never commit, cite only
 Diogo Gobira*.pdf
 

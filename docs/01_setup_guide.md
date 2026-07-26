@@ -111,7 +111,8 @@ Open the Dagster UI (usually `http://localhost:3000`) and launch a job:
 | `irs_update_job` | Swap book changed, balance sheet didn't. |
 | `irrbb_recalc_job` | Market curves changed, balance sheet and cash flows didn't. |
 | `liq_only_job` | Refresh LCR/NSFR only. |
-| `optimize_prep_job` | Rebuild LabBank's tensors without re-running the full pipeline (use after `full_run_job` if you didn't use `labbank_data_job`). |
+
+Since the goal here is getting to LabBank, `labbank_data_job` is the only one you need for the loop below — the others are fine-grained shortcuts for narrower changes (see `README.md`'s full jobs table, which also lists `optimize_prep_job` for rebuilding LabBank's tensors on their own).
 
 ### 4. The "generate your own balance sheet" loop
 

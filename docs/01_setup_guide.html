@@ -159,12 +159,9 @@ streamlit run sandbox/app.py
 <td><code>liq_only_job</code></td>
 <td>Refresh LCR/NSFR only.</td>
 </tr>
-<tr>
-<td><code>optimize_prep_job</code></td>
-<td>Rebuild LabBank's tensors without re-running the full pipeline (use after <code>full_run_job</code> if you didn't use <code>labbank_data_job</code>).</td>
-</tr>
 </tbody>
 </table>
+<p>Since the goal here is getting to LabBank, <code>labbank_data_job</code> is the only one you need for the loop below — the others are fine-grained shortcuts for narrower changes (see <code>README.md</code>'s full jobs table, which also lists <code>optimize_prep_job</code> for rebuilding LabBank's tensors on their own).</p>
 <h3 id="4-the-generate-your-own-balance-sheet-loop">4. The "generate your own balance sheet" loop</h3>
 <ol>
 <li>Edit <code>balance_generate/input_data/bank_data.xlsx</code> with your own product balances, rates, and currencies. For swaps, edit <code>ir_derivatives/input/irs_input.xlsx</code>.</li>

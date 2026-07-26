@@ -30,4 +30,25 @@ Running log of what Claude did in each work session on the GitHub-publish plan. 
 
 All three docs' HTML rebuilt via `docs/build_docs.py` and spot-checked in-browser (tables render correctly).
 
-**Session complete — all 8 planned points done.** Nothing further committed since the consolidation commit; README changes and the entire `docs/` folder are uncommitted, ready whenever you want them in.
+**Session complete — all 8 planned points done.**
+
+## 2026-07-26 — Session 2: line-count audit, committed docs, stopped tracking report HTML
+
+User asked why the repo showed ~73k lines vs ~23k earlier and suspected copy-paste. Audited: hashed every `.py` file (no real duplicates, just two empty `__init__.py`), then broke down line counts by file type. Root cause: `bs_optimization/notebooks/` (37,284 lines) and `visual_rep/`'s report HTML/ipynb (21,905 lines) were untracked before last session's consolidation commit and got swept in — almost all of it rendered Plotly/Jupyter HTML output, not hand-written code. Real Python: 33,401 lines across 99 files. Gave the user a full folder/subfolder map with per-directory line counts.
+
+User decided: keep `.ipynb` tracked, stop tracking the notebook-exported `.html` reports (they duplicate the notebook's own content and can be regenerated on demand). Untracked (`git rm --cached`, kept on disk) `visual_rep/{bank_report,finance_report}.html` and `bs_optimization/notebooks/optimization_report{,_clean}.html`; added them to `.gitignore` with a comment explaining hand-authored HTML (`docs/*.html`, `optimize_prep/method_b_explainer.html`) is intentionally exempt. Updated README's references to these files to point at the regeneration commands (`export_report.py`, `export_optimization_report.py`, or plain `nbconvert`) instead of implying the HTML ships in the repo.
+
+Committed everything from session 1 that was still pending (README quick-start rewrite, all 3 docs + build script, the gitignore/tracking cleanup) in `7390851` — 15 files, +1,165/−45,931 lines (the deletion is almost entirely the untracked report HTML).
+
+## 2026-07-26 — Session 3: methodology review feedback
+
+User ran the docs and gave 6 concrete corrections/additions. Verified each against the code before writing (didn't just take the request at face value):
+
+1. Setup guide's job table listed `optimize_prep_job` even though the guide's whole point is reaching LabBank via `labbank_data_job` (which already includes it) — removed that row, pointed to README for the full job list.
+2. Methodology said prepayment (CPR) was "a constant rate" — checked `cf_calc_workflow.py:132-136` and `b_s_add_data_objects.py:78-80`: it's actually set per (product, tenor) in `loan_beh_models.xlsx`, reloaded every pipeline run, so fully editable — but it does NOT respond to the rate shock itself within a scenario (confirmed via the `_apply_calibrated...`/cpr_rate-constant-per-schedule logic already flagged in the technical notes). Rewrote to state both things precisely instead of just "constant."
+3. Checked whether non-current-account deposits also floor at 0% — traced `_apply_rt_limits` in `nii_calc_objects.py` back to `FLOORS_MAP`, sourced from `interest_rt.xlsx`'s `client_floor` column. Confirmed by reading the actual demo file: savings account (8000) and term deposit (7060) both have `client_floor=0.0` set, same as current accounts — so yes, implemented, but it's a per-product Excel setting, not a hardcoded blanket rule. Documented the mechanism and which products currently have it set.
+4. Added a full "Products on the balance sheet" section — pulled the real 14-product + equity table directly from `bank_data.xlsx`'s `bs_structure` sheet (rate type, maturity, amortising, payment frequency, reset tenor), plus a note on the other columns (rwa/PD/LGD, HQLA/ASF/RSF, optimizer-only fields) and on 7900 being the one code used on both balance-sheet sides.
+5. Added an IRS setup/mechanics section — `irs_input.xlsx` column reference, the demo book's actual composition (9 receive-fixed swaps, 4.5%, 40-50M PLN each), and how NII/EVE/gap-placement are computed for a swap (pulled from `sandbox/irs_engine.py`'s documented conventions).
+6. Added an explicit NII formula (locked + renewal components) alongside the EVE/LCR/NSFR ones already in the doc.
+
+Also caught and gitignored an Excel lock file (`~$loan_beh_models.xlsx`) that had been sitting untracked since before this whole effort started. Rebuilt HTML, spot-checked the new product table renders. Committed as the next commit after this log entry.

@@ -32,15 +32,43 @@ SQL Server is the single integration bus. Every step reads from tables the previ
 
 Steps 5, 6, and 7 can each be re-run independently without touching the balance sheet or cash flows — enforced by the Dagster job definitions (`irrbb_recalc_job`, `liq_only_job`, etc).
 
+## Products on the balance sheet
+
+The shipped demo balance sheet (`balance_generate/input_data/bank_data.xlsx`, sheet `bs_structure`) defines every product as a row of parameters — this is also the template to follow when adding a new product (credit cards, a working-capital/investment-loan split for corporates, T-bills, central bank cash, etc.).
+
+| Code | Product | Side | Rate type | Maturity | Amortising | Payment freq | Reset/fixing tenor |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1000 | Mortgage, fixed | Asset | Fixed | 25Y | Yes | 1M | 5Y |
+| 1100 | Mortgage, floating | Asset | Variable | 30Y | Yes | 1M | 3M |
+| 2000 | Consumer/cash loan, fixed | Asset | Fixed | 7Y | Yes | 1M | 7Y |
+| 2100 | Consumer/cash loan, floating | Asset | Variable | 5Y | Yes | 1M | 6M |
+| 4100 | Investment loan (SME), floating | Asset | Variable | 5Y | No (bullet) | 1M | 3M |
+| 3000 | Government bond, fixed | Asset | Fixed | 5Y | No (bullet) | 1Y | 5Y |
+| 3100 | Government bond, floating | Asset | Variable | 5Y | No (bullet) | 6M | 6M |
+| 3500 | Cash / central bank reserves | Asset | Fixed | 25Y* | Yes | 1M | 5Y |
+| 7900 | Interbank placement / deposit | Both | Variable | 1M | No (bullet) | 1M | 1M |
+| 6000 | Current account (retail) | Liability | Administrative | Non-maturing | — | 1M | — |
+| 6300 | Current account (SME) | Liability | Administrative | Non-maturing | — | 1M | — |
+| 8000 | Savings account | Liability | Variable | Non-maturing | — | 1M | 2M |
+| 7060 | Term deposit (retail) | Liability | Fixed | 6M | No (bullet) | 6M | — |
+| 5000 | Issued bond, floating | Liability | Variable | 5Y | No (bullet) | 6M | 6M |
+| 5100 / 5300 / 5400 | Common shares / retained earnings / risk reserves | Equity | — | Non-maturing | — | — | — |
+
+*`3500` (cash) carries a 25Y "maturity" field structurally but is treated as an overnight/liquid position for LCR purposes (`hqla_class`, 0% haircut) — the field is a modelling artifact of reusing the same product template, not an actual term.
+
+Other columns on each row that matter downstream: **`rate_index`/`disc_curve`/`fwd_curve`** (which market curve prices and discounts the product), **`dc_conv`/`b_day_conv`** (day-count and business-day convention for schedule generation), **`rwa_weight`/`PD`/`LGD`** (capital/credit-risk parameters, used by `bs_optimization/`, not by the core IRRBB/liquidity engine), **`hqla_class`/`haircut`** and **`ASF`/`RSF`** (LCR and NSFR weights), and **`vol_elasticity`/`fee_unit_rate`/`acq_cost_rate`** (optimizer-only fields — see the technical notes for why LabBank currently pulls these in even though it doesn't use them).
+
+7900 (interbank placement/deposit) is the one product code used on **both** sides of the balance sheet — an asset row (money placed with other banks) and a liability row (money borrowed from other banks) — distinguished by the `bs_side` column, not the product code.
+
 ## Cash flow engine and behavioural modelling
 
 For each product, the engine generates two things per period: **capital cash flows** (contractual amortisation plus behavioural adjustments) and **interest cash flows** (coupon payments at the contracted client rate).
 
 Behavioural assumptions applied:
 
-- **Loans** — a constant prepayment rate (CPR) applied monthly to the outstanding balance.
+- **Loans** — a prepayment rate (CPR) applied monthly to the outstanding balance. This is **not a single fixed number for the whole book**: it's set per (product, tenor bucket) in `loan_beh_models.xlsx`, reloaded every time the pipeline runs — so editing that Excel file changes prepayment behaviour for the products/tenors you touch, without any code change. What it does *not* do is respond to the rate shock itself: for a given loan, the CPR value is held constant for the life of that loan and is the same across every EBA scenario — a par-down shock gets the same prepayment cash flows as a par-up shock. That's a standard simplification, but it means negative convexity (prepayment speeding up when rates fall) isn't modelled — see the technical notes if you're evaluating how much that matters for your use case.
 - **Non-maturity deposits (NMD)** — an exponential decay model: a fraction leaves each month, the remainder is treated as sticky long-term funding.
-- **Admin-rate floor** — interest on current accounts is capped at 0% and never passed through to the client as a negative rate.
+- **Rate floors and caps** — each product can have a `client_floor`/`client_cap` set in `interest_rt.xlsx`, applied to both the shocked client rate and the renewal rate for capital maturing within the NII horizon. In the shipped demo data, the deposit-type products — current accounts (administrative rate, hardcoded to 0% regardless of scenario), savings accounts, and term deposits — all have `client_floor = 0.0`, so a downward shock can't push what the bank pays depositors below zero. Loan-type products have no floor/cap set by default. This is per-product and data-driven, not a blanket rule, so if you add a new deposit-like product, remember to set its floor explicitly if you want the same protection.
 
 The key output table, `cf.products`, has one row per (transaction, payment date), including both the contractual and behavioural outstanding balance and cash flow, the market forward rate, and the all-in client rate. NII is computed from the interest cash flows within the 1-year horizon; EVE uses the full behavioural run-off schedule to maturity.
 
@@ -50,12 +78,48 @@ The **repricing gap** is the net volume of assets minus liabilities repricing in
 
 Interest rate swaps overlay this gap **without changing the underlying balance sheet**: the swap gap is computed separately and merged into the balance-sheet repricing gap before IRRBB is calculated. This is what lets LabBank show "balance sheet only" vs. "balance sheet + IRS" gap views side by side.
 
+### How a swap is set up
+
+Swaps are defined in `ir_derivatives/input/irs_input.xlsx`, one row per trade:
+
+| Column | Meaning |
+| --- | --- |
+| `swap_id` | Trade identifier |
+| `pay_fixed` | `0` = bank **receives fixed, pays floating**; `1` = bank **pays fixed, receives floating** |
+| `notional` | Trade notional (PLN) |
+| `start_date` / `maturity_date` | Trade dates |
+| `fixed_rate`, `fixed_pay_freq`, `fixed_dc_conv` | Fixed leg: rate, payment frequency (e.g. annual), day-count convention |
+| `float_rate_index`, `float_pay_freq`, `float_fixing_freq`, `float_spread` | Float leg: reference index (e.g. `PLN_ASK_3M`), payment/reset frequency, spread over the index |
+| `disc_curve` / `fwd_curve` | Which curves discount and forward-project this trade |
+
+The shipped demo book is 9 receive-fixed swaps (`pay_fixed=0`), 4.5% fixed rate, notionals of 40-50M PLN each, against 3M or 6M WIBOR — a textbook hedge for a floating-rate loan book: the bank pays WIBOR on the swap to offset WIBOR received from borrowers, keeping the fixed spread.
+
+### How a swap is valued
+
+Both legs are cash-flow-projected on the same monthly curve grid as the rest of the balance sheet:
+
+- **Fixed leg** — accrues at `fixed_rate` on its own payment frequency (annual by default).
+- **Floating leg** — reprices every `float_fixing_freq` (e.g. every 3 months), each period's rate taken as the forward rate implied by the discount curve between that period's start and end.
+
+**NII contribution** — accrual basis (not discounted) over the 1-year horizon: `notional × fixed_rate × min(horizon, remaining term)` on the fixed side, netted against the sum of the floating leg's per-period forward-rate accruals over the same window, signed `+1` for receive-fixed / `-1` for pay-fixed.
+
+**EVE contribution** — present value of all remaining net cash flows (fixed leg minus floating leg, or vice versa) on both legs to maturity, discounted on the trade's `disc_curve`.
+
+**Repricing gap contribution** — each swap's floating leg is placed into the gap ladder at its *next* fixing date (`start_date` + `float_fixing_freq`, rolled forward), not at trade maturity — that's what makes it show up as a near-term repricing item even for a multi-year swap.
+
 ## IRRBB — NII
 
-NII decomposes into two parts per scenario:
+NII decomposes into two parts per scenario, computed per cash flow and summed over the 1-year horizon:
 
-- **Locked interest** — income from cash flows already contracted (rate and notional fixed). Immune to rate shocks.
-- **Renewal** — income from maturing capital reinvested at market rates within the 1-year horizon. This part reprices with the curve.
+```
+NII_scenario = Σ_cf [ outstanding_balance × client_rate_shocked × year_fraction × sign ]      (locked interest)
+             + Σ_cf [ (capital_repaid + prepaid) × renewal_rate_shocked × remaining_year_fraction × sign ]   (renewal)
+
+sign = +1 for assets, −1 for liabilities
+```
+
+- **Locked interest** — income from cash flows already contracted (rate and notional fixed). Fixed-rate products keep their contracted rate here; floating-rate products re-price at the shocked curve using a stable-margin transform (`client_rate = base_rate + a × (shocked_index − base_index)`, so the origination spread is preserved). Administrative-rate products (current accounts) are fixed at 0% regardless of scenario.
+- **Renewal** — income from capital maturing (or prepaying) within the 1-year horizon, reinvested/re-borrowed at the *shocked market rate* — this applies even to fixed-rate products, since a maturing fixed-rate deposit or loan renews at whatever the new environment offers, not its old contracted rate. Both the locked and renewal rates are subject to each product's `client_floor`/`client_cap` (see Rate floors and caps above).
 
 A bank with more assets than liabilities repricing in the short end is **asset-sensitive**: parallel-up shocks help NII, parallel-down shocks hurt it.
 
