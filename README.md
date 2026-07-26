@@ -4,6 +4,27 @@ LabBank is a laboratory banking ALM system that connects risk methodology with a
 
 The project is designed for people who sit between ALM, risk analytics, finance, data engineering, and reporting. It is not a toy notebook and it is not a closed black-box model. The goal is to make the full ALM chain visible: from transaction-level inputs, through SQL-backed cash flows, to regulatory-style outputs and reporting.
 
+## Quick start: two ways to use this project
+
+**A) LabBank only — no SQL Server, no setup beyond Python.** Explore a pre-built synthetic bank's NII, EVE, EBA SOT, LCR, and NSFR interactively, stress the balance sheet, IRS book, and NMD behavioural assumptions, and see the impact in real time.
+
+```powershell
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+streamlit run sandbox\app.py
+```
+
+This is the fastest path to see what the project does. LabBank reads only local files (`optimize_prep/output/*.npz`, `balance_generate/input_data/bank_data.xlsx`, and a few other Excel inputs) — nothing here touches a database.
+
+**B) Full ETL pipeline with SQL Server — generate your own balance sheet.** If you want to build a balance sheet from your own numbers (not just stress the shipped demo one), you'll need SQL Server as the integration/audit layer — see [Setup](#setup) below. Once it's running:
+
+1. Edit `balance_generate/input_data/bank_data.xlsx` (and `ir_derivatives/input/irs_input.xlsx` for swaps) with your own data.
+2. Run the `labbank_data_job` in Dagster (`dagster dev`, then launch this job) — it regenerates the full balance sheet, recomputes IRRBB/liquidity, and rebuilds the npz tensors LabBank reads, all in one step.
+3. In the already-running Streamlit app, click **"🔄 Reload my data"** in the sidebar — LabBank now shows your balance sheet instead of the shipped demo one.
+
+Path A and B share the same LabBank app; B just changes what data it's pointed at.
+
 ## What the project demonstrates
 
 - End-to-end balance sheet generation for loans, deposits, financial instruments, equity, cash accounts, and interest rate swaps.
@@ -50,9 +71,11 @@ Recommended additional README visuals:
 | Interest rate derivatives | `ir_derivatives/` | Loads IRS positions, creates swap cash flows, and overlays the repricing gap. |
 | IRRBB | `irrbb_calc/` | Calculates NII, EVE, EBA shock scenarios, and Supervisory Outlier Test outputs. |
 | Liquidity risk | `liq_calc/` | Calculates LCR and NSFR from balance sheet and cash-flow data. |
-| Optimisation preparation | `optimize_prep/` | Builds fast approximation tensors and accuracy checks for future optimisation. |
+| Optimisation preparation | `optimize_prep/` | Builds the fast approximation tensors LabBank reads, plus accuracy checks against the exact pipeline. |
+| Interactive exploration (LabBank) | `sandbox/` | Streamlit app — stress the balance sheet, IRS book, and NMD assumptions and see NII/EVE/SOT/LCR/NSFR update live. No SQL Server required. |
 | Orchestration | `dagster_pipeline/` | Defines Dagster assets and jobs over the workflow scripts. |
 | Reporting | `visual_rep/` | Contains notebooks, HTML reports, Power BI file, Beamer presentation, and chart assets. |
+| 🚧 Balance sheet optimisation (roadmap) | `bs_optimization/` | Four solvers (deterministic, joint BS+swap, stochastic, natural-hedge) that optimise the balance sheet under EVE/NII/LCR/NSFR constraints. Functional and fairly mature, but not yet part of the guided LabBank path — treat as a preview of Phase 3. |
 
 ## Pipeline flow
 
@@ -130,6 +153,7 @@ Dagster assets are defined in `dagster_pipeline/assets/`. The project includes s
 | `irrbb_recalc_job` | Recompute NII, EVE, and SOT from existing cash flows after market curve changes. |
 | `liq_only_job` | Refresh LCR and NSFR only. |
 | `optimize_prep_job` | Rebuild fast approximation tensors and run accuracy checks. |
+| `labbank_data_job` | Full pipeline + optimize_prep in one job. Run this after editing the input Excel files to regenerate your own balance sheet and refresh LabBank's data — see [Quick start, path B](#quick-start-two-ways-to-use-this-project). |
 
 Run the Dagster UI from the repository root:
 
@@ -159,6 +183,8 @@ module_name = "dagster_pipeline.definitions"
 - LaTeX Beamer
 
 ## Setup
+
+This section covers the full ETL pipeline (path B). If you only want to run LabBank against the shipped demo balance sheet (path A), you don't need any of this — just `pip install -r requirements.txt` and `streamlit run sandbox/app.py`.
 
 Create and activate a Python environment:
 
@@ -202,26 +228,26 @@ For normal use, prefer Dagster because it preserves dependency order and gives a
 
 The repository includes several reporting layers:
 
-- `visual_rep/bank_report.ipynb` and `visual_rep/bank_report.html` for ALM and compliance reporting.
-- `visual_rep/finance_report.ipynb` and `visual_rep/finance_report.html` for finance-oriented reporting.
+- `visual_rep/bank_report.ipynb` for ALM and compliance reporting (run `python visual_rep/export_report.py` to generate `bank_report.html`/`.pdf` — the export isn't tracked in git).
+- `visual_rep/finance_report.ipynb` for finance-oriented reporting (same export pattern).
 - `visual_rep/labbank_presentation.tex` for the Beamer presentation.
 - `visual_rep/ir_gap.pbix` for Power BI repricing gap analysis.
 - `irrbb_calc/output/*.xlsx` for IRRBB outputs.
 - `liq_calc/output/lcr_nsfr_report.xlsx` for liquidity outputs.
 - `optimize_prep/output/*.xlsx` and `*.npz` for optimisation preparation and accuracy checking.
 
-## Optimisation preparation
+## Optimisation preparation and balance sheet optimisation (🚧 roadmap)
 
-The `optimize_prep/` module prepares vectorised data structures for fast metric approximation. It creates product parameter tensors and curve tensors, then checks approximate calculations against exact workflow outputs.
+The `optimize_prep/` module prepares vectorised data structures for fast metric approximation. It creates product parameter tensors and curve tensors, then checks approximate calculations against exact workflow outputs. These tensors are also exactly what LabBank (`sandbox/`) reads to run interactively without a database.
 
-This is the bridge toward a future balance sheet optimisation layer, for example:
+`bs_optimization/` builds on that layer with four solvers:
 
-- NIM versus Delta EVE efficient frontier.
-- Portfolio constraints based on SOT, LCR, and NSFR.
-- IRS hedge strategy selection.
-- Fast scenario evaluation across many candidate balance sheet structures.
+- A deterministic balance-sheet optimiser (economic-profit objective, optional soft EVE/NII breach penalty).
+- A joint balance-sheet + free-swap-overlay optimiser.
+- A stochastic optimiser (Monte Carlo scenario sampling).
+- A natural-hedge optimiser that minimises EVE/NII breach severity without economic-profit optimisation.
 
-The solver itself is not the main implemented feature yet; the preparation layer and accuracy checks are already present.
+This layer is functional — see `bs_optimization/notebooks/optimization_report.ipynb` for worked results (run `python bs_optimization/notebooks/export_optimization_report.py` for a code-free HTML/PDF export, or `jupyter nbconvert --to html` for the full export with source — neither export is tracked in git) — but it is **not yet part of the guided LabBank path** and is still being refined. Treat it as a preview of where Phase 3 is heading rather than a finished, documented feature.
 
 ## Repository status
 
@@ -244,5 +270,7 @@ Some assumptions are intentionally simplified or synthetic:
 - Add GitHub Actions checks for formatting and unit tests where SQL dependencies can be mocked.
 
 ## License and disclaimer
+
+Licensed under the [MIT License](LICENSE).
 
 This repository is an educational and analytical engineering project. It is not financial advice, not a regulatory submission engine, and not a production risk system without further validation, controls, documentation, and model governance.

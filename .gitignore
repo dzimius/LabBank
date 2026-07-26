@@ -43,3 +43,14 @@ htmlcov/
 
 # Copyrighted reference material - never commit, cite only
 Diogo Gobira*.pdf
+
+# Notebook-exported HTML reports: regenerate from the tracked .ipynb via
+# visual_rep/export_report.py, bs_optimization/notebooks/export_optimization_report.py,
+# or `jupyter nbconvert --to html <notebook>.ipynb` -- not tracked to avoid
+# committing duplicate rendered output alongside the notebook source.
+# (Hand-authored HTML like docs/*.html and optimize_prep/method_b_explainer.html
+# is unaffected -- only these specific notebook-export paths are ignored.)
+visual_rep/bank_report.html
+visual_rep/finance_report.html
+bs_optimization/notebooks/optimization_report.html
+bs_optimization/notebooks/optimization_report_clean.html

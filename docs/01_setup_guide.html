@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>LabBank — Setup Guide</title>
+<style>
+:root {
+  color-scheme: light dark;
+}
+body {
+  max-width: 840px;
+  margin: 0 auto;
+  padding: 2.5rem 1.5rem 4rem;
+  font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+  line-height: 1.6;
+  color: #1a1a1a;
+  background: #fff;
+}
+@media (prefers-color-scheme: dark) {
+  body { color: #e8e8e8; background: #14161a; }
+  a { color: #7cb0ff; }
+  code, pre { background: #1e2128 !important; color: #e8e8e8; }
+  table th { background: #22262e !important; }
+  table, th, td { border-color: #383c44 !important; }
+  blockquote { border-left-color: #444 !important; color: #b8b8b8 !important; }
+  hr { border-color: #383c44 !important; }
+}
+h1 { font-size: 2rem; border-bottom: 3px solid #2c5f8a; padding-bottom: 0.4rem; }
+h2 { font-size: 1.4rem; margin-top: 2.2rem; border-bottom: 1px solid #ccc; padding-bottom: 0.3rem; }
+h3 { font-size: 1.15rem; margin-top: 1.6rem; }
+code { background: #f2f2f2; padding: 0.15em 0.4em; border-radius: 4px; font-size: 0.9em; }
+pre { background: #f2f2f2; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+pre code { background: none; padding: 0; }
+table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.95em; }
+th, td { border: 1px solid #ccc; padding: 0.5rem 0.7rem; text-align: left; }
+th { background: #f2f2f2; }
+blockquote { border-left: 4px solid #2c5f8a; margin: 1rem 0; padding: 0.3rem 1rem; color: #444; font-style: italic; }
+.doc-header { color: #666; font-size: 0.9rem; margin-bottom: 2rem; }
+hr { border: none; border-top: 1px solid #ddd; margin: 2.5rem 0; }
+@media print {
+  body { max-width: 100%; padding: 0 1cm; }
+  a { color: inherit; text-decoration: none; }
+}
+</style>
+</head>
+<body>
+<div class="doc-header">LabBank &mdash; bank_project</div>
+<h1 id="labbank-setup-guide">LabBank — Setup Guide</h1>
+<p>This guide gets you running in one of two ways: exploring the shipped demo bank in LabBank with nothing but Python, or standing up the full SQL-Server-backed pipeline so you can generate and explore your own balance sheet. Pick the path that matches what you want to do — you can always start with Path A and move to Path B later.</p>
+<h2 id="who-this-is-for">Who this is for</h2>
+<p>Practitioners, risk/ALM analysts, and students who want to see a complete ALM pipeline — from synthetic transaction generation through NII/EVE/EBA SOT/LCR/NSFR — and interact with the results rather than just read about them.</p>
+<hr />
+<h2 id="path-a-labbank-only-no-database-5-minutes">Path A — LabBank only (no database, ~5 minutes)</h2>
+<p>Use this if you want to explore the ALM concepts and stress a pre-built balance sheet interactively. Nothing here touches SQL Server.</p>
+<p><strong>Prerequisites:</strong> Python 3.10 or later.</p>
+<pre><code class="language-bash">git clone &lt;this-repo-url&gt;
+cd bank_project
+python -m venv venv
+</code></pre>
+<p>Activate the environment:</p>
+<pre><code class="language-powershell"># Windows (PowerShell)
+.\venv\Scripts\Activate.ps1
+</code></pre>
+<pre><code class="language-bash"># macOS/Linux
+source venv/bin/activate
+</code></pre>
+<p>Install and run:</p>
+<pre><code class="language-bash">pip install -r requirements.txt
+streamlit run sandbox/app.py
+</code></pre>
+<p>Streamlit opens a browser tab at <code>http://localhost:8501</code>. You'll see six tabs: Balance Sheet, IRS Book, NMD Stress, Metrics, Gap Analysis, and Market Curves. Everything is computed from files already checked into the repo (<code>optimize_prep/output/*.npz</code>, <code>balance_generate/input_data/bank_data.xlsx</code>, and a few supporting Excel files) — no database, no credentials, no orchestration engine involved.</p>
+<p><strong>What to try first:</strong> open the Balance Sheet tab, change a percentage in the "✏️ New %" column (both Assets and Liabilities+Equity must each sum to 100%), then check the Metrics tab to see how NII, EVE, and the EBA Supervisory Outlier Test respond.</p>
+<h3 id="troubleshooting-path-a">Troubleshooting Path A</h3>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Likely cause / fix</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ModuleNotFoundError</code> on streamlit run</td>
+<td>The venv isn't activated, or <code>pip install</code> didn't finish — re-run the two commands above.</td>
+</tr>
+<tr>
+<td>Port 8501 already in use</td>
+<td>Another Streamlit app is running. Run <code>streamlit run sandbox/app.py --server.port 8502</code> instead.</td>
+</tr>
+<tr>
+<td>Charts look stale after editing files</td>
+<td>Click <strong>"🔄 Reload my data"</strong> in the sidebar — the app caches loaded data and doesn't watch the filesystem for changes.</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="path-b-full-etl-pipeline-with-sql-server-generate-your-own-balance-sheet">Path B — Full ETL pipeline with SQL Server (generate your own balance sheet)</h2>
+<p>Use this if you want to build a balance sheet from your own numbers rather than stress the shipped demo one. This path uses SQL Server as the integration/audit layer — every intermediate step (transactions, cash flows, IRRBB results) lands in a real database you can query directly, which is deliberate: being able to run your own SELECTs and aggregations against the data is part of the point, not just a means to an end.</p>
+<h3 id="1-install-sql-server-and-the-odbc-driver">1. Install SQL Server and the ODBC driver</h3>
+<p>Any edition works — <strong>SQL Server Developer Edition</strong> is free and full-featured, or use <strong>SQL Server Express</strong> for a lighter footprint. You also need the <strong>ODBC Driver 17 for SQL Server</strong> (or adjust the driver string in step 3 if you install a different version).</p>
+<p>Create an empty database named <code>bank_gen</code> (any tool works — SSMS, Azure Data Studio, or <code>sqlcmd</code>):</p>
+<pre><code class="language-sql">CREATE DATABASE bank_gen;
+</code></pre>
+<p>You do <strong>not</strong> need to create tables or schemas manually — each module creates its own schema and tables the first time it runs (see <code>sql_setup.py</code> → <code>reset_data(mode=0)</code> in each module).</p>
+<h3 id="2-point-the-pipeline-at-your-database">2. Point the pipeline at your database</h3>
+<p>Every module has its own <code>python_code/sql_setup.py</code> with a hardcoded connection string:</p>
+<pre><code class="language-python">engine = create_engine(
+    &quot;mssql+pyodbc://maciek_d/bank_gen&quot;
+    &quot;?driver=ODBC+Driver+17+for+SQL+Server&quot;
+    &quot;&amp;Trusted_Connection=yes&quot;,
+    ...
+)
+</code></pre>
+<p>Replace <code>maciek_d</code> with your own SQL Server instance name (e.g. <code>localhost</code>, <code>localhost\SQLEXPRESS</code>, or a named instance) in <strong>all seven</strong> copies of this file:</p>
+<ul>
+<li><code>balance_generate/python_code/sql_setup.py</code></li>
+<li><code>balance_gen_add_data/python_code/sql_setup.py</code></li>
+<li><code>cash_flow_calc/python_code/sql_setup.py</code></li>
+<li><code>ir_derivatives/python_code/sql_setup.py</code></li>
+<li><code>irrbb_calc/python_code/sql_setup.py</code></li>
+<li><code>liq_calc/python_code/sql_setup.py</code></li>
+<li><code>optimize_prep/python_code/sql_setup.py</code></li>
+</ul>
+<p><em>(Yes, this is duplicated seven times rather than centralized — see the technical notes doc if you want to fix that instead of just editing all seven.)</em></p>
+<p>The connection uses Windows Trusted Authentication by default (no password stored anywhere). If your SQL Server uses SQL authentication instead, change <code>Trusted_Connection=yes</code> to <code>UID=...;PWD=...</code> in each file — don't commit real credentials if you do this in a shared repo.</p>
+<h3 id="3-run-the-pipeline-via-dagster-recommended">3. Run the pipeline via Dagster (recommended)</h3>
+<pre><code class="language-bash">dagster dev
+</code></pre>
+<p>Open the Dagster UI (usually <code>http://localhost:3000</code>) and launch a job:</p>
+<table>
+<thead>
+<tr>
+<th>Job</th>
+<th>When to use it</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>balance_sheet_job</code></td>
+<td>First run, or whenever you only need to regenerate the balance sheet + IRS positions.</td>
+</tr>
+<tr>
+<td><code>full_run_job</code></td>
+<td>Full pipeline: balance sheet → cash flows → IRRBB → liquidity.</td>
+</tr>
+<tr>
+<td><code>labbank_data_job</code></td>
+<td><strong>Use this one for the "generate your own balance sheet" loop below</strong> — runs everything <code>full_run_job</code> does, plus rebuilds the npz tensors LabBank reads.</td>
+</tr>
+<tr>
+<td><code>irs_update_job</code></td>
+<td>Swap book changed, balance sheet didn't.</td>
+</tr>
+<tr>
+<td><code>irrbb_recalc_job</code></td>
+<td>Market curves changed, balance sheet and cash flows didn't.</td>
+</tr>
+<tr>
+<td><code>liq_only_job</code></td>
+<td>Refresh LCR/NSFR only.</td>
+</tr>
+<tr>
+<td><code>optimize_prep_job</code></td>
+<td>Rebuild LabBank's tensors without re-running the full pipeline (use after <code>full_run_job</code> if you didn't use <code>labbank_data_job</code>).</td>
+</tr>
+</tbody>
+</table>
+<h3 id="4-the-generate-your-own-balance-sheet-loop">4. The "generate your own balance sheet" loop</h3>
+<ol>
+<li>Edit <code>balance_generate/input_data/bank_data.xlsx</code> with your own product balances, rates, and currencies. For swaps, edit <code>ir_derivatives/input/irs_input.xlsx</code>.</li>
+<li>Run <code>labbank_data_job</code> in Dagster.</li>
+<li>Open LabBank (<code>streamlit run sandbox/app.py</code>, or if it's already running, just refresh) and click <strong>"🔄 Reload my data"</strong> in the sidebar.</li>
+<li>LabBank now shows your balance sheet — Balance Sheet, Metrics, Gap Analysis, etc. all reflect it.</li>
+</ol>
+<p>Repeat steps 1–3 as many times as you like; SQL Server stays up the whole time.</p>
+<h3 id="5-running-workflows-directly-without-dagster">5. Running workflows directly (without Dagster)</h3>
+<p>Each stage can also be run as a standalone script, in this order:</p>
+<pre><code class="language-bash">python balance_generate/python_code/b_s_gen_workflow.py
+python balance_gen_add_data/python_code/b_s_add_data_workflow.py
+python cash_flow_calc/python_code/cf_calc_workflow.py
+python ir_derivatives/python_code/irs_workflow.py
+python irrbb_calc/python_code/nii_calc_workflow.py
+python irrbb_calc/python_code/eve_calc_workflow.py
+python irrbb_calc/python_code/eba_sot_workflow.py
+python liq_calc/python_code/lcr_nsfr_workflow.py
+python optimize_prep/python_code/opt_prep_workflow.py
+</code></pre>
+<p>Dagster is recommended over this because it enforces dependency order and keeps a run history — but the scripts work fine standalone if you'd rather not run Dagster at all.</p>
+<h3 id="troubleshooting-path-b">Troubleshooting Path B</h3>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Likely cause / fix</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>pyodbc.InterfaceError</code> / driver not found</td>
+<td>The ODBC Driver 17 isn't installed, or you have a different version — check installed drivers (<code>odbcinst -j</code> on Linux/Mac, ODBC Data Source Administrator on Windows) and update the <code>driver=</code> string in all 7 <code>sql_setup.py</code> files to match.</td>
+</tr>
+<tr>
+<td>Login failed / trusted connection error</td>
+<td><code>Trusted_Connection=yes</code> uses your current Windows login. If SQL Server runs under a different account or on a different machine, you'll need SQL authentication instead (see step 2).</td>
+</tr>
+<tr>
+<td><code>IF NOT EXISTS ... CREATE SCHEMA</code> errors on first run</td>
+<td>Confirm the <code>bank_gen</code> database exists and your login has <code>db_owner</code> (or at least <code>CREATE SCHEMA</code>/<code>CREATE TABLE</code>) permission on it.</td>
+</tr>
+<tr>
+<td>LabBank still shows the old balance sheet after <code>labbank_data_job</code></td>
+<td>Click "🔄 Reload my data" — the app doesn't auto-detect file changes on disk.</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="where-to-go-next">Where to go next</h2>
+<ul>
+<li><strong><a href="02_methodology.md">Methodology</a></strong> — what NII, EVE, EBA SOT, LCR, and NSFR mean and how this project calculates them.</li>
+<li><strong><a href="03_technical_notes.md">Technical notes</a></strong> — for maintainers: architecture, data flow, and known weak spots (internal document — useful if you're extending the pipeline, not required reading to just use LabBank).</li>
+</ul>
+</body>
+</html>

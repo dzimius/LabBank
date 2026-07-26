@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>LabBank — Methodology</title>
+<style>
+:root {
+  color-scheme: light dark;
+}
+body {
+  max-width: 840px;
+  margin: 0 auto;
+  padding: 2.5rem 1.5rem 4rem;
+  font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+  line-height: 1.6;
+  color: #1a1a1a;
+  background: #fff;
+}
+@media (prefers-color-scheme: dark) {
+  body { color: #e8e8e8; background: #14161a; }
+  a { color: #7cb0ff; }
+  code, pre { background: #1e2128 !important; color: #e8e8e8; }
+  table th { background: #22262e !important; }
+  table, th, td { border-color: #383c44 !important; }
+  blockquote { border-left-color: #444 !important; color: #b8b8b8 !important; }
+  hr { border-color: #383c44 !important; }
+}
+h1 { font-size: 2rem; border-bottom: 3px solid #2c5f8a; padding-bottom: 0.4rem; }
+h2 { font-size: 1.4rem; margin-top: 2.2rem; border-bottom: 1px solid #ccc; padding-bottom: 0.3rem; }
+h3 { font-size: 1.15rem; margin-top: 1.6rem; }
+code { background: #f2f2f2; padding: 0.15em 0.4em; border-radius: 4px; font-size: 0.9em; }
+pre { background: #f2f2f2; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+pre code { background: none; padding: 0; }
+table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.95em; }
+th, td { border: 1px solid #ccc; padding: 0.5rem 0.7rem; text-align: left; }
+th { background: #f2f2f2; }
+blockquote { border-left: 4px solid #2c5f8a; margin: 1rem 0; padding: 0.3rem 1rem; color: #444; font-style: italic; }
+.doc-header { color: #666; font-size: 0.9rem; margin-bottom: 2rem; }
+hr { border: none; border-top: 1px solid #ddd; margin: 2.5rem 0; }
+@media print {
+  body { max-width: 100%; padding: 0 1cm; }
+  a { color: inherit; text-decoration: none; }
+}
+</style>
+</head>
+<body>
+<div class="doc-header">LabBank &mdash; bank_project</div>
+<h1 id="labbank-methodology">LabBank — Methodology</h1>
+<p>A practical description of what LabBank calculates and why, written for practitioners, managers, and students — not a regulatory text, and not an academic paper. Where a formula is genuinely necessary to understand what's happening, it's included; otherwise this stays in plain language.</p>
+<h2 id="the-idea">The idea</h2>
+<p>A bank's balance sheet produces thousands of cash flows every day. Regulatory metrics — NII, EVE, LCR, NSFR — must all be derived from those cash flows in a consistent, auditable, reproducible way. In practice this is hard: rates reset, balances prepay, deposits decay, and shock scenarios need to be applied simultaneously across every position in every currency.</p>
+<p>Most systems hide this complexity behind aggregated dashboards. LabBank makes it explicit, on one core principle:</p>
+<blockquote>
+<p>Every number in every report traces back to a single row in a single cash-flow table. No aggregation happens before it is recorded.</p>
+</blockquote>
+<p>That means NII, EVE, LCR, and NSFR are not four separate models — they're four different aggregations of the <em>same</em> underlying cash-flow schedule.</p>
+<h2 id="architecture-in-four-layers">Architecture, in four layers</h2>
+<pre><code>Excel inputs  →  Python modules (orchestrated by Dagster)  →  SQL Server (9 schemas)  →  Reports
+</code></pre>
+<p>SQL Server is the single integration bus. Every step reads from tables the previous step wrote, instead of passing hidden in-memory state — which means every stage can be re-run independently and audited by querying the database directly.</p>
+<h2 id="pipeline-step-by-step">Pipeline, step by step</h2>
+<ol>
+<li><strong>Balance sheet generation</strong> — synthetic transactions are drawn from <code>bank_data.xlsx</code> using truncated-normal balance distributions and historical WIBOR rates. Written to <code>dbo.transactions</code> and five <code>schemat.*</code> tables (loans, deposits, financial instruments, equity).</li>
+<li><strong>Market data enrichment</strong> — yield curves bootstrapped into <code>mkt.curves</code>; historical fixings loaded into <code>mkt.fixings</code>; behavioural model parameters (prepayment, NMD decay) loaded into <code>bs.*</code>.</li>
+<li><strong>Cash flow generation</strong> — for every transaction, a full schedule of contractual amortisation plus behavioural adjustments is produced and written to <code>cf.products</code>. Repricing gaps are written to <code>irrbb.ir_gap_*</code>.</li>
+<li><strong>IR derivatives (optional)</strong> — swap legs read from <code>irs_input.xlsx</code>, cash-flow schedules written to <code>cf.ir_swap_*</code>, and the swap gap merged into <code>irrbb.ir_gap_beh</code>.</li>
+<li><strong>IRRBB calculation</strong> — six EBA shock scenarios applied to all curves; NII computed over a 1-year horizon, EVE as the present value of run-off cash flows. Both written to <code>irrbb.*</code>.</li>
+<li><strong>Liquidity calculation</strong> — LCR (HQLA vs. stressed 30-day net outflows) and NSFR (available vs. required stable funding over 1 year), written to <code>results.lcr_nsfr</code>.</li>
+<li><strong>Reporting</strong> — Jupyter notebooks read live from SQL and export to HTML; Power BI connects directly to <code>schemat.*</code> for interactive repricing-gap exploration; Excel outputs for IRRBB and LCR/NSFR.</li>
+</ol>
+<p>Steps 5, 6, and 7 can each be re-run independently without touching the balance sheet or cash flows — enforced by the Dagster job definitions (<code>irrbb_recalc_job</code>, <code>liq_only_job</code>, etc).</p>
+<h2 id="cash-flow-engine-and-behavioural-modelling">Cash flow engine and behavioural modelling</h2>
+<p>For each product, the engine generates two things per period: <strong>capital cash flows</strong> (contractual amortisation plus behavioural adjustments) and <strong>interest cash flows</strong> (coupon payments at the contracted client rate).</p>
+<p>Behavioural assumptions applied:</p>
+<ul>
+<li><strong>Loans</strong> — a constant prepayment rate (CPR) applied monthly to the outstanding balance.</li>
+<li><strong>Non-maturity deposits (NMD)</strong> — an exponential decay model: a fraction leaves each month, the remainder is treated as sticky long-term funding.</li>
+<li><strong>Admin-rate floor</strong> — interest on current accounts is capped at 0% and never passed through to the client as a negative rate.</li>
+</ul>
+<p>The key output table, <code>cf.products</code>, has one row per (transaction, payment date), including both the contractual and behavioural outstanding balance and cash flow, the market forward rate, and the all-in client rate. NII is computed from the interest cash flows within the 1-year horizon; EVE uses the full behavioural run-off schedule to maturity.</p>
+<h2 id="repricing-gap-and-interest-rate-swaps">Repricing gap and interest rate swaps</h2>
+<p>The <strong>repricing gap</strong> is the net volume of assets minus liabilities repricing in each tenor bucket. A positive gap means more assets reprice in that bucket — the bank benefits from rising rates there; a negative gap signals liability-sensitive exposure.</p>
+<p>Interest rate swaps overlay this gap <strong>without changing the underlying balance sheet</strong>: the swap gap is computed separately and merged into the balance-sheet repricing gap before IRRBB is calculated. This is what lets LabBank show "balance sheet only" vs. "balance sheet + IRS" gap views side by side.</p>
+<h2 id="irrbb-nii">IRRBB — NII</h2>
+<p>NII decomposes into two parts per scenario:</p>
+<ul>
+<li><strong>Locked interest</strong> — income from cash flows already contracted (rate and notional fixed). Immune to rate shocks.</li>
+<li><strong>Renewal</strong> — income from maturing capital reinvested at market rates within the 1-year horizon. This part reprices with the curve.</li>
+</ul>
+<p>A bank with more assets than liabilities repricing in the short end is <strong>asset-sensitive</strong>: parallel-up shocks help NII, parallel-down shocks hurt it.</p>
+<h2 id="irrbb-eve">IRRBB — EVE</h2>
+<p>EVE is the present value of all future cash flows under a <strong>run-off assumption</strong> — no new business, the existing book winds down to maturity:</p>
+<pre><code>EVE = Σᵢ CFᵢ_behavioural × discount_factor(tᵢ)
+ΔEVE_scenario = EVE_scenario − EVE_base
+</code></pre>
+<p>Because EVE uses all maturities (not a 1-year cut-off), it's the slower calculation of the two. A negative ΔEVE means economic net worth falls under that scenario — typically because long fixed-rate assets lose value faster than liabilities as rates rise. This is what creates the classic NII-vs-EVE trade-off: a bank positioned to benefit from rising rates on NII is usually the same bank that loses EVE in that scenario.</p>
+<h2 id="eba-shock-scenario-construction">EBA shock scenario construction</h2>
+<p>Six supervisory scenarios (per EBA/RTS/2022/10) are applied to each currency curve — parallel up/down, steepener, flattener, and short-rate up/down — plus an "own" scenario. Shocks are floored at 0% per tenor (rates can't be shocked below zero in this construction). Example PLN parameters: parallel shock ±250 bps, short-rate ±350 bps, long-rate ±150 bps; the "own" scenario adds a −100 bps parallel shock.</p>
+<h2 id="supervisory-outlier-test-eba-sot">Supervisory Outlier Test (EBA SOT)</h2>
+<p>The SOT applies a <strong>50% haircut per tenor bucket</strong> to any scenario leg that produces a <em>gain</em>, before summing across buckets:</p>
+<pre><code>ΔEVE_regulatory = Σ_b [ min(ΔEVE_b, 0) + 0.5 × max(ΔEVE_b, 0) ]
+</code></pre>
+<p>Applying the haircut at bucket level (not on the total) is deliberate and conservative — it prevents a gain in one bucket from offsetting a loss in another before the haircut is applied. The same bucket-level logic is applied to the NII SOT.</p>
+<p>Thresholds:</p>
+<ul>
+<li><strong>EVE SOT</strong>: ΔEVE_regulatory / Tier 1 capital &lt; −15% → breach.</li>
+<li><strong>NII SOT</strong>: ΔNII_regulatory / Tier 1 capital &lt; −5% → breach.</li>
+</ul>
+<h2 id="liquidity-lcr-and-nsfr">Liquidity — LCR and NSFR</h2>
+<pre><code>LCR  = HQLA / stressed net outflows (30 days)   ≥ 100%
+NSFR = Available Stable Funding / Required Stable Funding   ≥ 100%
+</code></pre>
+<ul>
+<li><strong>HQLA</strong> — Level 1 liquid assets (cash, central bank reserves, sovereign bonds) at their respective haircuts.</li>
+<li><strong>Net outflows</strong> — stressed deposit run-off and interbank maturities within 30 days.</li>
+<li><strong>ASF</strong> — stable funding weighted by tenor and type (equity and long-term debt score highest).</li>
+<li><strong>RSF</strong> — assets weighted by illiquidity (loans and illiquid instruments score highest).</li>
+</ul>
+<h2 id="behavioural-liquidity-gap">Behavioural liquidity gap</h2>
+<p>Beyond the regulatory ratios, the liquidity gap shows the net cash position across the full tenor ladder (up to 60 months), using behavioural cash flows — loan prepayments included, NMD decay applied. A sustained negative cumulative gap identifies the point at which the bank would need additional funding — the primary input for contingency funding planning, distinct from the point-in-time LCR/NSFR ratios.</p>
+<h2 id="exploring-this-interactively-labbank">Exploring this interactively — LabBank</h2>
+<p>The Streamlit app (<code>sandbox/app.py</code>) lets you stress every piece described above without touching SQL: change balance sheet composition, add or edit swaps, stress NMD decay assumptions, and immediately see NII, EVE, EBA SOT, LCR, and NSFR respond — plus the repricing gap and liquidity gap charts. See the <a href="01_setup_guide.md">setup guide</a> to run it.</p>
+<h2 id="whats-next-balance-sheet-optimisation">What's next — balance sheet optimisation</h2>
+<p>Balance sheet optimisation (constrained economic-profit vs. ΔEVE/ΔNII breach trade-off) is the next phase, implemented in <code>bs_optimization/</code> as four solvers (deterministic, joint balance-sheet + swap overlay, stochastic Monte Carlo, and a natural-hedge minimiser). It's functional but not yet part of the guided LabBank path — treat it as a preview of where this project is heading rather than a finished, documented feature.</p>
+<h2 id="a-note-on-scope">A note on scope</h2>
+<p>Behavioural models (prepayment, NMD decay) are illustrative rather than calibrated to a real portfolio, and the balance sheet itself is synthetic. This project demonstrates <em>how</em> an ALM pipeline should be built and how its metrics relate to each other — it is not a substitute for a validated, governed production risk system.</p>
+</body>
+</html>

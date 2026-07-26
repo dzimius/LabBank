@@ -215,7 +215,23 @@
       "Bash(grep -v \"bank_reprice_at_weights.py$\")",
       "Bash(git config *)",
       "Bash(venv/Scripts/python.exe -c \"from dagster_pipeline.definitions import defs; print\\([j.name for j in defs.get_all_job_defs\\(\\)]\\)\")",
-      "Bash(venv/Scripts/python.exe -m py_compile sandbox/app.py)"
+      "Bash(venv/Scripts/python.exe -m py_compile sandbox/app.py)",
+      "Bash(pandoc --version)",
+      "Bash(where pandoc *)",
+      "Bash(where winget *)",
+      "Bash(grep -n '\\\\\\\\section\\\\|\\\\\\\\subsection\\\\|\\\\\\\\frametitle' visual_rep/labbank_presentation.tex)",
+      "Bash(grep -n '\\\\\\\\begin{frame}' visual_rep/labbank_presentation.tex)",
+      "Bash(venv/Scripts/python.exe -c \"import markdown; print\\(markdown.__version__\\)\")",
+      "Bash(venv/Scripts/python.exe -m pip install markdown --quiet)",
+      "Bash(venv/Scripts/python.exe docs/build_docs.py)",
+      "Bash(grep -rn \"C:/Users/dzimi\\\\|C:\\\\\\\\\\\\\\\\Users\\\\\\\\\\\\\\\\dzimi\" --include=\"*.py\" .)",
+      "Bash(xargs -0 -I{} sh -c 'wc -l < \"{}\" 2>/dev/null')",
+      "Bash(awk '{s+=$1} END {print s}')",
+      "Bash(xargs -0 wc -l)",
+      "Bash(xargs -0 -I{} sh -c 'echo \"$\\(sha256sum \"{}\" | cut -d\" \" -f1\\) {}\"')",
+      "Bash(awk '{print $1}')",
+      "Bash(awk '$1>1')",
+      "Bash(git rm *)"
     ]
   }
 }
