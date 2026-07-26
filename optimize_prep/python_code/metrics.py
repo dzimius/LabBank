@@ -38,6 +38,17 @@ from nii_fast  import compute_nii_scenarios, compute_nii_all_scenarios
 from eve_fast  import compute_eve_base_fast, compute_eve_all_scenarios, compute_worst_delta_eve
 from lcr_fast  import compute_lcr_fast, worst_lcr
 from nsfr_fast import compute_nsfr_fast, worst_nsfr
+from rwa_fast  import compute_rwa_fast
+from bias_store import load_bias_corrections, apply_eve_bias, apply_nii_bias
+
+# Lazy-loaded once per process — avoids disk hit on every sandbox callback
+_bias_cache: tuple | None = None
+
+def _get_bias() -> tuple:
+    global _bias_cache
+    if _bias_cache is None:
+        _bias_cache = load_bias_corrections()
+    return _bias_cache
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -73,6 +84,12 @@ class AllMetrics:
     worst_delta_nii:    float
     worst_nii_scenario: str
     total_assets:       float
+    rwa:                float = 0.0
+
+    # ── RWA / CET1 ratio (computed on demand) ────────────────────────────────
+    def t1_rwa_ratio(self, tier1_capital: float) -> float:
+        """Tier-1 capital / RWA. Basel III CET1 floor is typically 8%."""
+        return tier1_capital / self.rwa if self.rwa > 0 else float("inf")
 
     # ── EBA SOT ratios (computed on demand) ──────────────────────────────────
     def sot_nii_pct(self, scenario_id: str, tier1_capital: float) -> float:
@@ -170,21 +187,33 @@ def compute_all_metrics(
     nii_base       = nii_scenarios.pop("base")
     delta_nii      = nii_scenarios
 
-    worst_dnii     = min(delta_nii.values()) if delta_nii else 0.0
-    worst_nii_scen = min(delta_nii, key=delta_nii.get) if delta_nii else ""
-
     # ── EVE ───────────────────────────────────────────────────────────────────
     eve_scenarios  = compute_eve_all_scenarios(amounts, params)
     eve_base       = eve_scenarios.pop("base")
     delta_eve      = eve_scenarios
 
-    worst_deve, worst_eve_scen = compute_worst_delta_eve(amounts, params)
+    # ── Bias correction (exact − fast) scaled by current amounts ─────────────
+    # Loaded once per process from bias_corrections.npz (written by accuracy_check.py).
+    # When the file is absent the dicts are returned unchanged.
+    _bias_eve_u, _bias_nii_u, _bias_scens = _get_bias()
+    if _bias_eve_u is not None:
+        apply_eve_bias(delta_eve, amounts, _bias_eve_u, _bias_scens)
+        apply_nii_bias(delta_nii, amounts, _bias_nii_u, _bias_scens)
+
+    worst_dnii     = min(delta_nii.values()) if delta_nii else 0.0
+    worst_nii_scen = min(delta_nii, key=delta_nii.get) if delta_nii else ""
+
+    worst_deve     = min(delta_eve.values()) if delta_eve else 0.0
+    worst_eve_scen = min(delta_eve, key=delta_eve.get) if delta_eve else ""
 
     # ── LCR ───────────────────────────────────────────────────────────────────
     lcr  = compute_lcr_fast(amounts, params)
 
     # ── NSFR ──────────────────────────────────────────────────────────────────
     nsfr = compute_nsfr_fast(amounts, params)
+
+    # ── RWA (Basel III standardized) ─────────────────────────────────────────
+    rwa  = compute_rwa_fast(amounts, params)
 
     return AllMetrics(
         nii_base           = nii_base,
@@ -198,6 +227,7 @@ def compute_all_metrics(
         worst_delta_nii    = worst_dnii,
         worst_nii_scenario = worst_nii_scen,
         total_assets       = total_assets,
+        rwa                = rwa,
     )
 
 

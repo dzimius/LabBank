@@ -1,24 +1,17 @@
 """accuracy_check.py
 ====================
-Compare fast metric approximations against exact pipeline results.
+Compare CF-based fast metric approximations (method B) against exact pipeline results.
 
-Two fast approaches are shown side-by-side per metric:
-  A — calibrated sensi   : amounts @ delta_nii_unit / delta_eve_unit
-                           (exact at calibration point by construction)
-  B — CF-based           : NII from rate_matrix[n,12,n_scen],
-                           EVE from cohort_disc_q[n,max_q,n_scen]
-                           (independent approximation, works for any weight vector)
-
-Approach B is purely CF-based with no calibrated fallback. Single-row products
-use cohort_outstanding_m profiles set in extract_params: rate-sensitive products
-(8000, 0000 L) get computed profiles; equity and non-rate products get zeros.
-This means B may show honest errors for products where the CF model is imperfect.
+Method B — CF-based: NII from rate_matrix[n,12,n_scen],
+                     EVE from cohort_disc_q[n,max_q,n_scen]
+           Works for any weight vector; no calibrated fallback except for single-row
+           products without CF schedules (equity, non-rate-sensitive).
 
 Output sheets:
-  Base      — NII and EVE per product code, base scenario (A and B)
-  Scenarios — delta_NII and delta_EVE per product × scenario (A and B)
+  Base      — NII and EVE per product code, base scenario
+  Scenarios — delta_NII and delta_EVE per product × scenario (raw + bias-corrected)
   LCR_NSFR  — LCR and NSFR ratios
-  Summary   — portfolio-level pass/fail for both approaches
+  Summary   — portfolio-level errors vs SOT thresholds (err/T1 perspective)
 """
 from __future__ import annotations
 
@@ -33,8 +26,10 @@ ROOT_DIR = os.path.join(BASE_DIR, "..", "..")
 sys.path.insert(0, BASE_DIR)
 
 from bs_vector import BalanceSheetParams, CurveTensors, CohortRates
-from metrics import load_params_and_curves, compute_all_metrics
+from metrics import load_params_and_curves
 from nii_fast import compute_nii_schedule_base_by_product
+from lcr_fast import compute_lcr_fast
+from nsfr_fast import compute_nsfr_fast
 from nii_eve_cf_fast import (
     compute_nii_cf_all,
     compute_nii_cf_by_product,
@@ -111,51 +106,12 @@ def _load_exact_lcr_nsfr() -> pd.DataFrame:
     return pd.read_sql_query(q, engine, params={"rd": REPORT_DATE})
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Approach A — calibrated sensi  (delta_nii_unit / delta_eve_unit)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _approach_a_base(params: BalanceSheetParams, amounts: np.ndarray) -> pd.DataFrame:
-    """Base NII and EVE per (product_code, bs_side, currency) — calibrated sensi."""
-    rows: dict = {}
-    for i, (pc, sid, ccy) in enumerate(
-        zip(params.product_code, params.bs_side, params.currency)
-    ):
-        k = (str(pc), str(sid), str(ccy))
-        if k not in rows:
-            rows[k] = {"balance": 0.0, "NII_A": 0.0, "EVE_A": 0.0}
-        rows[k]["balance"] += amounts[i]
-        rows[k]["NII_A"]   += amounts[i] * params.nii_unit_rate[i]
-        rows[k]["EVE_A"]   += amounts[i] * params.eve_pv_factor[i]
-
-    return pd.DataFrame([
-        {"product_code": pc, "bs_side": sid, "currency": ccy, **v}
-        for (pc, sid, ccy), v in rows.items()
-    ])
-
-
-def _approach_a_scen(
-    params: BalanceSheetParams, amounts: np.ndarray
-) -> pd.DataFrame:
-    """delta NII and delta EVE per product × scenario — calibrated sensi."""
-    rows = []
-    for s_idx, scen in enumerate(params.scenario_ids):
-        scen = str(scen)
-        agg: dict = {}
-        for i, (pc, sid, ccy) in enumerate(
-            zip(params.product_code, params.bs_side, params.currency)
-        ):
-            k = (str(pc), str(sid), str(ccy))
-            if k not in agg:
-                agg[k] = {"dNII_A": 0.0, "dEVE_A": 0.0}
-            agg[k]["dNII_A"] += amounts[i] * params.delta_nii_unit[i, s_idx]
-            agg[k]["dEVE_A"] += amounts[i] * params.delta_eve_unit[i, s_idx]
-        for (pc, sid, ccy), v in agg.items():
-            rows.append({
-                "product_code": pc, "bs_side": sid, "currency": ccy,
-                "scenario_id": scen, **v,
-            })
-    return pd.DataFrame(rows)
+def _load_tier1_capital() -> float:
+    result = pd.read_sql_query(
+        text("SELECT ISNULL(SUM(balance_amt), 0) AS tier1 FROM schemat.equity WHERE report_date = :rd"),
+        engine, params={"rd": REPORT_DATE},
+    )
+    return float(result["tier1"].iloc[0])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -278,19 +234,15 @@ def run_accuracy_check() -> None:
     cr = CohortRates.load(NPZ_PARAMS)
 
     amounts = params.balance_arr
-    w       = amounts / TOTAL_ASSETS
-    metrics = compute_all_metrics(w, params, curves, TOTAL_ASSETS)
 
     print("Loading exact results from SQL...")
     exact_nii_df = _load_exact_nii_by_product()
     exact_eve_df = _load_exact_eve_by_product()
     exact_liq    = _load_exact_lcr_nsfr()
+    tier1        = _load_tier1_capital()
+    print(f"Tier 1 capital: {tier1:,.0f}  (SOT NII threshold: 5% = {tier1*0.05:,.0f}  EVE: 15% = {tier1*0.15:,.0f})")
 
-    print("Computing approach A (calibrated sensi)...")
-    base_A = _approach_a_base(params, amounts)
-    scen_A = _approach_a_scen(params, amounts)
-
-    print("Computing approach B (CF-based, rate_matrix + cohort_disc_q)...")
+    print("Computing method B (CF-based, rate_matrix + cohort_disc_q)...")
     base_B = _approach_b_base(params, cr, amounts)
     scen_B = _approach_b_scen(params, cr, amounts)
 
@@ -310,45 +262,34 @@ def run_accuracy_check() -> None:
     exact_eve_base = (exact_eve_df[exact_eve_df["scenario_id"] == "base"]
                       .rename(columns={"pv_total": "EVE_exact"})[_KEY + ["EVE_exact"]])
 
-    base_sheet = (base_A
-                  .merge(base_B,          on=_KEY, how="outer")
+    base_sheet = (base_B
                   .merge(sched_base_df,   on=_KEY, how="outer")
                   .merge(exact_nii_base,  on=_KEY, how="outer")
                   .merge(exact_eve_base,  on=_KEY, how="outer"))
     base_sheet = base_sheet.fillna(0.0)
 
-    base_sheet["NII_err_A"]     = [_pct_err(f, e)
-        for f, e in zip(base_sheet["NII_A"],     base_sheet["NII_exact"])]
     base_sheet["NII_err_B"]     = [_pct_err(f, e)
         for f, e in zip(base_sheet["NII_B"],     base_sheet["NII_exact"])]
     base_sheet["NII_err_sched"] = [_pct_err(f, e)
         for f, e in zip(base_sheet["NII_sched"], base_sheet["NII_exact"])]
-    base_sheet["EVE_err_A"]     = [_pct_err(f, e)
-        for f, e in zip(base_sheet["EVE_A"],     base_sheet["EVE_exact"])]
     base_sheet["EVE_err_B"]     = [_pct_err(f, e)
         for f, e in zip(base_sheet["EVE_B"],     base_sheet["EVE_exact"])]
 
-    # Bias = exact_base − fast_base (PLN).  Positive → fast underestimates.
-    # A constant bias at base can be used to shift shocked-scenario estimates:
-    #   NII_shocked_corrected = NII_fast_shocked + NII_bias
-    #   delta_NII_corrected   = delta_NII_fast   + NII_bias
+    # Bias = exact_base − fast_base (PLN); used to first-order-correct shocked deltas.
     base_sheet["NII_bias"]  = base_sheet["NII_exact"] - base_sheet["NII_sched"]
     base_sheet["EVE_bias"]  = base_sheet["EVE_exact"] - base_sheet["EVE_B"]
 
-    for col in ["balance", "NII_exact", "NII_A", "NII_B", "NII_sched",
-                "NII_bias", "EVE_exact", "EVE_A", "EVE_B", "EVE_bias"]:
+    for col in ["balance", "NII_exact", "NII_B", "NII_sched",
+                "NII_bias", "EVE_exact", "EVE_B", "EVE_bias"]:
         if col in base_sheet.columns:
             base_sheet[col] = base_sheet[col].round(0)
-    for col in ["NII_err_A", "NII_err_B", "NII_err_sched", "EVE_err_A", "EVE_err_B"]:
+    for col in ["NII_err_B", "NII_err_sched", "EVE_err_B"]:
         base_sheet[col] = base_sheet[col].round(2)
 
     base_sheet = base_sheet[
-        _KEY + ["balance",
-                "NII_exact", "NII_A", "NII_err_A",
-                "NII_B",     "NII_err_B",
+        _KEY + ["NII_exact", "NII_B",     "NII_err_B",
                 "NII_sched", "NII_err_sched", "NII_bias",
-                "EVE_exact", "EVE_A", "EVE_err_A",
-                "EVE_B",     "EVE_err_B",     "EVE_bias"]
+                "EVE_exact", "EVE_B",     "EVE_err_B", "EVE_bias"]
     ].sort_values(_KEY).reset_index(drop=True)
 
     # ── Sheet 2: Scenarios ────────────────────────────────────────────────────
@@ -375,17 +316,11 @@ def run_accuracy_check() -> None:
     exact_nii_delta = exact_nii_scen[_SCEN_KEY + ["dNII_exact"]]
     exact_eve_delta = exact_eve_scen[_SCEN_KEY + ["dEVE_exact"]]
 
-    scen_sheet = (scen_A
-                  .merge(scen_B,          on=_SCEN_KEY, how="outer")
+    scen_sheet = (scen_B
                   .merge(exact_nii_delta, on=_SCEN_KEY, how="outer")
                   .merge(exact_eve_delta, on=_SCEN_KEY, how="outer"))
     scen_sheet = scen_sheet.fillna(0.0)
 
-    # Bias-corrected deltas: delta_corrected = delta_fast + base_bias
-    # Rationale: if the fast model is off by X at base (exact_base − fast_base),
-    # assume the same systematic offset at any shocked level.
-    # Then NII_shocked_corrected = NII_fast_shocked + bias_base, and
-    #      delta_NII_corrected   = delta_NII_fast   + bias_base.
     nii_bias_map = base_sheet.set_index(_KEY)["NII_bias"].to_dict()
     eve_bias_map = base_sheet.set_index(_KEY)["EVE_bias"].to_dict()
 
@@ -394,10 +329,6 @@ def run_accuracy_check() -> None:
             (row["product_code"], row["bs_side"], row["currency"]), 0.0
         )
 
-    scen_sheet["dNII_A_biascorr"] = (
-        scen_sheet["dNII_A"]
-        + scen_sheet.apply(lambda r: _lookup_bias(r, nii_bias_map), axis=1)
-    )
     scen_sheet["dNII_B_biascorr"] = (
         scen_sheet["dNII_B"]
         + scen_sheet.apply(lambda r: _lookup_bias(r, nii_bias_map), axis=1)
@@ -407,42 +338,72 @@ def run_accuracy_check() -> None:
         + scen_sheet.apply(lambda r: _lookup_bias(r, eve_bias_map), axis=1)
     )
 
-    scen_sheet["dNII_err_A"]            = [_pct_err(f, e)
-        for f, e in zip(scen_sheet["dNII_A"],            scen_sheet["dNII_exact"])]
-    scen_sheet["dNII_err_B"]            = [_pct_err(f, e)
-        for f, e in zip(scen_sheet["dNII_B"],            scen_sheet["dNII_exact"])]
-    scen_sheet["dNII_err_A_biascorr"]   = [_pct_err(f, e)
-        for f, e in zip(scen_sheet["dNII_A_biascorr"],   scen_sheet["dNII_exact"])]
-    scen_sheet["dNII_err_B_biascorr"]   = [_pct_err(f, e)
-        for f, e in zip(scen_sheet["dNII_B_biascorr"],   scen_sheet["dNII_exact"])]
-    scen_sheet["dEVE_err_A"]            = [_pct_err(f, e)
-        for f, e in zip(scen_sheet["dEVE_A"],            scen_sheet["dEVE_exact"])]
-    scen_sheet["dEVE_err_B"]            = [_pct_err(f, e)
-        for f, e in zip(scen_sheet["dEVE_B"],            scen_sheet["dEVE_exact"])]
-    scen_sheet["dEVE_err_B_biascorr"]   = [_pct_err(f, e)
-        for f, e in zip(scen_sheet["dEVE_B_biascorr"],   scen_sheet["dEVE_exact"])]
+    scen_sheet["dNII_err_B"]          = [_pct_err(f, e)
+        for f, e in zip(scen_sheet["dNII_B"],          scen_sheet["dNII_exact"])]
+    scen_sheet["dNII_err_B_biascorr"] = [_pct_err(f, e)
+        for f, e in zip(scen_sheet["dNII_B_biascorr"], scen_sheet["dNII_exact"])]
+    scen_sheet["dEVE_err_B"]          = [_pct_err(f, e)
+        for f, e in zip(scen_sheet["dEVE_B"],          scen_sheet["dEVE_exact"])]
+    scen_sheet["dEVE_err_B_biascorr"] = [_pct_err(f, e)
+        for f, e in zip(scen_sheet["dEVE_B_biascorr"], scen_sheet["dEVE_exact"])]
 
-    for col in ["dNII_exact", "dNII_A", "dNII_B", "dNII_A_biascorr", "dNII_B_biascorr",
-                "dEVE_exact", "dEVE_A", "dEVE_B", "dEVE_B_biascorr"]:
+    for col in ["dNII_exact", "dNII_B", "dNII_B_biascorr",
+                "dEVE_exact", "dEVE_B", "dEVE_B_biascorr"]:
         if col in scen_sheet.columns:
             scen_sheet[col] = scen_sheet[col].round(0)
-    for col in ["dNII_err_A", "dNII_err_B", "dNII_err_A_biascorr", "dNII_err_B_biascorr",
-                "dEVE_err_A", "dEVE_err_B", "dEVE_err_B_biascorr"]:
+    for col in ["dNII_err_B", "dNII_err_B_biascorr", "dEVE_err_B", "dEVE_err_B_biascorr"]:
         scen_sheet[col] = scen_sheet[col].round(2)
 
     scen_sheet = scen_sheet[
         _SCEN_KEY + [
             "dNII_exact",
-            "dNII_A",          "dNII_err_A",
             "dNII_B",          "dNII_err_B",
-            "dNII_A_biascorr", "dNII_err_A_biascorr",
             "dNII_B_biascorr", "dNII_err_B_biascorr",
             "dEVE_exact",
-            "dEVE_A",          "dEVE_err_A",
             "dEVE_B",          "dEVE_err_B",
             "dEVE_B_biascorr", "dEVE_err_B_biascorr",
         ]
     ].sort_values(_SCEN_KEY).reset_index(drop=True)
+
+    # ── Save per-unit bias corrections for optimizer / sandbox ────────────────
+    try:
+        from bias_store import save_bias_corrections
+
+        prod_bal: dict[tuple[str, str, str], float] = {}
+        for i, (pc, sid, ccy) in enumerate(zip(
+            params.product_code, params.bs_side, params.currency
+        )):
+            k = (str(pc), str(sid), str(ccy))
+            prod_bal[k] = prod_bal.get(k, 0.0) + float(amounts[i])
+
+        # per-product per-scenario gap: (exact − fast) in PLN
+        gap_eve: dict[tuple[str, str, str, str], float] = {}
+        gap_nii: dict[tuple[str, str, str, str], float] = {}
+        for _, row in scen_sheet.iterrows():
+            k = (str(row["product_code"]), str(row["bs_side"]),
+                 str(row["currency"]),     str(row["scenario_id"]))
+            gap_eve[k] = float(row["dEVE_exact"]) - float(row["dEVE_B"])
+            gap_nii[k] = float(row["dNII_exact"]) - float(row["dNII_B"])
+
+        shocked_scens = [str(s) for s in params.scenario_ids]
+        n   = len(params.balance_arr)
+        n_s = len(shocked_scens)
+        bias_eve_u = np.zeros((n, n_s), dtype=float)
+        bias_nii_u = np.zeros((n, n_s), dtype=float)
+        for i, (pc, sid, ccy) in enumerate(zip(
+            params.product_code, params.bs_side, params.currency
+        )):
+            k3 = (str(pc), str(sid), str(ccy))
+            pb = prod_bal.get(k3, 0.0)
+            if pb <= 0.0:
+                continue
+            for s_idx, scen in enumerate(shocked_scens):
+                bias_eve_u[i, s_idx] = gap_eve.get((str(pc), str(sid), str(ccy), scen), 0.0) / pb
+                bias_nii_u[i, s_idx] = gap_nii.get((str(pc), str(sid), str(ccy), scen), 0.0) / pb
+
+        save_bias_corrections(bias_eve_u, bias_nii_u, shocked_scens)
+    except Exception as exc:
+        print(f"  WARNING: bias corrections not saved — {exc}")
 
     # ── CF schedule diagnostic: per-cohort yf range and disc change ──────────
     _diag_pc = {"1000", "2000", "2100", "3000", "3100", "7060"}
@@ -494,47 +455,62 @@ def run_accuracy_check() -> None:
               f"{_ss.dNII_exact.sum():>14,.0f}  {_ss.dNII_B.sum():>14,.0f}  {_ss.NII_gap.sum():>14,.0f}")
 
     # ── Sheet 3: LCR / NSFR ──────────────────────────────────────────────────
+    _lcr_fast  = compute_lcr_fast(amounts, params)
+    _nsfr_fast = compute_nsfr_fast(amounts, params)
     liq_rows = []
     if not exact_liq.empty:
         for _, r in exact_liq.iterrows():
             ccy        = r["currency"]
             exact_lcr  = float(r["lcr"])  if pd.notna(r["lcr"])  else float("nan")
             exact_nsfr = float(r["nsfr"]) if pd.notna(r["nsfr"]) else float("nan")
-            approx_lcr  = metrics.lcr.get(ccy,  float("nan"))
-            approx_nsfr = metrics.nsfr.get(ccy, float("nan"))
+            approx_lcr  = _lcr_fast.get(ccy,  float("nan"))
+            approx_nsfr = _nsfr_fast.get(ccy, float("nan"))
             liq_rows.append({
-                "currency":    ccy,
-                "LCR_exact":   round(exact_lcr,  4),
-                "LCR_fast":    round(approx_lcr,  4),
-                "LCR_err_pct": round(_pct_err(approx_lcr,  exact_lcr),  2),
-                "NSFR_exact":  round(exact_nsfr, 4),
-                "NSFR_fast":   round(approx_nsfr, 4),
-                "NSFR_err_pct":round(_pct_err(approx_nsfr, exact_nsfr), 2),
+                "currency":     ccy,
+                "LCR_exact":    round(exact_lcr,  4),
+                "LCR_fast":     round(approx_lcr,  4),
+                "LCR_err_pct":  round(_pct_err(approx_lcr,  exact_lcr),  2),
+                "NSFR_exact":   round(exact_nsfr, 4),
+                "NSFR_fast":    round(approx_nsfr, 4),
+                "NSFR_err_pct": round(_pct_err(approx_nsfr, exact_nsfr), 2),
             })
     liq_sheet = pd.DataFrame(liq_rows)
 
     # ── Sheet 4: Summary ──────────────────────────────────────────────────────
     summary_rows = []
 
-    def _chk(label, scen, ccy, approx_a, approx_b, exact, tol):
-        err_a = _pct_err(approx_a, exact)
-        err_b = _pct_err(approx_b, exact)
-        pass_a = abs(err_a) < tol * 100 if not np.isnan(err_a) else False
+    def _chk(label, scen, ccy, approx_b, exact, tol, tier1=None, sot_thresh=None):
+        err_b  = _pct_err(approx_b, exact)
         pass_b = abs(err_b) < tol * 100 if not np.isnan(err_b) else False
+
+        if tier1 and tier1 > 0:
+            err_t1_b      = (approx_b - exact) / tier1 * 100.0
+            sot_exact_t1  = exact    / tier1 * 100.0
+            sot_b_t1      = approx_b / tier1 * 100.0
+        else:
+            err_t1_b = sot_exact_t1 = sot_b_t1 = float("nan")
+
         summary_rows.append({
-            "metric": label, "scenario": scen, "currency": ccy,
-            "exact":   round(exact, 0) if abs(exact) >= 1 else exact,
-            "fast_A":  round(approx_a, 0) if abs(approx_a) >= 1 else approx_a,
-            "err_A_%": round(err_a, 2), "pass_A": "PASS" if pass_a else "FAIL",
-            "fast_B":  round(approx_b, 0) if abs(approx_b) >= 1 else approx_b,
-            "err_B_%": round(err_b, 2), "pass_B": "PASS" if pass_b else "FAIL",
-            "tolerance_%": tol * 100,
+            "metric":          label,
+            "scenario":        scen,
+            "currency":        ccy,
+            "exact_PLN":       round(exact, 0)    if abs(exact) >= 1    else exact,
+            "fast_B_PLN":      round(approx_b, 0) if abs(approx_b) >= 1 else approx_b,
+            "SOT_exact_%T1":   round(sot_exact_t1, 2) if not np.isnan(sot_exact_t1) else float("nan"),
+            "SOT_B_%T1":       round(sot_b_t1,     2) if not np.isnan(sot_b_t1)     else float("nan"),
+            "err_B_%":         round(err_b, 2),
+            "err_B_pct_T1":    round(err_t1_b, 3) if not np.isnan(err_t1_b) else float("nan"),
+            "pass_B":          "PASS" if pass_b else "FAIL",
+            "tolerance_%":     tol * 100,
+            "sot_thresh_%T1":  sot_thresh if sot_thresh is not None else float("nan"),
         })
-        print(f"  {label:<20s} {scen:<12s} {ccy:<5s} "
-              f"exact={exact:+,.0f} "
-              f"A={approx_a:+,.0f}({err_a:+.1f}%){'OK' if pass_a else '--'}  "
-              f"B={approx_b:+,.0f}({err_b:+.1f}%){'OK' if pass_b else '--'}")
-        return pass_a, pass_b
+
+        sot_str    = (f"  SOT: exact={sot_exact_t1:+.2f}%T1  B={sot_b_t1:+.2f}%T1"
+                      f"  err={err_t1_b:+.2f}%T1") if not np.isnan(sot_exact_t1) else ""
+        thresh_str = f"  [thresh={sot_thresh:+.0f}%T1]" if sot_thresh is not None else ""
+        print(f"  {label:<20s} {scen:<12s} {ccy:<5s}"
+              f"{sot_str}  {'OK' if pass_b else '--'}{thresh_str}")
+        return pass_b
 
     # Portfolio totals
     exact_nii_tot = {
@@ -579,35 +555,104 @@ def run_accuracy_check() -> None:
     print(f"  [diag] EVE_B total from table: {_evd['EVE_B'].sum():+,.0f}  EVE_exact total: {_evd['EVE_exact'].sum():+,.0f}")
     print(f"  [diag] Reported EVE_B: {eve_base_B:+,.0f}  Residual not in table: {eve_base_B - _evd['EVE_B'].sum():+,.0f}")
 
-    _chk("NII_base", "base", "ALL", metrics.nii_base, nii_base_B, nii_base_exact, TOL_NII)
-    _chk("EVE_base", "base", "ALL", metrics.eve_base, eve_base_B, eve_base_exact, TOL_EVE)
+    # ── Gradient validation: optimizer signal quality ─────────────────────────
+    # For NII maximization the optimizer follows ∂NII/∂weight_i per product.
+    # With proportional scaling this equals NII_i / balance_i.
+    # Two failure modes: wrong sign (optimizer goes the wrong direction) and
+    # wrong relative rank (optimizer prefers the wrong product at the margin).
+    grad_rows = []
+    for _, row in base_sheet.iterrows():
+        k   = (row["product_code"], row["bs_side"], row["currency"])
+        bal = _bal_map.get(k, 0.0)
+        if bal == 0.0:
+            continue
+        nii_exact_rate = float(row["NII_exact"]) / bal
+        nii_b_rate     = float(row["NII_B"])     / bal
+        eve_exact_rate = float(row["EVE_exact"]) / bal
+        eve_b_rate     = float(row["EVE_B"])     / bal
+        nii_sign_ok    = int(np.sign(nii_b_rate)) == int(np.sign(nii_exact_rate))
+        eve_sign_ok    = int(np.sign(eve_b_rate)) == int(np.sign(eve_exact_rate))
+        grad_rows.append({
+            "product_code":   row["product_code"],
+            "bs_side":        row["bs_side"],
+            "currency":       row["currency"],
+            "balance":        round(bal, 0),
+            "NII_exact_rate": round(nii_exact_rate * 100, 4),   # % per PLN balance
+            "NII_B_rate":     round(nii_b_rate     * 100, 4),
+            "NII_rate_err_%": round(_pct_err(nii_b_rate, nii_exact_rate), 2),
+            "NII_sign_ok":    nii_sign_ok,
+            "EVE_exact_rate": round(eve_exact_rate, 6),
+            "EVE_B_rate":     round(eve_b_rate,     6),
+            "EVE_rate_err_%": round(_pct_err(eve_b_rate, eve_exact_rate), 2),
+            "EVE_sign_ok":    eve_sign_ok,
+        })
+    grad_sheet = pd.DataFrame(grad_rows).sort_values(["bs_side", "NII_exact_rate"],
+                                                      ascending=[True, False]).reset_index(drop=True)
 
-    for s_idx, scen in enumerate(params.scenario_ids):
+    # Spearman rank correlation and sign mismatch summary
+    valid_nii = grad_sheet.dropna(subset=["NII_exact_rate", "NII_B_rate"])
+    valid_nii = valid_nii[valid_nii["NII_exact_rate"].abs() > 0]
+    valid_eve = grad_sheet.dropna(subset=["EVE_exact_rate", "EVE_B_rate"])
+    valid_eve = valid_eve[valid_eve["EVE_exact_rate"].abs() > 0]
+
+    def _spearman(a: "pd.Series", b: "pd.Series") -> float:
+        rk_a = a.rank()
+        rk_b = b.rank()
+        n    = len(a)
+        if n < 2:
+            return float("nan")
+        d2   = ((rk_a - rk_b) ** 2).sum()
+        return 1.0 - 6.0 * d2 / (n * (n ** 2 - 1))
+
+    nii_rho         = _spearman(valid_nii["NII_exact_rate"], valid_nii["NII_B_rate"])
+    eve_rho         = _spearman(valid_eve["EVE_exact_rate"], valid_eve["EVE_B_rate"])
+    nii_sign_errors = int((~valid_nii["NII_sign_ok"]).sum())
+    eve_sign_errors = int((~valid_eve["EVE_sign_ok"]).sum())
+
+    print(f"\n--- Gradient validation (optimizer signal quality) ---")
+    print(f"  NII sensitivity  Spearman rho={nii_rho:+.4f}  sign errors={nii_sign_errors}/{len(valid_nii)}")
+    print(f"  EVE sensitivity  Spearman rho={eve_rho:+.4f}  sign errors={eve_sign_errors}/{len(valid_eve)}")
+    if nii_sign_errors:
+        bad = valid_nii[~valid_nii["NII_sign_ok"]]
+        print("  WARNING: NII gradient sign wrong for:")
+        for _, r in bad.iterrows():
+            print(f"    {r.product_code:8s} {r.bs_side}  "
+                  f"exact_rate={r.NII_exact_rate:+.4f}%  B_rate={r.NII_B_rate:+.4f}%  "
+                  f"balance={r.balance:,.0f}")
+    else:
+        print("  NII gradient sign: all correct — optimizer direction is trustworthy")
+    if eve_sign_errors:
+        bad = valid_eve[~valid_eve["EVE_sign_ok"]]
+        print("  WARNING: EVE gradient sign wrong for:")
+        for _, r in bad.iterrows():
+            print(f"    {r.product_code:8s} {r.bs_side}  "
+                  f"exact_rate={r.EVE_exact_rate:+.6f}  B_rate={r.EVE_B_rate:+.6f}  "
+                  f"balance={r.balance:,.0f}")
+
+    _chk("NII_base", "base", "ALL", nii_base_B, nii_base_exact, TOL_NII)
+    _chk("EVE_base", "base", "ALL", eve_base_B, eve_base_exact, TOL_EVE)
+
+    for scen in [s for s in params.scenario_ids if str(s) != "base"]:
         scen = str(scen)
         exact_dnii = exact_nii_tot.get(scen, float("nan")) - nii_base_exact
         exact_deve = exact_eve_tot.get(scen, float("nan")) - eve_base_exact
-        dnii_a = float(np.dot(amounts, params.delta_nii_unit[:, s_idx]))
         dnii_b = float(scen_B_tot.loc[scen, "dNII_B"]) if scen in scen_B_tot.index else float("nan")
-        deve_a = metrics.delta_eve.get(scen, float("nan"))
         deve_b = float(scen_B_tot.loc[scen, "dEVE_B"]) if scen in scen_B_tot.index else float("nan")
-        _chk("delta_NII", scen, "ALL", dnii_a, dnii_b, exact_dnii, TOL_NII)
-        _chk("delta_EVE", scen, "ALL", deve_a, deve_b, exact_deve, TOL_EVE)
+        _chk("delta_NII", scen, "ALL", dnii_b, exact_dnii, TOL_NII, tier1=tier1, sot_thresh=-5.0)
+        _chk("delta_EVE", scen, "ALL", deve_b, exact_deve, TOL_EVE, tier1=tier1, sot_thresh=-15.0)
 
     if not exact_liq.empty:
         for _, r in exact_liq.iterrows():
-            ccy = r["currency"]
+            ccy        = r["currency"]
             exact_lcr  = float(r["lcr"])
             exact_nsfr = float(r["nsfr"])
-            approx_lcr  = metrics.lcr.get(ccy, float("nan"))
-            approx_nsfr = metrics.nsfr.get(ccy, float("nan"))
-            _chk("LCR",  "n/a", ccy, approx_lcr,  approx_lcr,  exact_lcr,  TOL_LCR)
-            _chk("NSFR", "n/a", ccy, approx_nsfr, approx_nsfr, exact_nsfr, TOL_NSFR)
+            _chk("LCR",  "n/a", ccy, _lcr_fast.get(ccy, float("nan")),  exact_lcr,  TOL_LCR)
+            _chk("NSFR", "n/a", ccy, _nsfr_fast.get(ccy, float("nan")), exact_nsfr, TOL_NSFR)
 
     summary_df = pd.DataFrame(summary_rows)
-    n_pass_a  = (summary_df["pass_A"] == "PASS").sum()
-    n_pass_b  = (summary_df["pass_B"] == "PASS").sum()
-    n_total   = len(summary_df)
-    print(f"\nAccuracy summary: A={n_pass_a}/{n_total} PASS  B={n_pass_b}/{n_total} PASS")
+    n_pass_b = (summary_df["pass_B"] == "PASS").sum()
+    n_total  = len(summary_df)
+    print(f"\nAccuracy summary: B={n_pass_b}/{n_total} PASS")
 
     # ── Write Excel ───────────────────────────────────────────────────────────
     os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
@@ -617,18 +662,17 @@ def run_accuracy_check() -> None:
         if not liq_sheet.empty:
             liq_sheet.to_excel(writer, sheet_name="LCR_NSFR", index=False)
         summary_df.to_excel(writer, sheet_name="Summary",   index=False)
+        grad_sheet.to_excel(writer, sheet_name="Gradient",  index=False)
 
     print(f"Report written to {OUT_PATH}")
-    print("  Sheets: Base | Scenarios | LCR_NSFR | Summary")
-    print("  Base columns:")
-    print("    NII_A/EVE_A    = calibrated sensi (exact at calib balance)")
-    print("    NII_B/EVE_B    = CF-based (rate_matrix / cohort_disc_q)")
-    print("    NII_sched      = schedule-based base NII (ca*fwd+cb formula)")
-    print("    NII_bias       = exact_base - NII_sched  (per-product offset)")
-    print("    EVE_bias       = exact_base - EVE_B      (per-product offset)")
-    print("  Scenario columns:")
-    print("    dNII/dEVE _A/_B          = raw fast delta")
-    print("    dNII/dEVE _A/_B_biascorr = fast delta + base bias (first-order correction)")
+    print("  Sheets: Base | Scenarios | LCR_NSFR | Summary | Gradient")
+    print("  Gradient sheet — optimizer signal quality per product:")
+    print("    NII_exact_rate / NII_B_rate = NII per 1 PLN balance (% pa) — exact vs fast")
+    print("    NII_sign_ok    = True if optimizer direction is correct for this product")
+    print("    Spearman rho   = rank correlation — how well B ranks NII-efficiency of products")
+    print("  Summary columns:")
+    print("    err_B_pct_T1  = (fast_B - exact) / Tier1 * 100  [SOT perspective]")
+    print("    sot_thresh_%  = EBA threshold as % of T1 (-5 NII, -15 EVE)")
 
 
 if __name__ == "__main__":

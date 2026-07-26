@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "labbank-sandbox",
+      "runtimeExecutable": "venv/Scripts/python.exe",
+      "runtimeArgs": ["-m", "streamlit", "run", "sandbox/app.py", "--server.headless", "true"],
+      "port": 8501
+    }
+  ]
+}

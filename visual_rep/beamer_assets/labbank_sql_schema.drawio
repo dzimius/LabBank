@@ -1,0 +1,190 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="app.diagrams.net" version="21.0.0">
+  <diagram id="labbank-sql" name="SQL Schema Data Flow">
+    <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="1400" pageHeight="820" math="0" shadow="1">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- ═══ TITLE ═══ -->
+        <mxCell id="title" value="LabBank  —  SQL Data Model  (9 schemas)"
+          style="text;html=1;strokeColor=none;fillColor=none;align=center;fontSize=20;fontStyle=1;fontColor=#1A237E;"
+          vertex="1" parent="1">
+          <mxGeometry x="0" y="8" width="1400" height="32" as="geometry" />
+        </mxCell>
+
+        <!-- ═══ ROW 1: Balance Sheet schemas ═══ -->
+
+        <!-- dbo.transactions -->
+        <mxCell id="dbo" value="&lt;b&gt;dbo&lt;/b&gt;"
+          style="swimlane;startSize=22;fillColor=#1A237E;strokeColor=#0d1b72;fontColor=#ffffff;fontSize=11;fontStyle=1;arcSize=4;"
+          vertex="1" parent="1">
+          <mxGeometry x="30" y="60" width="220" height="178" as="geometry" />
+        </mxCell>
+        <mxCell id="dbo_t" value="transactions&lt;br&gt;───────────────&lt;br&gt;🔑 transaction_id&lt;br&gt;product_code · product_name&lt;br&gt;bs_side  (A / L)&lt;br&gt;balance_amt · currency&lt;br&gt;client_id · client_type_id"
+          style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=9;verticalAlign=top;spacingLeft=6;"
+          vertex="1" parent="dbo">
+          <mxGeometry x="0" y="24" width="220" height="154" as="geometry" />
+        </mxCell>
+
+        <!-- schemat -->
+        <mxCell id="sch" value="&lt;b&gt;schemat&lt;/b&gt;"
+          style="swimlane;startSize=22;fillColor=#1A237E;strokeColor=#0d1b72;fontColor=#ffffff;fontSize=11;fontStyle=1;arcSize=4;"
+          vertex="1" parent="1">
+          <mxGeometry x="270" y="60" width="310" height="178" as="geometry" />
+        </mxCell>
+        <mxCell id="sch_t" value="loans  ·  deposits  ·  financial_instruments&lt;br&gt;equity  ·  ir_swaps&lt;br&gt;───────────────&lt;br&gt;↳ transaction_id  (FK → dbo.transactions)&lt;br&gt;rate_type  (F / V / A)&lt;br&gt;client_rt · index_rt · margin&lt;br&gt;start_date · maturity_date&lt;br&gt;disc_curve · fwd_curve&lt;br&gt;schedule_id  (FK → sched.*)"
+          style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=9;verticalAlign=top;spacingLeft=6;"
+          vertex="1" parent="sch">
+          <mxGeometry x="0" y="24" width="310" height="154" as="geometry" />
+        </mxCell>
+
+        <!-- mkt -->
+        <mxCell id="mkt" value="&lt;b&gt;mkt&lt;/b&gt;"
+          style="swimlane;startSize=22;fillColor=#4527A0;strokeColor=#311B92;fontColor=#ffffff;fontSize=11;fontStyle=1;arcSize=4;"
+          vertex="1" parent="1">
+          <mxGeometry x="600" y="60" width="230" height="178" as="geometry" />
+        </mxCell>
+        <mxCell id="mkt_t" value="curves&lt;br&gt;───────────────&lt;br&gt;curve_date · curve_name&lt;br&gt;tenor · year_frac · zero_rate · d_f&lt;br&gt;currency&lt;br&gt;&lt;br&gt;fixings&lt;br&gt;───────────────&lt;br&gt;fixing_date · rate_index&lt;br&gt;tenor · rate · currency"
+          style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=9;verticalAlign=top;spacingLeft=6;"
+          vertex="1" parent="mkt">
+          <mxGeometry x="0" y="24" width="230" height="154" as="geometry" />
+        </mxCell>
+
+        <!-- bs -->
+        <mxCell id="bs" value="&lt;b&gt;bs&lt;/b&gt;"
+          style="swimlane;startSize=22;fillColor=#4527A0;strokeColor=#311B92;fontColor=#ffffff;fontSize=11;fontStyle=1;arcSize=4;"
+          vertex="1" parent="1">
+          <mxGeometry x="850" y="60" width="240" height="178" as="geometry" />
+        </mxCell>
+        <mxCell id="bs_t" value="models_loan&lt;br&gt;───────────────&lt;br&gt;product_code · tenor · prep_rate&lt;br&gt;&lt;br&gt;models_deposit_ir&lt;br&gt;───────────────&lt;br&gt;product_code · tenor · outstanding&lt;br&gt;&lt;br&gt;models_deposit_liq&lt;br&gt;(same structure, LIQ horizon)"
+          style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=9;verticalAlign=top;spacingLeft=6;"
+          vertex="1" parent="bs">
+          <mxGeometry x="0" y="24" width="240" height="154" as="geometry" />
+        </mxCell>
+
+        <!-- sched -->
+        <mxCell id="sched" value="&lt;b&gt;sched&lt;/b&gt;"
+          style="swimlane;startSize=22;fillColor=#1565C0;strokeColor=#0D47A1;fontColor=#ffffff;fontSize=11;fontStyle=1;arcSize=4;"
+          vertex="1" parent="1">
+          <mxGeometry x="1110" y="60" width="250" height="178" as="geometry" />
+        </mxCell>
+        <mxCell id="sched_t" value="Schedule-ID bridge tables&lt;br&gt;───────────────&lt;br&gt;One row per unique (product, tenor,&lt;br&gt;currency, rate_type) group.&lt;br&gt;Links schemat transactions to&lt;br&gt;CF generation in cf.products.&lt;br&gt;&lt;br&gt;schedule_id  (PK)&lt;br&gt;product_code · rate_type · currency"
+          style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=9;verticalAlign=top;spacingLeft=6;"
+          vertex="1" parent="sched">
+          <mxGeometry x="0" y="24" width="250" height="154" as="geometry" />
+        </mxCell>
+
+        <!-- ═══ ROW 2: CF ═══ -->
+
+        <!-- cf -->
+        <mxCell id="cf" value="&lt;b&gt;cf&lt;/b&gt;"
+          style="swimlane;startSize=22;fillColor=#00695C;strokeColor=#004D40;fontColor=#ffffff;fontSize=11;fontStyle=1;arcSize=4;"
+          vertex="1" parent="1">
+          <mxGeometry x="270" y="310" width="560" height="200" as="geometry" />
+        </mxCell>
+        <mxCell id="cf_t" value="products  (contractual + behavioural CF schedule for loans / deposits / instruments)&lt;br&gt;───────────────&lt;br&gt;🔑 schedule_id · product_type · cf_start_dt&lt;br&gt;product_code · currency · bs_side · rate_index&lt;br&gt;cf_end_dt · cf_yf · d_f · fwd_rt · client_rt · margin&lt;br&gt;con_outstanding · con_capital_pmt · con_interest_pmt&lt;br&gt;beh_outstanding · beh_capital_pmt · beh_interest_pmt&lt;br&gt;comp_capital_pmt · comp_interest_pmt · prepayment_pmt&lt;br&gt;&lt;br&gt;ir_swap_orig  ·  ir_swap_beh   (IRS CF schedules — same column layout)"
+          style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=9;verticalAlign=top;spacingLeft=6;"
+          vertex="1" parent="cf">
+          <mxGeometry x="0" y="24" width="560" height="176" as="geometry" />
+        </mxCell>
+
+        <!-- ═══ ROW 3: IRRBB ═══ -->
+
+        <!-- irrbb -->
+        <mxCell id="irrbb" value="&lt;b&gt;irrbb&lt;/b&gt;"
+          style="swimlane;startSize=22;fillColor=#B71C1C;strokeColor=#7F0000;fontColor=#ffffff;fontSize=11;fontStyle=1;arcSize=4;"
+          vertex="1" parent="1">
+          <mxGeometry x="30" y="580" width="780" height="200" as="geometry" />
+        </mxCell>
+        <mxCell id="irrbb_t" value="ir_gap_beh  ·  ir_gap_beh_a   (repricing gaps: contractual + behavioural + IRS overlay)&lt;br&gt;ir_swap_gap_beh   (IRS contribution to gap, from ir_derivatives)&lt;br&gt;───────────────&lt;br&gt;nii_base_scenario   — NII calculation per (product, tenor, scenario)&lt;br&gt;    Columns: beh_outstanding · client_rt · fwd_rt · margin · nii_interest · nii_renewal · nii_total&lt;br&gt;&lt;br&gt;nii_results   — aggregated NII per (scenario, currency): base_nii · delta_nii · delta_nii_pct&lt;br&gt;shocked_curves   — 6 EBA + own shock curves applied to each currency&lt;br&gt;eve_results   — EVE per (scenario, currency, tenor bucket): cf_pmt · d_f_base · d_f_shocked · delta_pv · delta_eve&lt;br&gt;irrbb_report   — summary SOT table: ΔEVE_reg / T1 · ΔNII_reg / T1 · SOT breach flags"
+          style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=9;verticalAlign=top;spacingLeft=6;"
+          vertex="1" parent="irrbb">
+          <mxGeometry x="0" y="24" width="780" height="176" as="geometry" />
+        </mxCell>
+
+        <!-- results -->
+        <mxCell id="res" value="&lt;b&gt;results&lt;/b&gt;"
+          style="swimlane;startSize=22;fillColor=#E65100;strokeColor=#BF360C;fontColor=#ffffff;fontSize=11;fontStyle=1;arcSize=4;"
+          vertex="1" parent="1">
+          <mxGeometry x="830" y="580" width="300" height="200" as="geometry" />
+        </mxCell>
+        <mxCell id="res_t" value="irrbb_report&lt;br&gt;───────────────&lt;br&gt;scenario · currency&lt;br&gt;delta_eve · delta_eve_reg · sot_eve_pct · sot_eve_pct_reg&lt;br&gt;delta_nii · delta_nii_reg · sot_nii_pct · sot_nii_pct_reg&lt;br&gt;&lt;br&gt;lcr_nsfr&lt;br&gt;───────────────&lt;br&gt;currency · hqla · net_outflow · lcr&lt;br&gt;asf · rsf · nsfr · report_date"
+          style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=9;verticalAlign=top;spacingLeft=6;"
+          vertex="1" parent="res">
+          <mxGeometry x="0" y="24" width="300" height="176" as="geometry" />
+        </mxCell>
+
+        <!-- opt_prep -->
+        <mxCell id="opt" value="&lt;b&gt;opt_prep&lt;/b&gt;"
+          style="swimlane;startSize=22;fillColor=#37474F;strokeColor=#263238;fontColor=#ffffff;fontSize=11;fontStyle=1;arcSize=4;"
+          vertex="1" parent="1">
+          <mxGeometry x="1150" y="580" width="210" height="200" as="geometry" />
+        </mxCell>
+        <mxCell id="opt_t" value="curves_tensor&lt;br&gt;───────────────&lt;br&gt;Vectorised shocked curves&lt;br&gt;per (scenario, tenor)&lt;br&gt;&lt;br&gt;product_params&lt;br&gt;───────────────&lt;br&gt;Per-product sensitivity params&lt;br&gt;&lt;br&gt;*.npz files — NumPy arrays&lt;br&gt;for fast NII/EVE approximation"
+          style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=9;verticalAlign=top;spacingLeft=6;"
+          vertex="1" parent="opt">
+          <mxGeometry x="0" y="24" width="210" height="176" as="geometry" />
+        </mxCell>
+
+        <!-- ═══ FLOW ARROWS ═══ -->
+
+        <!-- dbo → schemat (FK) -->
+        <mxCell id="e_dbo_sch" value="FK: transaction_id" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#1A237E;strokeWidth=2;endArrow=block;endFill=1;fontSize=8;fontColor=#1A237E;" edge="1" source="dbo" target="sch" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- schemat → sched -->
+        <mxCell id="e_sch_sched" value="schedule_id" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#1A237E;strokeWidth=2;endArrow=block;endFill=1;fontSize=8;fontColor=#1A237E;" edge="1" source="sch" target="sched" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- sched → cf -->
+        <mxCell id="e_sched_cf" value="" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#1565C0;strokeWidth=2;endArrow=block;endFill=1;" edge="1" source="sched" target="cf" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- mkt → cf -->
+        <mxCell id="e_mkt_cf" value="d_f · fwd_rt" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#4527A0;strokeWidth=2;endArrow=block;endFill=1;fontSize=8;fontColor=#4527A0;" edge="1" source="mkt" target="cf" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- bs → cf -->
+        <mxCell id="e_bs_cf" value="CPR / decay" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#4527A0;strokeWidth=2;endArrow=block;endFill=1;fontSize=8;fontColor=#4527A0;" edge="1" source="bs" target="cf" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- cf → irrbb -->
+        <mxCell id="e_cf_irrbb" value="beh CFs → gap · NII · EVE" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#00695C;strokeWidth=2;endArrow=block;endFill=1;fontSize=8;fontColor=#00695C;" edge="1" source="cf" target="irrbb" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- mkt → irrbb (shocked curves) -->
+        <mxCell id="e_mkt_irrbb" value="shocked curves" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#4527A0;strokeWidth=2;endArrow=block;endFill=1;fontSize=8;fontColor=#4527A0;" edge="1" source="mkt" target="irrbb" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- irrbb → results -->
+        <mxCell id="e_irrbb_res" value="SOT summary" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#B71C1C;strokeWidth=2;endArrow=block;endFill=1;fontSize=8;fontColor=#B71C1C;" edge="1" source="irrbb" target="res" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- cf → results (LCR/NSFR) -->
+        <mxCell id="e_cf_res" value="beh CFs → LCR/NSFR" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#00695C;strokeWidth=2;endArrow=block;endFill=1;fontSize=8;fontColor=#00695C;" edge="1" source="cf" target="res" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- cf → opt_prep -->
+        <mxCell id="e_cf_opt" value="tensors" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#00695C;strokeWidth=1.5;endArrow=block;endFill=1;fontSize=8;dashed=1;" edge="1" source="cf" target="opt" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- irrbb → opt_prep -->
+        <mxCell id="e_irrbb_opt" value="" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#B71C1C;strokeWidth=1.5;endArrow=block;endFill=1;dashed=1;" edge="1" source="irrbb" target="opt" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

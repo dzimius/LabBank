@@ -1014,6 +1014,15 @@ def compute_adjusted_schedule(
         df.loc[m1, 'prepayment_pmt']  = PP
         df.loc[m1, 'int_adj']         = I
 
+    # Non-annuity rows (bullet, linear, etc.) — CPR adjustment is not applicable;
+    # carry contractual values through so the beh_df filter (outstanding_bal > 0) keeps them.
+    m_noann = ~df['_is_annuity']
+    if m_noann.any():
+        df.loc[m_noann, 'outstanding_adj'] = df.loc[m_noann, 'outstanding_bal']
+        df.loc[m_noann, 'capital_adj']     = df.loc[m_noann, 'capital_pmt']
+        df.loc[m_noann, 'prepayment_pmt']  = 0.0
+        df.loc[m_noann, 'int_adj']         = df.loc[m_noann, 'int_pmt']
+
     return df
 
 

@@ -213,22 +213,62 @@ def _log_interp_daily_df(
     return pd.DataFrame({"n_days": grid.astype(int), "d_f": np.exp(ln_y_interp)})
 
 
+def default_realistic_base_floor_bps(
+    t_years: np.ndarray, short_floor_bps: float = -100.0, slope_bps_per_year: float = 10.0,
+) -> np.ndarray:
+    """Pragmatic (NOT an EBA/RTS Annex figure) floor for a REAL/unshocked curve
+    -- e.g. one of the 165 historical-anchor or 500 Monte-Carlo curves used by
+    bs_optimization's exact-reprice engine -- as opposed to the EBA shock's OWN
+    floor (`nii_floor_rate` below), which stays exactly as EBA/RTS 2022/10
+    intends and is untouched by this function.
+
+    Ramps linearly from short_floor_bps at t=0 to increasingly positive values
+    at longer tenors (uncapped): floor(t) = short_floor_bps + slope*t. Exists
+    because an unfloored (or flat-0%-floored) reconstruction of a Monte-Carlo-
+    drawn NS curve could price out with a long end pinned at an identical flat
+    level for 10-20+ years straight -- PLN has no historical precedent for
+    that, whereas a mildly negative short end briefly is at least plausible
+    (see e.g. EUR/JPY 2015-2021). Defaults reach 0% by t=10y and +2.00% by
+    t=30y -- comfortably below actual current PLN levels (~5%), so this is a
+    no-op for realistic curves and only bites the unrealistic MC tail. Not
+    calibrated against the literal EBA Annex I graduated-floor table (whose
+    exact bps figures were not available when this was written) -- recompute
+    the two parameters here if you have that table.
+    """
+    return short_floor_bps + slope_bps_per_year * np.asarray(t_years, dtype=float)
+
+
 def apply_shock_to_disc_curve(
     base_df: pd.DataFrame,
     scenario: str,
     params: dict[str, float],
     own_shock_bps: float = -100.0,
     nii_floor_rate: float = 0.0,
+    base_floor_bps_fn=None,
 ) -> pd.DataFrame:
     """Shift a discount curve (n_days, d_f) by the EBA shock for one scenario.
 
     Algorithm
     ---------
     1. Derive continuous zero rates: r(t) = −ln(d_f) / t
-    2. Compute Δr(t) using shock formula (bps → decimal)
-    3. Shocked zero rate = max(nii_floor_rate, r(t) + Δr(t))
-    4. Back to d_f: exp(−r_shocked · t)
+    2. If base_floor_bps_fn given, floor r(t) at base_floor_bps_fn(t) FIRST --
+       this is the "real curve" floor (see default_realistic_base_floor_bps),
+       applied before any EBA shock, and applies to scenario="base" too.
+    3. Compute Δr(t) using shock formula (bps → decimal)
+    4. Shocked zero rate:
+         scenario == "base"  -> just the (possibly base-floored) r(t), no
+                                 further floor -- EBA's own nii_floor_rate is a
+                                 SHOCK floor, not a floor on the unshocked curve.
+         otherwise            -> max(nii_floor_rate, r(t) + Δr(t)), exactly the
+                                 original EBA-regulatory-floor behavior,
+                                 unaffected by base_floor_bps_fn's value.
+    5. Back to d_f: exp(−r_shocked · t)
        Note: d_f at t = 0 is always 1.0.
+
+    base_floor_bps_fn: optional callable (t_years array -> floor bps array).
+    Default None preserves the exact original behavior (every caller that
+    doesn't pass this -- including irrbb_calc's own production nii/eve
+    workflows -- is completely unaffected).
 
     Returns a copy of base_df with 'd_f' replaced by shocked values.
     """
@@ -242,8 +282,17 @@ def apply_shock_to_disc_curve(
             0.0,
         )
 
-    shock_dec   = shock_bps_at_tenors(t, scenario, params, own_shock_bps) / 10_000.0
-    shocked_r   = np.maximum(nii_floor_rate, zero_rate + shock_dec)
+    if base_floor_bps_fn is not None:
+        zero_rate = np.maximum(base_floor_bps_fn(t) / 10_000.0, zero_rate)
+        shock_dec = shock_bps_at_tenors(t, scenario, params, own_shock_bps) / 10_000.0
+        if scenario == "base":
+            shocked_r = zero_rate
+        else:
+            shocked_r = np.maximum(nii_floor_rate, zero_rate + shock_dec)
+    else:
+        shock_dec   = shock_bps_at_tenors(t, scenario, params, own_shock_bps) / 10_000.0
+        shocked_r   = np.maximum(nii_floor_rate, zero_rate + shock_dec)
+
     d_f_shocked = np.where(t > 0, np.exp(-shocked_r * t), 1.0)
 
     df["d_f"]      = d_f_shocked
@@ -259,6 +308,7 @@ def build_all_shocked_curves(
     currency: str,
     own_shock_bps: float = -100.0,
     nii_floor_rate: float = 0.0,
+    base_floor_bps_fn=None,
 ) -> pd.DataFrame:
     """Compute shocked discount curves for all 8 scenarios and all curve_names.
 
@@ -270,6 +320,10 @@ def build_all_shocked_curves(
     currency      : currency code (e.g. 'PLN') — determines shock magnitudes
     own_shock_bps : parallel shift for the 'own' scenario (default −100 bps)
     nii_floor_rate: absolute rate floor applied after shock (default 0.0 = 0%)
+    base_floor_bps_fn: optional pre-shock floor on the unshocked curve itself
+                    (see apply_shock_to_disc_curve / default_realistic_base_floor_bps).
+                    Default None -- every existing caller is unaffected unless
+                    it explicitly opts in.
 
     Returns
     -------
@@ -284,6 +338,7 @@ def build_all_shocked_curves(
             shocked = apply_shock_to_disc_curve(
                 grp[["n_days", "d_f"]].reset_index(drop=True),
                 scenario, params, own_shock_bps, nii_floor_rate,
+                base_floor_bps_fn=base_floor_bps_fn,
             )
             shocked.insert(0, "curve_name",  curve_name)
             shocked.insert(0, "scenario_id", scenario)

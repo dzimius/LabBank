@@ -124,7 +124,7 @@ def _load_bs_structure() -> pd.DataFrame:
     df["full_pct"]     = df["bs_percentage"].fillna(0.0)
     df["product_code"] = df["product_code"].astype(str)
     # Fill NaN regulatory weights with 0.0 so _meta lookups never return NaN
-    for _col in ["LCR", "ASF", "RSF", "haircut"]:
+    for _col in ["LCR", "ASF", "RSF", "haircut", "rwa_weight", "PD", "LGD", "vol_elasticity", "fee_unit_rate", "acq_cost_rate"]:
         if _col in df.columns:
             df[_col] = df[_col].fillna(0.0)
     # Compute hqla_factor = (1 - haircut) for HQLA assets, 0 elsewhere
@@ -141,6 +141,57 @@ def _load_rate_coefficients() -> pd.DataFrame:
     df = df.rename(columns={"a": "coeff_a", "b": "coeff_b"})
     df["coeff_b"] = df["coeff_b"] / 100.0  # Excel stores percent (e.g. 0.50 = 50bps); convert to decimal
     return df.set_index("product_code")
+
+
+def _load_fin_data() -> dict:
+    """Load global financial parameters from the fin_data sheet in bank_data.xlsx.
+
+    Expected layout: two columns 'parameter' and 'value'.
+    Returns dict: {'CoC': 0.10, 'CET1': 0.12, ...}
+    Defaults to CoC=0.10 and CET1=0.12 if the sheet is missing.
+    """
+    try:
+        df = pd.read_excel(BS_PATH, sheet_name="fin_data")
+        df.columns = [str(c).strip() for c in df.columns]
+        if "parameter" in df.columns and "value" in df.columns:
+            return {str(r["parameter"]): float(r["value"]) for _, r in df.iterrows()}
+    except Exception as e:
+        print(f"  [warn] fin_data sheet not found or unreadable ({e}); using defaults")
+    return {}
+
+
+def _load_subst_matrix() -> pd.DataFrame:
+    """Load substitution (cannibalism) pairs from the subst_matrix sheet in bank_data.xlsx.
+
+    Expected columns: source_code, source_side, dest_code, dest_side, subst_rate.
+    subst_rate = fraction of dest product growth that comes FROM the source product.
+    Returns empty DataFrame if sheet is missing.
+    """
+    try:
+        df = pd.read_excel(BS_PATH, sheet_name="subst_matrix")
+        df.columns = [str(c).strip() for c in df.columns]
+        required = {"source_code", "source_side", "dest_code", "dest_side", "subst_rate"}
+        if not required.issubset(df.columns):
+            return pd.DataFrame(columns=list(required))
+        df["subst_rate"] = pd.to_numeric(df["subst_rate"], errors="coerce").fillna(0.0)
+        # Drop note rows (subst_rate == 0 or source_code is a long description string)
+        df = df[df["subst_rate"] > 0.0].copy()
+
+        def _to_pc(v) -> str:
+            """Convert potentially float product code (e.g. 7060.0) to string '7060'."""
+            try:
+                return str(int(float(v)))
+            except (ValueError, TypeError):
+                return str(v).strip()
+
+        df["source_code"] = df["source_code"].apply(_to_pc)
+        df["dest_code"]   = df["dest_code"].apply(_to_pc)
+        df["source_side"] = df["source_side"].astype(str).str.strip()
+        df["dest_side"]   = df["dest_side"].astype(str).str.strip()
+        return df.reset_index(drop=True)
+    except Exception as e:
+        print(f"  [warn] subst_matrix sheet not found or unreadable ({e}); no substitution constraints")
+        return pd.DataFrame(columns=["source_code", "source_side", "dest_code", "dest_side", "subst_rate"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1235,19 +1286,15 @@ def _load_cohort_effective_nii_tables(
     return interest_yf_by, capital_remain_by, rate_matrix_by, renewal_rate_by
 
 
-def _load_cohort_effective_eve_pv_tables(
-    curves: dict,
-    ir_coeff: pd.DataFrame,
-    scenario_ids: list[str],
-) -> dict:
-    """Build scenario-specific monthly EVE PV tables from daily CF rows.
+def _query_cohort_cf_schedule() -> pd.DataFrame:
+    """Curve-independent daily-CF schedule rows behind the EVE PV reconstruction.
 
-    Exact EVE is not just capital discounted on shocked curves.  Variable-rate
-    rows also get shocked interest payments, while fixed rows keep contracted
-    interest.  This table preserves that daily logic, then stores unsigned PV
-    by cohort/month/scenario.  Runtime multiplies by sign and current balance.
+    Split out of _load_cohort_effective_eve_pv_tables() so the schedule (cash-flow
+    timing/amounts, contracted rates) can be queried ONCE and then repriced against
+    multiple different market curves (see anchor_eve_reprice.py) without re-querying
+    the DB per curve -- the schedule itself doesn't depend on which curve is used to
+    discount/reprice it.
     """
-    scen_all = ["base"] + list(scenario_ids)
     q = text(f"""
         WITH sched_key AS (
             SELECT CAST(schedule_id AS VARCHAR(8)) AS schedule_id, 'L' AS src,
@@ -1297,7 +1344,7 @@ def _load_cohort_effective_eve_pv_tables(
     """)
     df = _try_query(q, {"rd": REPORT_DATE})
     if df.empty:
-        return {}
+        return df
 
     df["product_code"] = df["product_code"].astype(str)
     for c in ["cf_start_dt", "cf_end_dt", "fixing_dt"]:
@@ -1306,10 +1353,36 @@ def _load_cohort_effective_eve_pv_tables(
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
     df["m_idx"] = df["m_idx"].clip(lower=0).astype(int)
     if df.empty:
-        return {}
+        return df
 
     denom = (df["outstanding"] * df["cf_yf"]).replace(0.0, np.nan)
     df["contracted_rt"] = (df["interest"] / denom).fillna(0.0)
+    return df
+
+
+def _compute_cohort_eve_pv(
+    df: pd.DataFrame,
+    curves: dict,
+    ir_coeff: pd.DataFrame,
+    scenario_ids: list[str],
+    recompute_base: bool = False,
+) -> tuple[np.ndarray, dict, list[str]]:
+    """Per-cohort-group x month-bucket x scenario unsigned PV, from schedule df + curves.
+
+    recompute_base=False (default -- today's production path): scenario 'base' reuses
+    cf.products' stored interest/base_df (today's curve, baked in at cash-flow-generation
+    time by cf_calc_workflow). Byte-identical to the original inline logic.
+
+    recompute_base=True (anchor curve stress test -- see anchor_eve_reprice.py):
+    scenario 'base' is ALSO recomputed via the same curve-lookup machinery as the
+    shocked scenarios, against curves['base']. Needed whenever `curves` is a
+    hypothetical (non-today) market curve, so the reference point for delta-EVE
+    reflects that curve's own level, not today's baked-in cash flows -- otherwise
+    shock deltas would be measured against the wrong base.
+    """
+    scen_all = ["base"] + list(scenario_ids)
+    if df.empty:
+        return np.zeros((0, 0, len(scen_all))), {}, scen_all
 
     pcs = df["product_code"].astype(str)
     a_v = pcs.map(ir_coeff["coeff_a"].to_dict()).fillna(1.0).to_numpy(dtype=float)
@@ -1397,8 +1470,18 @@ def _load_cohort_effective_eve_pv_tables(
     if missing_base_df.any():
         base_df_eff[missing_base_df] = _lookup_df("base", df["cf_end_dt"])[missing_base_df]
 
+    # Reference forward rate for the shock-delta pivot (contracted + a*(fwd - ref)).
+    # Default: today's stored base_fwd (cf.products, baked in by cf_calc_workflow).
+    # recompute_base=True: the CURVE PASSED IN's own base level (curves['base']), so
+    # that a hypothetical anchor curve's "base" is self-consistent with its shocks --
+    # otherwise shock deltas would be measured against the wrong (today's) reference.
+    if recompute_base:
+        base_fwd_ref = _fwd_between("base", df["cf_start_dt"], df["cf_end_dt"], cf_yf)
+    else:
+        base_fwd_ref = base_fwd
+
     for s_idx, scen in enumerate(scen_all):
-        if scen == "base":
+        if scen == "base" and not recompute_base:
             int_s = interest.copy()
             df_end = base_df_eff
         else:
@@ -1418,12 +1501,12 @@ def _load_cohort_effective_eve_pv_tables(
                 fwd_sh[var_fix_mask] = np.where(
                     valid[var_fix_mask],
                     fwd_period[var_fix_mask],
-                    base_fwd[var_fix_mask],
+                    base_fwd_ref[var_fix_mask],
                 )
                 locked[var_fix_mask] = ~valid[var_fix_mask]
 
-            fwd_for_interest = np.where(locked, base_fwd, fwd_sh)
-            eff_rate = contracted + a_v * (fwd_for_interest - base_fwd)
+            fwd_for_interest = np.where(locked, base_fwd_ref, fwd_sh)
+            eff_rate = contracted + a_v * (fwd_for_interest - base_fwd_ref)
             eff_rate = np.minimum(cap_v, np.maximum(floor_v, eff_rate))
 
             int_s = interest.copy()
@@ -1437,10 +1520,38 @@ def _load_cohort_effective_eve_pv_tables(
         pv = (capital + int_s) * df_end
         np.add.at(pv_all[:, :, s_idx], (gid, midx), pv)
 
+    return pv_all, key_to_gid, scen_all
+
+
+def _load_cohort_effective_eve_pv_tables(
+    curves: dict,
+    ir_coeff: pd.DataFrame,
+    scenario_ids: list[str],
+) -> dict:
+    """Build scenario-specific monthly EVE PV tables from daily CF rows.
+
+    Exact EVE is not just capital discounted on shocked curves.  Variable-rate
+    rows also get shocked interest payments, while fixed rows keep contracted
+    interest.  This table preserves that daily logic, then stores unsigned PV
+    by cohort/month/scenario.  Runtime multiplies by sign and current balance.
+    """
+    df = _query_cohort_cf_schedule()
+    if df.empty:
+        return {}
+    pv_all, key_to_gid, scen_all = _compute_cohort_eve_pv(
+        df, curves, ir_coeff, scenario_ids, recompute_base=False
+    )
+    if pv_all.size == 0:
+        return {}
+
     # Prefer the row-level EVE analytical tables when available.  They are
     # written by eve_calc_workflow with the exact shocked-interest logic, so
     # using them removes small reconstruction drift for products with special
-    # fixing / rate-limit behaviour.
+    # fixing / rate-limit behaviour. NOTE: these tables are today-only (written
+    # for REPORT_DATE by a separate upstream workflow) -- they are correctly
+    # skipped when this function is reused for a hypothetical anchor curve
+    # (see anchor_eve_reprice.py, which calls _compute_cohort_eve_pv directly
+    # instead of this wrapper, so this override never applies there).
     exact_parts: list[pd.DataFrame] = []
     exact_sources = [
         ("eve_base_scenario",       ["base"]),
@@ -1741,6 +1852,16 @@ def build_product_params() -> None:
     print("Loading bs_structure...")
     bs = _load_bs_structure()
     print(f"  {len(bs)} rows in bs_structure")
+
+    print("Loading fin_data (CoC, CET1)...")
+    fin_params  = _load_fin_data()
+    coc_rate    = float(fin_params.get("CoC",  0.10))
+    cet1_target = float(fin_params.get("CET1", 0.12))
+    print(f"  CoC={coc_rate*100:.1f}%  CET1_target={cet1_target*100:.1f}%")
+
+    print("Loading subst_matrix (substitution/cannibalism pairs)...")
+    subst_df = _load_subst_matrix()
+    print(f"  {len(subst_df)} substitution pairs loaded")
 
     print("Loading interest_rt.xlsx...")
     ir_coeff = _load_rate_coefficients()
@@ -2058,6 +2179,22 @@ def build_product_params() -> None:
         hqla_f = float(_meta(pc, sid, ccy, "hqla_factor", 0.0) or 0.0) if sid == "A" else 0.0
         asf_f  = float(_meta(pc, sid, ccy, "ASF",         0.0) or 0.0) if sid in ("L", "E") else 0.0
         rsf_f  = float(_meta(pc, sid, ccy, "RSF",         0.0) or 0.0) if sid == "A" else 0.0
+        rwa_f  = float(_meta(pc, sid, ccy, "rwa_weight",  0.0) or 0.0) if sid == "A" else 0.0
+
+        # Credit risk parameters (EL = PD × LGD × EAD; assets only)
+        pd_r  = float(_meta(pc, sid, ccy, "PD",  0.0) or 0.0) if sid == "A" else 0.0
+        lgd_r = float(_meta(pc, sid, ccy, "LGD", 0.0) or 0.0) if sid == "A" else 0.0
+
+        # Price-volume elasticity: NII rate change per 1pp weight change (all sides)
+        vol_elast = float(_meta(pc, sid, ccy, "vol_elasticity", 0.0) or 0.0)
+
+        # Non-interest fee income: flat yearly rate per PLN balance (all sides --
+        # 0.0 for every product without an explicit fee_unit_rate in bs_structure)
+        fee_r = float(_meta(pc, sid, ccy, "fee_unit_rate", 0.0) or 0.0)
+
+        # Marketing/acquisition cost: yearly rate applied only to growth ABOVE
+        # baseline weight in the optimizer (all sides, 0.0 by default)
+        acq_r = float(_meta(pc, sid, ccy, "acq_cost_rate", 0.0) or 0.0)
 
         if sid == "L":
             base_lcr = float(_meta(pc, sid, ccy, "LCR", 0.0) or 0.0)
@@ -2215,6 +2352,7 @@ def build_product_params() -> None:
             "lcr_runoff":          lcr_r,
             "asf_factor":          asf_f,
             "rsf_factor":          rsf_f,
+            "rwa_factor":          rwa_f,
             "inflow_30d_frac":     inflow_frac,
             "amort_frac_1y":       amrt_1y,
             "repricing_tenor_m":   rep_m,
@@ -2225,6 +2363,11 @@ def build_product_params() -> None:
             "coeff_b":             coeff_b,
             "client_floor":        cli_floor,
             "client_cap":          cli_cap,
+            "pd_rate":             pd_r,
+            "lgd_rate":            lgd_r,
+            "vol_elasticity":      vol_elast,
+            "fee_unit_rate":       fee_r,
+            "acq_cost_rate":       acq_r,
             # schedule-based monthly profile
             "cohort_outstanding_m": out_frac_m,
             "cohort_capital_m":     cap_frac_m,
@@ -2292,10 +2435,16 @@ def build_product_params() -> None:
         # IRS notionals not in bs_structure: derive bs_pct from notional / (2 × total_assets)
         if bs_pct == 0.0 and pc in IRS_PRODUCT_CODES and bal > 0:
             bs_pct = bal / (2.0 * TOTAL_ASSETS) * 100.0
-        hqla_f = _meta(pc, sid, ccy, "hqla_factor", 0.0) or 0.0 if sid == "A" else 0.0
-        lcr_r  = _meta(pc, sid, ccy, "LCR",         0.0) or 0.0 if sid == "L" else 0.0
-        asf_f  = _meta(pc, sid, ccy, "ASF",         0.0) or 0.0 if sid in ("L","E") else 0.0
-        rsf_f  = _meta(pc, sid, ccy, "RSF",         0.0) or 0.0 if sid == "A" else 0.0
+        hqla_f    = _meta(pc, sid, ccy, "hqla_factor",   0.0) or 0.0 if sid == "A" else 0.0
+        lcr_r     = _meta(pc, sid, ccy, "LCR",           0.0) or 0.0 if sid == "L" else 0.0
+        asf_f     = _meta(pc, sid, ccy, "ASF",           0.0) or 0.0 if sid in ("L","E") else 0.0
+        rsf_f     = _meta(pc, sid, ccy, "RSF",           0.0) or 0.0 if sid == "A" else 0.0
+        rwa_f     = _meta(pc, sid, ccy, "rwa_weight",    0.0) or 0.0 if sid == "A" else 0.0
+        pd_r      = float(_meta(pc, sid, ccy, "PD",      0.0) or 0.0) if sid == "A" else 0.0
+        lgd_r     = float(_meta(pc, sid, ccy, "LGD",     0.0) or 0.0) if sid == "A" else 0.0
+        vol_elast = float(_meta(pc, sid, ccy, "vol_elasticity", 0.0) or 0.0)
+        fee_r     = float(_meta(pc, sid, ccy, "fee_unit_rate", 0.0) or 0.0)
+        acq_r     = float(_meta(pc, sid, ccy, "acq_cost_rate", 0.0) or 0.0)
 
         # IRS sign: derive from bs_side since IRS is not in bs_structure
         sign_sng = _meta(pc, sid, ccy, "sign", None)
@@ -2345,8 +2494,14 @@ def build_product_params() -> None:
             "lcr_runoff":          lcr_r,
             "asf_factor":          asf_f,
             "rsf_factor":          rsf_f,
+            "rwa_factor":          rwa_f,
             "inflow_30d_frac":     0.0,
             "amort_frac_1y":       0.0,
+            "pd_rate":             pd_r,
+            "lgd_rate":            lgd_r,
+            "vol_elasticity":      vol_elast,
+            "fee_unit_rate":       fee_r,
+            "acq_cost_rate":       acq_r,
             "repricing_tenor_m":   float(_sng_rep_m),
             "rate_type":           None,
             "coupon_rate":         None,
@@ -2974,6 +3129,24 @@ def build_product_params() -> None:
         lcr_runoff        = params_df["lcr_runoff"].to_numpy(dtype=float),
         asf_factor        = params_df["asf_factor"].to_numpy(dtype=float),
         rsf_factor        = params_df["rsf_factor"].to_numpy(dtype=float),
+        rwa_factor        = params_df["rwa_factor"].to_numpy(dtype=float),
+        pd_rate           = params_df["pd_rate"].fillna(0.0).to_numpy(dtype=float),
+        lgd_rate          = params_df["lgd_rate"].fillna(0.0).to_numpy(dtype=float),
+        el_unit           = (params_df["pd_rate"].fillna(0.0) * params_df["lgd_rate"].fillna(0.0)).to_numpy(dtype=float),
+        fee_unit_rate     = params_df["fee_unit_rate"].fillna(0.0).to_numpy(dtype=float),
+        acq_cost_rate     = params_df["acq_cost_rate"].fillna(0.0).to_numpy(dtype=float),
+        coc_rate          = np.array([coc_rate]),
+        cet1_target       = np.array([cet1_target]),
+        # Price-volume elasticity: rate change per 1pp of product weight (all sides)
+        vol_elasticity         = params_df["vol_elasticity"].fillna(0.0).to_numpy(dtype=float),
+        # New-business NII rate: equals book rate for now (FTP data needed for market-rate adjustment)
+        nii_unit_rate_new_biz  = nii_unit_rate,
+        # Substitution/cannibalism pairs (k pairs)
+        subst_src_pc           = subst_df["source_code"].to_numpy(dtype=object) if len(subst_df) else np.array([], dtype=object),
+        subst_src_side         = subst_df["source_side"].to_numpy(dtype=object) if len(subst_df) else np.array([], dtype=object),
+        subst_dst_pc           = subst_df["dest_code"].to_numpy(dtype=object)   if len(subst_df) else np.array([], dtype=object),
+        subst_dst_side         = subst_df["dest_side"].to_numpy(dtype=object)   if len(subst_df) else np.array([], dtype=object),
+        subst_rates            = subst_df["subst_rate"].to_numpy(dtype=float)   if len(subst_df) else np.array([], dtype=float),
         inflow_30d_frac   = params_df["inflow_30d_frac"].to_numpy(dtype=float),
         amort_frac_1y     = params_df["amort_frac_1y"].to_numpy(dtype=float),
         coeff_a           = params_df["coeff_a"].to_numpy(dtype=float),

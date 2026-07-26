@@ -36,3 +36,10 @@ htmlcov/
 # Env files (secrets)
 .env
 *.env
+
+# Dagster local run state (transient, machine-specific)
+.dagster_home/
+.tmp_dagster_home_*/
+
+# Copyrighted reference material - never commit, cite only
+Diogo Gobira*.pdf

@@ -464,6 +464,17 @@ def compute_eve_cf_fast_all(
         if scen == "base":
             continue
         result[scen] = float(pv_mat[:, rs].sum()) - eve_base_raw
+
+    # Fallback: cohorts with no CF schedule AND no eve_pv_frac (e.g. IRS product 0000).
+    # Use delta_eve_unit calibrated from SQL — same as accuracy_check._approach_b_scen.
+    blank = (~use_eff) & (cr.cf_n_q == 0)
+    if blank.any():
+        scen_p_idx = {str(s): i for i, s in enumerate(params.scenario_ids)}
+        for scen, s_idx in scen_p_idx.items():
+            if scen in result:
+                result[scen] += float(
+                    np.dot(balance[blank], params.delta_eve_unit[blank, s_idx])
+                )
     return result
 
 
@@ -499,6 +510,25 @@ def compute_eve_cf_fast_by_product(
         for rs in range(cr.n_rate_scen):
             if rs != base_idx:
                 agg[k][rs] += pv_mat[i, rs] - pv_mat[i, base_idx]
+
+    # Fallback: cohorts with no CF schedule AND no eve_pv_frac (e.g. IRS product 0000).
+    # Use delta_eve_unit calibrated from SQL — same as accuracy_check._approach_b_scen.
+    blank = (~use_eff) & (cr.cf_n_q == 0)
+    if blank.any():
+        scen_p_idx = {str(s): i for i, s in enumerate(params.scenario_ids)}
+        for i in np.where(blank)[0]:
+            pc  = str(params.product_code[i])
+            sid = str(params.bs_side[i])
+            ccy = str(params.currency[i])
+            k = (pc, sid, ccy)
+            if k not in agg:
+                agg[k] = np.zeros(cr.n_rate_scen, dtype=float)
+                agg[k][0] += balance[i] * params.eve_pv_factor[i]
+            for rs, scen in enumerate(cr.rate_scenario_ids):
+                scen = str(scen)
+                if scen == "base" or scen not in scen_p_idx:
+                    continue
+                agg[k][rs] += balance[i] * params.delta_eve_unit[i, scen_p_idx[scen]]
     return agg
 
 

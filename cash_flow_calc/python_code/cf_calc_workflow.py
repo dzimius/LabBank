@@ -225,6 +225,16 @@ for table_name in cf_obj.dict_cols_deposits.keys():
         # No IR beh model for this chunk: treat beh = orig (no behavioural adjustment)
         if beh_batch.empty:
             beh_batch = orig_batch.copy()
+        elif not orig_batch.empty:
+            # Per-schedule fallback: in a mixed chunk, deposits whose product_code has no
+            # behavioral model are absent from beh_batch. Fill them from orig so the outer
+            # join does not zero-out their beh_* payment columns.
+            orig_ids = set(orig_batch['schedule_id'])
+            beh_ids  = set(beh_batch['schedule_id'])
+            missing  = orig_ids - beh_ids
+            if missing:
+                extra = orig_batch[orig_batch['schedule_id'].isin(missing)].copy()
+                beh_batch = pd.concat([beh_batch, extra], ignore_index=True)
         # No orig (already matured): treat orig = beh
         if orig_batch.empty:
             orig_batch = beh_batch.copy()

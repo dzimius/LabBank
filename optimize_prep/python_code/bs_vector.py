@@ -66,8 +66,38 @@ class BalanceSheetParams:
     lcr_runoff:     np.ndarray    # float64, (n,)   LCR run-off rate (liabilities), 0 for assets
     asf_factor:     np.ndarray    # float64, (n,)   ASF factor (liabilities/equity), 0 for assets
     rsf_factor:     np.ndarray    # float64, (n,)   RSF factor (assets), 0 for liabilities
+    rwa_factor:     np.ndarray    # float64, (n,)   Basel III risk weight (assets only), 0 for L/E
     inflow_30d_frac: np.ndarray   # float64, (n,)   30-day inflow fraction (assets only)
     amort_frac_1y:  np.ndarray    # float64, (n,)   1Y amortisation fraction
+
+    # ── Credit risk (Expected Loss) ───────────────────────────────────────────
+    pd_rate:        np.ndarray    # float64, (n,)   probability of default (assets only)
+    lgd_rate:       np.ndarray    # float64, (n,)   loss given default (assets only)
+    el_unit:        np.ndarray    # float64, (n,)   PD × LGD — EL per PLN of balance
+
+    # ── Non-interest fee income ───────────────────────────────────────────────
+    fee_unit_rate:  np.ndarray    # float64, (n,)   flat yearly fee income per PLN balance
+                                   # (e.g. mortgage/cash-loan servicing fees); 0 where unset
+
+    # ── Marketing / customer-acquisition cost ─────────────────────────────────
+    acq_cost_rate:  np.ndarray    # float64, (n,)   yearly cost rate applied only to a
+                                   # product's GROWTH above baseline weight in the
+                                   # optimizer (not the whole balance); 0 where unset
+
+    # ── Cost of capital ───────────────────────────────────────────────────────
+    coc_rate:       float         # scalar — CoC hurdle rate (e.g. 0.10 = 10%)
+    cet1_target:    float         # scalar — target CET1 ratio (e.g. 0.12 = 12%)
+
+    # ── Price-volume elasticity ───────────────────────────────────────────────
+    vol_elasticity:        np.ndarray    # float64, (n,)  NII rate change per 1pp weight increase
+    nii_unit_rate_new_biz: np.ndarray    # float64, (n,)  NII rate for new business origination
+
+    # ── Substitution (cannibalism) pairs ──────────────────────────────────────
+    subst_src_pc:   np.ndarray    # object,  (k,)  product_code of source product
+    subst_src_side: np.ndarray    # object,  (k,)  bs_side of source
+    subst_dst_pc:   np.ndarray    # object,  (k,)  product_code of dest product
+    subst_dst_side: np.ndarray    # object,  (k,)  bs_side of dest
+    subst_rates:    np.ndarray    # float64, (k,)  substitution rate per pair
 
     # ── rate coefficients ─────────────────────────────────────────────────────
     coeff_a:        np.ndarray    # float64, (n,)
@@ -182,6 +212,29 @@ class BalanceSheetParams:
             lcr_runoff        = data["lcr_runoff"].astype(float),
             asf_factor        = data["asf_factor"].astype(float),
             rsf_factor        = data["rsf_factor"].astype(float),
+            rwa_factor        = data["rwa_factor"].astype(float) if "rwa_factor" in data else np.zeros(n, dtype=float),
+            pd_rate           = data["pd_rate"].astype(float)   if "pd_rate"   in data else np.zeros(n, dtype=float),
+            lgd_rate          = data["lgd_rate"].astype(float)  if "lgd_rate"  in data else np.zeros(n, dtype=float),
+            el_unit           = data["el_unit"].astype(float)   if "el_unit"   in data else np.zeros(n, dtype=float),
+            fee_unit_rate     = (data["fee_unit_rate"].astype(float)
+                                 if "fee_unit_rate" in data
+                                 else np.zeros(n, dtype=float)),
+            acq_cost_rate     = (data["acq_cost_rate"].astype(float)
+                                 if "acq_cost_rate" in data
+                                 else np.zeros(n, dtype=float)),
+            coc_rate          = float(data["coc_rate"][0])      if "coc_rate"  in data else 0.10,
+            cet1_target       = float(data["cet1_target"][0])   if "cet1_target" in data else 0.12,
+            vol_elasticity        = (data["vol_elasticity"].astype(float)
+                                     if "vol_elasticity" in data
+                                     else np.zeros(n, dtype=float)),
+            nii_unit_rate_new_biz = (data["nii_unit_rate_new_biz"].astype(float)
+                                     if "nii_unit_rate_new_biz" in data
+                                     else data["nii_unit_rate"].astype(float)),
+            subst_src_pc    = (data["subst_src_pc"]             if "subst_src_pc"   in data else np.array([], dtype=object)),
+            subst_src_side  = (data["subst_src_side"]           if "subst_src_side" in data else np.array([], dtype=object)),
+            subst_dst_pc    = (data["subst_dst_pc"]             if "subst_dst_pc"   in data else np.array([], dtype=object)),
+            subst_dst_side  = (data["subst_dst_side"]           if "subst_dst_side" in data else np.array([], dtype=object)),
+            subst_rates     = (data["subst_rates"].astype(float) if "subst_rates"    in data else np.array([], dtype=float)),
             inflow_30d_frac   = data["inflow_30d_frac"].astype(float),
             amort_frac_1y     = data["amort_frac_1y"].astype(float),
             coeff_a           = data["coeff_a"].astype(float),

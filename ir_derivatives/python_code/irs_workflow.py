@@ -107,7 +107,14 @@ print(f"  IRS gap written to irrbb.ir_swap_gap_beh ({len(swap_gap)} rows)")
 # ── 7. Merge IRS gap into the main BS gap tables ──────────────────────────────
 # Adds gap_cf_irs to irrbb.ir_gap_beh and appends product_code='0000' rows to
 # irrbb.ir_gap_beh_a so NII can be computed from a single unified gap table.
-sql_setup.append_irs_to_ir_gap_tables(swap_gap, config.report_date)
-print("  IRS gap merged into irrbb.ir_gap_beh and irrbb.ir_gap_beh_a")
+# Guarded: irrbb.ir_gap_beh is written by cash_flow_calc; if that hasn't run
+# yet (e.g. standalone balance-sheet job), the merge is deferred gracefully.
+try:
+    sql_setup.append_irs_to_ir_gap_tables(swap_gap, config.report_date)
+    print("  IRS gap merged into irrbb.ir_gap_beh and irrbb.ir_gap_beh_a")
+except Exception as _gap_err:
+    print(f"  Note: IRS gap merge deferred — irrbb gap tables not yet populated.")
+    print(f"  Run cash_flow_calc first, then re-run irs_workflow to merge the gap.")
+    print(f"  ({type(_gap_err).__name__}: {_gap_err})")
 
 print(datetime.datetime.now(), "IRS workflow complete.")
