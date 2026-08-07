@@ -24,6 +24,7 @@ from baseline import (
     load_nmd_model_df,
     load_params,
     load_scenario_curves,
+    reset_bias_cache,
     run_metrics,
 )
 from gap_engine  import compute_repricing_gap, compute_liq_gap
@@ -75,19 +76,6 @@ def _build_stressed_nmd_for_gap(
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="LabBank Sandbox", page_icon="🏦", layout="wide")
 st.title("🏦 LabBank ALM Sandbox")
-
-with st.sidebar:
-    st.markdown("### Data")
-    if st.button(
-        "🔄 Reload my data", use_container_width=True,
-        help="Clear cached balance sheet, curves, and npz tensors, then reload "
-             "from disk. Use this after regenerating your own balance sheet "
-             "(labbank_data_job) so LabBank picks up the new files without "
-             "restarting Streamlit.",
-    ):
-        st.cache_data.clear()
-        st.cache_resource.clear()
-        st.rerun()
 
 # ── data loaders ──────────────────────────────────────────────────────────────
 params      = load_params()
@@ -236,7 +224,7 @@ with tab_bs:
     # ── editors — always receive the STABLE baseline; editor holds its own deltas
     _ECFG = {
         "own_name":    st.column_config.TextColumn("Product",     disabled=True, width="medium"),
-        "role":        st.column_config.TextColumn("",            disabled=True, width="small"),
+        "role":        st.column_config.TextColumn("Type",        disabled=True, width="small"),
         "currency":    st.column_config.TextColumn("CCY",         disabled=True, width="small"),
         "current_pct": st.column_config.NumberColumn(
             "Base %",   disabled=True, format="%.1f", width="small"),
@@ -256,7 +244,7 @@ with tab_bs:
     with col_a:
         st.subheader("Assets")
         edited_assets = st.data_editor(
-            _bs_with_notional(st.session_state.asset_base, st.session_state["_cur_asset"], total_assets_input),
+            _bs_with_notional(st.session_state.asset_base, st.session_state.asset_base, total_assets_input),
             column_config=_ECFG,
             column_order=["own_name", "currency", "current_pct", "new_pct", "avg_rate", "notional_m"],
             hide_index=True, use_container_width=True,
@@ -273,8 +261,8 @@ with tab_bs:
 
     with col_f:
         st.subheader("Liabilities + Equity")
-        _fund_disp = _bs_with_notional(st.session_state.fund_base, st.session_state["_cur_fund"], total_assets_input)
-        _fund_disp["role"] = _fund_disp["bs_side"].map({"E": "(T1)", "L": "", "A": ""}).fillna("")
+        _fund_disp = _bs_with_notional(st.session_state.fund_base, st.session_state.fund_base, total_assets_input)
+        _fund_disp["role"] = _fund_disp["bs_side"].map({"E": "E (T1)", "L": "L", "A": ""}).fillna("")
         edited_fund = st.data_editor(
             _fund_disp,
             column_config=_ECFG,
@@ -335,6 +323,27 @@ with tab_bs:
                     use_container_width=True)
     st.caption(f"Report Date: **{params.report_date}** | "
                f"Total Assets: **{total_assets_input/1e9:.1f} B PLN**")
+
+    st.divider()
+    if st.button(
+        "🔄 Reload my data", use_container_width=False,
+        help="Clear cached balance sheet, curves, and npz tensors, then reload "
+             "from disk. Use this after regenerating your own balance sheet "
+             "(labbank_data_job) so LabBank picks up the new files without "
+             "restarting Streamlit. Resets the Balance Sheet tab to the new "
+             "baseline — if the product mix changed, edits against the old "
+             "mix can't be carried forward meaningfully.",
+    ):
+        st.cache_data.clear()
+        st.cache_resource.clear()
+        reset_bias_cache()
+        a, f = _fresh_bs()
+        st.session_state.asset_base    = a
+        st.session_state.fund_base     = f
+        st.session_state["_cur_asset"] = a.copy()
+        st.session_state["_cur_fund"]  = f.copy()
+        st.session_state.reset_counter += 1
+        st.rerun()
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -790,6 +799,10 @@ with tab_metrics:
 # ═════════════════════════════════════════════════════════════════════════════
 with tab_gap:
 
+    if not st.session_state.get("bs_valid", False):
+        st.warning("⚠️ Fix the balance sheet (both sides = 100%) to compute the gap.")
+        st.stop()
+
     cur_irs_gap = st.session_state["_cur_irs"]
 
     # Build stressed NMD models for the gap engine from session-state pct vectors
@@ -797,7 +810,19 @@ with tab_gap:
     _nmd_str_pct    = st.session_state.get("nmd_stressed_pct", {})
     _nmd_gap_models = _build_stressed_nmd_for_gap(_nmd_models_df, _nmd_str_pct)
 
-    rep = compute_repricing_gap(params, cur_irs_gap, nmd_models=_nmd_gap_models)
+    # Balance Sheet tab edits → scaled weights, same machinery as the Metrics tab
+    _combined_bs_gap = pd.concat(
+        [st.session_state["_cur_asset"], st.session_state["_cur_fund"]],
+        ignore_index=True,
+    )
+    _new_pcts_gap = {(str(r["product_code"]), str(r["bs_side"])): r["new_pct"]
+                      for _, r in _combined_bs_gap.iterrows()}
+    _bs_weights_gap = compute_weights(params, _new_pcts_gap)
+
+    rep = compute_repricing_gap(params, cur_irs_gap, nmd_models=_nmd_gap_models,
+                                 weights=_bs_weights_gap)
+    # fully shipped-baseline gap (no BS/IRS/NMD edits) — for the delta arrows below
+    rep_base = compute_repricing_gap(params, irs_base)
 
     buckets  = rep["bucket"].tolist()
     bs_a_m   = (rep["bs_assets"] / 1e6).tolist()   # positive (green)
@@ -806,6 +831,10 @@ with tab_gap:
     net_m    = (rep["net_gap"]   / 1e6).tolist()
     cum_bs_m = (rep["cum_bs_gap"]  / 1e6).tolist()
     cum_net_m= (rep["cum_net_gap"] / 1e6).tolist()
+
+    base_bs_a_m  = (rep_base["bs_assets"] / 1e6).tolist()
+    base_bs_l_m  = (rep_base["bs_liab"]   / 1e6).tolist()
+    base_irs_g_m = (rep_base["irs_gap"]   / 1e6).tolist()
 
     def _sign_colors(vals, pos_clr="#388E3C", neg_clr="#D32F2F"):
         return [pos_clr if v >= 0 else neg_clr for v in vals]
@@ -818,15 +847,6 @@ with tab_gap:
                       annotation_text="12M ↔ longer", annotation_position="top")
 
     st.subheader("Repricing Gap (IR Gap)")
-    st.caption(
-        "**NMD model** (current accounts 6000/6300, savings 8000): "
-        "balance spread using the behavioral decay curve from *dep_beh_models_ir.xlsx* — "
-        "20% reprices overnight (M1), ~2%/month thereafter, full runoff by M75 / M40. "
-        "Other products: classified by cohort_t_first_m (months to next rate reset from the pipeline). "
-        "IRS float leg: each swap's actual next-fixing date derived from start_date + float_fixing_freq. "
-        "**Note:** the IRRBB metrics (NII/EVE) in the Metrics tab are unaffected — they use "
-        "pre-calibrated sensitivity coefficients from the exact pipeline and are always correct."
-    )
 
     # ── Panel 1: green (assets) + red (liabilities) at SAME position, black IRS adjacent ──
     # offsetgroup="bs" → green and red share one bar slot (one goes up, one down)
@@ -869,12 +889,34 @@ with tab_gap:
     net_m_v   = [(a - l + irs) for a, l, irs in zip(bs_a_m, bs_l_m, irs_g_m)]  # with IRS
 
     # shared y-axis range across both charts so bars are visually comparable
-    _all_p2   = bs_net_m + net_m_v
-    _p2_pad   = (max(_all_p2) - min(_all_p2)) * 0.15 or 50   # 15% padding
-    _p2_ymin  = min(_all_p2) - _p2_pad
-    _p2_ymax  = max(_all_p2) + _p2_pad
+    base_bs_net_m = [a - l for a, l in zip(base_bs_a_m, base_bs_l_m)]
+    base_net_m_v  = [(a - l + irs) for a, l, irs in zip(base_bs_a_m, base_bs_l_m, base_irs_g_m)]
+    delta_bs_net  = [c - b for c, b in zip(bs_net_m, base_bs_net_m)]
+    delta_net_v   = [c - b for c, b in zip(net_m_v,  base_net_m_v)]
 
-    def _net_gap_bar(title: str, values: list) -> go.Figure:
+    _all_p2    = bs_net_m + net_m_v
+    _p2_span   = (max(_all_p2) - min(_all_p2)) or 100
+    _p2_pad    = _p2_span * 0.15
+    _p2_ymax   = max(_all_p2) + _p2_pad
+    _p2_delta_y = min(_all_p2) - _p2_pad          # row where the delta labels sit
+    _p2_ymin   = _p2_delta_y - _p2_span * 0.12    # extra headroom below the delta row
+
+    def _delta_annotations(fig, deltas, thresh=1.0):
+        """Small ▲/▼ + value per bucket, below the bars, vs. shipped baseline.
+        Uses data ('y') coordinates, not 'paper' — 'paper' y<0 sits below the
+        whole canvas and gets clipped, so it never rendered."""
+        for b, d in zip(buckets, deltas):
+            if abs(d) < thresh:
+                continue
+            arrow = "▲" if d > 0 else "▼"
+            color = "#2E7D32" if d > 0 else "#C62828"
+            fig.add_annotation(
+                x=b, y=_p2_delta_y, xref="x", yref="y",
+                text=f"{arrow}{d:+.0f}", showarrow=False,
+                font=dict(size=9, color=color),
+            )
+
+    def _net_gap_bar(title: str, values: list, deltas: list) -> go.Figure:
         fig = go.Figure()
         fig.add_trace(go.Bar(
             x=buckets, y=values,
@@ -885,17 +927,20 @@ with tab_gap:
         ))
         fig.add_hline(y=0, line_dash="dot", line_color="grey", line_width=1)
         _add_sep(fig)
+        _delta_annotations(fig, deltas)
         fig.update_layout(
-            title=title, height=400, yaxis_title="M PLN",
+            title=title, height=420, yaxis_title="M PLN",
             yaxis=dict(range=[_p2_ymin, _p2_ymax]),
             margin=dict(t=45, b=5, l=5, r=5),
         )
         return fig
 
+    st.caption("▲/▼ below each bucket: change vs. the shipped baseline "
+               "(unedited Balance Sheet, IRS book, and NMD decay).")
     p2a, p2b = st.columns(2)
-    p2a.plotly_chart(_net_gap_bar("Net Gap — Balance Sheet only", bs_net_m),
+    p2a.plotly_chart(_net_gap_bar("Net Gap — Balance Sheet only", bs_net_m, delta_bs_net),
                      use_container_width=True)
-    p2b.plotly_chart(_net_gap_bar("Net Gap — Balance Sheet + IRS", net_m_v),
+    p2b.plotly_chart(_net_gap_bar("Net Gap — Balance Sheet + IRS", net_m_v, delta_net_v),
                      use_container_width=True)
 
     # ── Panel 3: cumulative net gap ───────────────────────────────────────────
@@ -1014,18 +1059,6 @@ with tab_nmd:
         currency = prod["currency"]
 
         shocked_scens = list(params.scenario_ids)
-
-        # ── optional renewal rate ─────────────────────────────────────────────
-        with st.expander("Advanced — renewal rate (NII only)", expanded=False):
-            renewal_rate = st.number_input(
-                "Renewal rate (annualised, decimal)",
-                min_value=0.0, max_value=0.20, value=0.0, step=0.005, format="%.4f",
-                help=(
-                    "Rate applied to capital returned within the 1-year horizon, "
-                    "representing the cost of replacement funding. "
-                    "0 = ignore renewal effect (conservative default)."
-                ),
-            )
 
         st.divider()
 
@@ -1157,7 +1190,7 @@ with tab_nmd:
                 pct_old=_pct_old, pct_new=_pct_new, cum_yf=_cum_yf,
                 curves=curves, currency=_prod["currency"],
                 shocked_scenario_ids=shocked_scens,
-                renewal_rate=renewal_rate, horizon_yf=1.0,
+                horizon_yf=1.0,
             )
             _total_dnii      += _r["delta_nii"]
             _total_deve_base += _r["delta_eve_base"]
@@ -1176,7 +1209,7 @@ with tab_nmd:
             pct_old=pct_base, pct_new=pct_stressed, cum_yf=cum_yf,
             curves=curves, currency=currency,
             shocked_scenario_ids=shocked_scens,
-            renewal_rate=renewal_rate, horizon_yf=1.0,
+            horizon_yf=1.0,
         )
         dnii      = _sel_result["delta_nii"]
         deve_base = _sel_result["delta_eve_base"]
@@ -1233,7 +1266,7 @@ with tab_nmd:
         st.caption(
             f"Product shown: **{pc_sel} — {NMD_PRODUCTS[pc_sel]}** | "
             f"Balance: {balance/1e6:,.0f} M PLN | Rate: {rate*100:.4f}% | "
-            f"Tenors: {K} | Renewal rate: {renewal_rate*100:.2f}%"
+            f"Tenors: {K}"
         )
 
 

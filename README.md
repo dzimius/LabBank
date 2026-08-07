@@ -33,7 +33,7 @@ Path A and B share the same LabBank app; B just changes what data it's pointed a
 - Liquidity risk calculations for LCR and NSFR.
 - SQL Server as the integration and audit layer between modules.
 - Dagster orchestration for reproducible pipeline runs and business-case jobs.
-- Reporting through Excel, Jupyter/HTML, Beamer, and Power BI assets.
+- Reporting through Excel, Jupyter/HTML, and Beamer assets.
 - Optimisation preparation layer with vectorised tensors for future balance sheet optimisation work.
 
 ## Project idea
@@ -74,7 +74,7 @@ Recommended additional README visuals:
 | Optimisation preparation | `optimize_prep/` | Builds the fast approximation tensors LabBank reads, plus accuracy checks against the exact pipeline. |
 | Interactive exploration (LabBank) | `sandbox/` | Streamlit app — stress the balance sheet, IRS book, and NMD assumptions and see NII/EVE/SOT/LCR/NSFR update live. No SQL Server required. |
 | Orchestration | `dagster_pipeline/` | Defines Dagster assets and jobs over the workflow scripts. |
-| Reporting | `visual_rep/` | Contains notebooks, HTML reports, Power BI file, Beamer presentation, and chart assets. |
+| Reporting | `visual_rep/` | Contains notebooks, HTML reports, Beamer presentation, and chart assets. |
 | 🚧 Balance sheet optimisation (roadmap) | `bs_optimization/` | Four solvers (deterministic, joint BS+swap, stochastic, natural-hedge) that optimise the balance sheet under EVE/NII/LCR/NSFR constraints. Functional and fairly mature, but not yet part of the guided LabBank path — treat as a preview of Phase 3. |
 
 ## Pipeline flow
@@ -87,7 +87,7 @@ Recommended additional README visuals:
 6. Calculate EVE as the present value of run-off cash flows under base and shocked curves.
 7. Apply EBA SOT logic, including conservative treatment of gains.
 8. Calculate LCR and NSFR.
-9. Export Excel, notebook, HTML, Beamer, and Power BI reporting outputs.
+9. Export Excel, notebook, HTML, and Beamer reporting outputs.
 
 ## ALM and risk methodology
 
@@ -179,7 +179,6 @@ module_name = "dagster_pipeline.definitions"
 - Jupyter
 - matplotlib
 - Excel inputs and outputs
-- Power BI
 - LaTeX Beamer
 
 ## Setup
@@ -231,7 +230,6 @@ The repository includes several reporting layers:
 - `visual_rep/bank_report.ipynb` for ALM and compliance reporting (run `python visual_rep/export_report.py` to generate `bank_report.html`/`.pdf` — the export isn't tracked in git).
 - `visual_rep/finance_report.ipynb` for finance-oriented reporting (same export pattern).
 - `visual_rep/labbank_presentation.tex` for the Beamer presentation.
-- `visual_rep/ir_gap.pbix` for Power BI repricing gap analysis.
 - `irrbb_calc/output/*.xlsx` for IRRBB outputs.
 - `liq_calc/output/lcr_nsfr_report.xlsx` for liquidity outputs.
 - `optimize_prep/output/*.xlsx` and `*.npz` for optimisation preparation and accuracy checking.

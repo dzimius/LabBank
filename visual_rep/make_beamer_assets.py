@@ -114,6 +114,26 @@ def tkey(lbl):
     if lbl.endswith('M'): return int(lbl[:-1])
     return 99_999
 
+# Coarse tenor grouping for gap ladders — same scheme as bank_report.ipynb's
+# IRS Book / IR Gap by Product Group sections (monthly to 6M, then annual).
+GAP_GRP_ORDER = ['1M', '2M', '3M', '4M', '5M', '6M', '6M–1Y',
+                 '2Y', '3Y', '4Y', '5Y', '>5Y']
+
+def gap_grp(lbl):
+    m = tkey(lbl)
+    if m <= 1:  return '1M'
+    if m <= 2:  return '2M'
+    if m <= 3:  return '3M'
+    if m <= 4:  return '4M'
+    if m <= 5:  return '5M'
+    if m <= 6:  return '6M'
+    if m <= 12: return '6M–1Y'
+    if m <= 24: return '2Y'
+    if m <= 36: return '3Y'
+    if m <= 48: return '4Y'
+    if m <= 60: return '5Y'
+    return '>5Y'
+
 
 # ── 1. PIPELINE DIAGRAM ───────────────────────────────────────────────────────
 def make_pipeline():
@@ -222,6 +242,97 @@ def make_sql_schema():
                  pad=8, color='#1A237E')
     fig.tight_layout()
     save(fig, 'sql_schema.png')
+
+
+# ── 2b. TRANSACTION-HUB ENTITY DIAGRAM ────────────────────────────────────────
+def make_transaction_erd():
+    """SSMS-style database diagram: dbo.transactions as the hub, with 1:1
+    FK lines (transaction_id) out to each schemat.* product-detail table."""
+    fig, ax = plt.subplots(figsize=(11, 8.6))
+    ax.set_xlim(0, 11); ax.set_ylim(0, 9.6)
+    ax.axis('off')
+    fig.patch.set_facecolor('white')
+
+    def entity_box(x, y, w, h, header, cols, pk_idx=0, fc='#E3F2FD', ec='#1565C0'):
+        rect = FancyBboxPatch((x, y), w, h, boxstyle='square,pad=0',
+                               facecolor=fc, edgecolor=ec, linewidth=1.6)
+        ax.add_patch(rect)
+        head_h = 0.42
+        ax.add_patch(mpatches.Rectangle((x, y + h - head_h), w, head_h,
+                                         facecolor=ec, edgecolor=ec))
+        ax.text(x + w/2, y + h - head_h/2, header, ha='center', va='center',
+                fontsize=9.5, fontweight='bold', color='white')
+        row_h = (h - head_h) / max(len(cols), 1)
+        rows = {}
+        for i, (label, key) in enumerate(cols):
+            ry = y + h - head_h - row_h * (i + 0.5)
+            rows[label] = (x, x + w, ry)
+            tag = 'PK ' if key == 'PK' else ('FK ' if key == 'FK' else '')
+            weight = 'bold' if key in ('PK', 'FK') else 'normal'
+            key_color = '#B8860B' if key == 'PK' else ec
+            if tag:
+                ax.text(x + 0.12, ry, tag, ha='left', va='center',
+                        fontsize=7.2, fontweight='bold', color=key_color,
+                        fontfamily='monospace')
+            ax.text(x + (0.42 if tag else 0.12), ry, label, ha='left', va='center',
+                    fontsize=7.8, fontweight=weight, color='#212121',
+                    fontfamily='monospace')
+            if i > 0:
+                ax.plot([x, x + w], [y + h - head_h - row_h * i]*2,
+                        color=ec, lw=0.4, alpha=0.4)
+        return rows
+
+    # Hub: dbo.transactions
+    hub_cols = [
+        ('transaction_id', 'PK'), ('product_code', ''), ('product_name', ''),
+        ('bs_side  (A / L)', ''), ('balance_amt', ''), ('currency', ''),
+        ('client_id', ''), ('client_type_id', ''),
+    ]
+    hub_x, hub_y, hub_w, hub_h = 3.9, 3.15, 3.2, 2.85
+    hub_rows = entity_box(hub_x, hub_y, hub_w, hub_h, 'dbo.transactions',
+                           hub_cols, fc='#FFF8E1', ec='#E65100')
+
+    children = [
+        ('schemat.loans', [('transaction_id', 'FK'), ('rate_type  (F/V/A)', ''),
+                            ('client_rt · index_rt', ''), ('maturity_date', ''),
+                            ('schedule_id', '')], 0.2, 5.9, 3.1, 2.5),
+        ('schemat.deposits', [('transaction_id', 'FK'), ('rate_type', ''),
+                               ('lcr_weight · asf_weight', ''),
+                               ('schedule_id', '')], 7.7, 5.9, 3.1, 2.2),
+        ('schemat.financial_instruments', [('transaction_id', 'FK'),
+                               ('hqla_class · haircut', ''),
+                               ('rsf_weight', ''), ('schedule_id', '')],
+                               0.2, 0.3, 3.4, 2.2),
+        ('schemat.equity', [('transaction_id', 'FK'), ('balance_amt', ''),
+                             ('currency', '')], 7.7, 0.3, 3.1, 1.75),
+    ]
+
+    for name, cols, cx, cy, cw, ch in children:
+        rows = entity_box(cx, cy, cw, ch, name, cols, fc='#E8F5E9', ec='#2E7D32')
+        # connector: child's transaction_id (FK) row  ↔  hub's transaction_id (PK) row
+        cxr0, cxr1, cyr = rows['transaction_id']
+        hxr0, hxr1, hyr = hub_rows['transaction_id']
+        child_pt = (cxr0, cyr) if cxr0 > hub_x + hub_w else \
+                   (cxr1, cyr) if cxr1 < hub_x else (cxr0 + (cxr1-cxr0)/2, cyr)
+        hub_pt = (hxr1, hyr) if child_pt[0] >= hxr1 else \
+                 (hxr0, hyr) if child_pt[0] <= hxr0 else (hxr0, hyr)
+        ax.plot([hub_pt[0], child_pt[0]], [hub_pt[1], child_pt[1]],
+                color='#455A64', lw=1.3, zorder=1,
+                solid_capstyle='round')
+        # cardinality: 1 : 1 — each transaction has at most one matching detail row
+        ax.text(hub_pt[0] + (0.18 if child_pt[0] >= hxr1 else -0.18), hub_pt[1] + 0.14,
+                '1', ha='center', fontsize=8, fontweight='bold', color='#455A64')
+        ax.text(child_pt[0] + (-0.18 if child_pt[0] >= hxr1 else 0.18), child_pt[1] + 0.14,
+                '1', ha='center', fontsize=8, fontweight='bold', color='#455A64')
+
+    ax.set_title('LabBank — Core Entity Relationships  (dbo.transactions hub)',
+                 fontsize=13, fontweight='bold', y=0.98, color='#1A237E')
+    ax.text(5.5, 9.15,
+            'One row per position in dbo.transactions; each schemat.* table adds product-specific\n'
+            'detail for the same transaction_id (1:1 — every position belongs to exactly one product table).',
+            ha='center', va='center', fontsize=8, color='#666666', style='italic')
+    fig.tight_layout()
+    save(fig, 'transaction_erd.png')
 
 
 # ── 3. BALANCE SHEET STRUCTURE ────────────────────────────────────────────────
@@ -456,42 +567,32 @@ def make_repricing_gap():
             FROM irrbb.ir_gap_beh WHERE currency=:ccy
         ''', ccy=CCY)
 
-    gap['_s'] = gap['tenor_bucket'].map(tkey)
-    gap = gap.sort_values('_s').reset_index(drop=True)
-    gap_24 = gap[gap['_s'] <= 24]
-    x = np.arange(len(gap_24))
+    gap['grp'] = gap['tenor_bucket'].map(gap_grp)
+    grp = (gap.groupby('grp')[['gap_cf', 'gap_irs']].sum()
+           .reindex([g for g in GAP_GRP_ORDER if g in gap['grp'].unique()]))
+    x = np.arange(len(grp))
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 6),
-                                    gridspec_kw={'height_ratios': [2, 1]})
+    fig, ax1 = plt.subplots(figsize=(12, 4.5))
     fig.suptitle(f'Repricing Gap Ladder  |  {CCY}  |  {RD.date()}',
                  fontsize=12, fontweight='bold')
 
-    bar_col = [C_A if v >= 0 else C_L for v in gap_24['gap_cf']]
-    ax1.bar(x, gap_24['gap_cf'] / 1e9, color=bar_col, alpha=0.80, edgecolor='white')
-    if gap_24['gap_irs'].abs().sum() > 0:
-        ax1.bar(x, gap_24['gap_irs'] / 1e9, color='#F57F17', alpha=0.65,
+    bar_col = [C_A if v >= 0 else C_L for v in grp['gap_cf']]
+    ax1.bar(x, grp['gap_cf'] / 1e9, color=bar_col, alpha=0.80, edgecolor='white')
+    legend_handles = [
+        mpatches.Patch(color=C_A, alpha=0.7, label='Asset-sensitive (+)'),
+        mpatches.Patch(color=C_L, alpha=0.7, label='Liability-sensitive (−)'),
+    ]
+    if grp['gap_irs'].abs().sum() > 0:
+        ax1.bar(x, grp['gap_irs'] / 1e9, color='#F57F17', alpha=0.65,
                 edgecolor='white', label='IRS adjustment')
-        ax1.legend()
+        legend_handles.append(mpatches.Patch(color='#F57F17', alpha=0.65, label='IRS adjustment'))
     ax1.axhline(0, color='black', lw=0.8)
     ax1.set_xticks(x)
-    ax1.set_xticklabels(gap_24['tenor_bucket'], rotation=45, ha='right', fontsize=8)
+    ax1.set_xticklabels(grp.index, fontsize=9)
     ax1.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f'{v:.1f}B'))
     ax1.set_ylabel('B PLN')
     ax1.set_title('Net Repricing Gap by Tenor Bucket  (positive = asset-sensitive)')
-    ax1.add_patch(mpatches.Patch(color=C_A, alpha=0.7, label='Asset-sensitive (+)'))
-    ax1.add_patch(mpatches.Patch(color=C_L, alpha=0.7, label='Liability-sensitive (−)'))
-    ax1.legend(fontsize=8)
-
-    cum = gap_24['gap_cf'].cumsum() / 1e9
-    ax2.plot(x, cum, color=C_N, lw=2.0, marker='o', markersize=4)
-    ax2.axhline(0, color='black', lw=0.8)
-    ax2.fill_between(x, cum, 0, where=(cum >= 0), alpha=0.15, color=C_A)
-    ax2.fill_between(x, cum, 0, where=(cum < 0), alpha=0.15, color=C_L)
-    ax2.set_xticks(x)
-    ax2.set_xticklabels(gap_24['tenor_bucket'], rotation=45, ha='right', fontsize=8)
-    ax2.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f'{v:.1f}B'))
-    ax2.set_ylabel('B PLN')
-    ax2.set_title('Cumulative Gap')
+    ax1.legend(handles=legend_handles, fontsize=8)
     fig.tight_layout()
     save(fig, 'repricing_gap.png')
 
@@ -786,38 +887,23 @@ def make_liq_gap():
         print('  [liq_gap] no data — skipping')
         return
 
-    lg['_s'] = lg['tenor_bucket'].map(tkey)
-    lg = lg[lg['_s'] <= 60].copy()
-    agg = lg.groupby('tenor_bucket').agg(gap=('gap_cf', 'sum'), _s=('_s', 'first')).reset_index()
-    agg = agg.sort_values('_s').reset_index(drop=True)
-    agg['cum'] = agg['gap'].cumsum()
+    lg['grp'] = lg['tenor_bucket'].map(gap_grp)
+    agg = (lg.groupby('grp')['gap_cf'].sum()
+           .reindex([g for g in GAP_GRP_ORDER if g in lg['grp'].unique()]))
     x = np.arange(len(agg))
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 6),
-                                    gridspec_kw={'height_ratios': [1.6, 1]})
+    fig, ax1 = plt.subplots(figsize=(12, 4.5))
     fig.suptitle(f'Behavioural Liquidity Gap  |  {CCY}  |  {RD.date()}',
                  fontsize=12, fontweight='bold')
 
-    bar_cols = [C_A if v >= 0 else C_L for v in agg['gap']]
-    ax1.bar(x, agg['gap'] / 1e9, color=bar_cols, alpha=0.80, edgecolor='white')
+    bar_cols = [C_A if v >= 0 else C_L for v in agg]
+    ax1.bar(x, agg / 1e9, color=bar_cols, alpha=0.80, edgecolor='white')
     ax1.axhline(0, color='black', lw=0.8)
     ax1.set_xticks(x)
-    ax1.set_xticklabels(agg['tenor_bucket'], rotation=45, ha='right', fontsize=8)
+    ax1.set_xticklabels(agg.index, fontsize=9)
     ax1.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f'{v:.1f}B'))
     ax1.set_ylabel('B PLN')
     ax1.set_title('Periodic Net Cash Flow by Tenor Bucket  (positive = net inflow)')
-
-    ax2.plot(x, agg['cum'] / 1e9, color=C_N, lw=2.0, marker='o', markersize=4)
-    ax2.fill_between(x, agg['cum'] / 1e9, 0,
-                     where=(agg['cum'] >= 0), alpha=0.15, color=C_A)
-    ax2.fill_between(x, agg['cum'] / 1e9, 0,
-                     where=(agg['cum'] < 0), alpha=0.15, color=C_L)
-    ax2.axhline(0, color='black', lw=0.8)
-    ax2.set_xticks(x)
-    ax2.set_xticklabels(agg['tenor_bucket'], rotation=45, ha='right', fontsize=8)
-    ax2.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f'{v:.1f}B'))
-    ax2.set_ylabel('B PLN')
-    ax2.set_title('Cumulative Liquidity Gap')
     fig.tight_layout()
     save(fig, 'liq_gap.png')
 
@@ -827,6 +913,7 @@ if __name__ == '__main__':
     steps = [
         ('pipeline diagram',   make_pipeline),
         ('SQL schema',         make_sql_schema),
+        ('transaction ERD',    make_transaction_erd),
         ('balance sheet',      make_bs_structure),
         ('rate type exposure', make_rate_type),
         ('NII waterfall',      make_nii_waterfall),

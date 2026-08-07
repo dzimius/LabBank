@@ -693,15 +693,14 @@
     \column{0.48\textwidth}
       \textbf{Methodology}
 
-      The SOT applies a \textbf{50\% haircut per tenor bucket} to any
-      scenario leg that produces a \textit{gain}:
+      The SOT applies a \textbf{50\% haircut} to a scenario's
+      $\Delta$EVE if it comes out as a \textit{gain}, before it counts
+      toward the regulatory total:
       \[
-        \Delta\mathrm{EVE}^{\mathrm{reg}} = \sum_{b}
-          \min\!\bigl(\Delta\mathrm{EVE}_b,\;0\bigr)
-          + 0.5 \cdot \max\!\bigl(\Delta\mathrm{EVE}_b,\;0\bigr)
+        \Delta\mathrm{EVE}^{\mathrm{reg}} =
+          \min\!\bigl(\Delta\mathrm{EVE},\;0\bigr)
+          + 0.5 \cdot \max\!\bigl(\Delta\mathrm{EVE},\;0\bigr)
       \]
-      The haircut is applied \textit{at bucket level}, not on the total —
-      preventing gains in one bucket from offsetting losses in another.
 
       \vspace{6pt}
       \textbf{Thresholds (EBA/RTS/2022/10)}
@@ -817,9 +816,10 @@
   The liquidity gap shows the net cash position across the full
   tenor ladder up to 60~months, using \textbf{behavioural} cash flows
   (loan prepayments included, NMD decay applied).
-  A sustained \neg{negative cumulative gap} identifies the point at which
-  the bank would need additional funding — the primary input for
-  contingency funding planning.
+  The LabBank app's Gap Analysis tab renders this same view interactively,
+  alongside its running cumulative total — a sustained \neg{negative
+  cumulative gap} is what identifies the point at which the bank would need
+  additional funding, the primary input for contingency funding planning.
 \end{frame}
 
 % =============================================================================

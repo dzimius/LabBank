@@ -49,6 +49,7 @@ hr { border: none; border-top: 1px solid #ddd; margin: 2.5rem 0; }
 <p>This guide gets you running in one of two ways: exploring the shipped demo bank in LabBank with nothing but Python, or standing up the full SQL-Server-backed pipeline so you can generate and explore your own balance sheet. Pick the path that matches what you want to do — you can always start with Path A and move to Path B later.</p>
 <h2 id="who-this-is-for">Who this is for</h2>
 <p>Practitioners, risk/ALM analysts, and students who want to see a complete ALM pipeline — from synthetic transaction generation through NII/EVE/EBA SOT/LCR/NSFR — and interact with the results rather than just read about them.</p>
+<p><img alt="LabBank pipeline overview" src="../visual_rep/beamer_assets/pipeline.png" /></p>
 <hr />
 <h2 id="path-a-labbank-only-no-database-5-minutes">Path A — LabBank only (no database, ~5 minutes)</h2>
 <p>Use this if you want to explore the ALM concepts and stress a pre-built balance sheet interactively. Nothing here touches SQL Server.</p>
@@ -164,7 +165,7 @@ streamlit run sandbox/app.py
 <p>Since the goal here is getting to LabBank, <code>labbank_data_job</code> is the only one you need for the loop below — the others are fine-grained shortcuts for narrower changes (see <code>README.md</code>'s full jobs table, which also lists <code>optimize_prep_job</code> for rebuilding LabBank's tensors on their own).</p>
 <h3 id="4-the-generate-your-own-balance-sheet-loop">4. The "generate your own balance sheet" loop</h3>
 <ol>
-<li>Edit <code>balance_generate/input_data/bank_data.xlsx</code> with your own product balances, rates, and currencies. For swaps, edit <code>ir_derivatives/input/irs_input.xlsx</code>.</li>
+<li>Edit <code>balance_generate/input_data/bank_data.xlsx</code> with your own product balances, rates, and currencies. For swaps, edit <code>ir_derivatives/input/irs_input.xlsx</code>. If you're changing which products exist (not just their weights), also check <code>balance_generate/input_data/interest_rt.xlsx</code> — that's where each product's rate coefficients (<code>a</code>, <code>b</code>) and its <code>client_floor</code>/<code>client_cap</code> live (see the methodology doc's "Rate floors and caps" section); a new product with no row there gets no floor/cap at all.</li>
 <li>Run <code>labbank_data_job</code> in Dagster.</li>
 <li>Open LabBank (<code>streamlit run sandbox/app.py</code>, or if it's already running, just refresh) and click <strong>"🔄 Reload my data"</strong> in the sidebar.</li>
 <li>LabBank now shows your balance sheet — Balance Sheet, Metrics, Gap Analysis, etc. all reflect it.</li>

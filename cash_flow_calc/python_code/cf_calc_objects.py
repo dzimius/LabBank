@@ -598,19 +598,20 @@ def payment_dates_advance_n(
     bdc: int,
     eom: bool = False,
 ) -> list[ql.Date]:
-    freq_in_months = freq.length() * (freq.units() == ql.Years and 12 or 1)
-
-    diff_in_months = (
-        (end_date.year() - start_date.year()) * 12
-        + (end_date.month() - start_date.month())
-    )
-
-    n = diff_in_months // freq_in_months
-
-    return [
-        calendar.advance(start_date, i * freq, bdc, eom)
-        for i in range(1, n + 1)
-    ]
+    # Advance by `freq` directly rather than pre-counting via a month-diff
+    # heuristic — the old month-diff count only made sense for Month/Year
+    # periods and silently produced zero dates for Day/Week periods (e.g.
+    # a 7D payment_freq), since a month-level date diff is ~0 within a
+    # single-month schedule regardless of the actual day-level frequency.
+    dates = []
+    i = 1
+    while True:
+        d = calendar.advance(start_date, i * freq, bdc, eom)
+        if d > end_date:
+            break
+        dates.append(d)
+        i += 1
+    return dates
 
 def ql_column_to_datetime(series: pd.Series) -> pd.Series:
     """Convert pandas Series of QuantLib.Date -> pandas datetime."""

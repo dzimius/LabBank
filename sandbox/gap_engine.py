@@ -34,7 +34,7 @@ DEP_BEH_PATH = os.path.join(PROJECT_ROOT, "balance_gen_add_data", "input", "dep_
 REPORT_DATE_DEFAULT = date(2024, 12, 31)
 
 # 12 monthly buckets + 4 longer-tenor buckets
-BUCKETS       = ["M1","M2","M3","M4","M5","M6","M7","M8","M9","M10","M11","M12",
+BUCKETS       = ["1M","2M","3M","4M","5M","6M","7M","8M","9M","10M","11M","12M",
                  "1-2Y","2-3Y","3-5Y","5Y+"]
 _BUCKET_UPPER = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 24, 36, 60, 9999]
 
@@ -158,12 +158,20 @@ def compute_repricing_gap(
     irs_df: pd.DataFrame,
     report_date: date | None = None,
     nmd_models: dict | None = None,
+    weights: np.ndarray | None = None,
 ) -> pd.DataFrame:
     """Return repricing gap DataFrame.
 
     Columns: bucket, bs_assets, bs_liab, bs_gap,
              irs_assets, irs_liab, irs_gap, net_gap,
              cum_bs_gap, cum_net_gap
+
+    weights : optional (n,) array, fraction of total_assets per npz row —
+              same array `baseline.compute_weights()` returns for the Metrics
+              tab. When given, each row's balance is taken as
+              weights[i] * params.total_assets instead of the static
+              params.balance_arr[i], so the gap reflects Balance Sheet tab
+              edits. Omit for the shipped-baseline gap.
     """
     if report_date is None:
         report_date = REPORT_DATE_DEFAULT
@@ -185,7 +193,8 @@ def compute_repricing_gap(
         if pc_str == "0000" or side == "E":
             continue
 
-        bal     = float(params.balance_arr[i])
+        bal = (float(weights[i]) * float(params.total_assets) if weights is not None
+               else float(params.balance_arr[i]))
         pc_int  = int(pc_str) if pc_str.isdigit() else -1
 
         if pc_int in _NMD_CODES:
@@ -273,7 +282,7 @@ def compute_liq_gap(params, report_date: date | None = None) -> pd.DataFrame:
 
     net = asset_cf - liab_cf
     return pd.DataFrame({
-        "month":         [f"M{m+1}" for m in range(n_m)],
+        "month":         [f"{m+1}M" for m in range(n_m)],
         "asset_inflows":  asset_cf,
         "liab_outflows":  liab_cf,
         "net_liq_gap":    net,

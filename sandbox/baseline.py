@@ -23,7 +23,7 @@ if OPTPREP_CODE not in sys.path:
     sys.path.insert(0, OPTPREP_CODE)
 
 from bs_vector import BalanceSheetParams, CurveTensors, CohortRates  # noqa: E402
-from metrics   import compute_all_metrics, AllMetrics               # noqa: E402
+from metrics   import compute_all_metrics, AllMetrics, reset_bias_cache  # noqa: E402
 
 # ── file paths ─────────────────────────────────────────────────────────────────
 PARAMS_PATH         = os.path.join(PROJECT_ROOT, "optimize_prep", "output", "product_params.npz")

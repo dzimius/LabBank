@@ -6,6 +6,8 @@ This guide gets you running in one of two ways: exploring the shipped demo bank 
 
 Practitioners, risk/ALM analysts, and students who want to see a complete ALM pipeline — from synthetic transaction generation through NII/EVE/EBA SOT/LCR/NSFR — and interact with the results rather than just read about them.
 
+![LabBank pipeline overview](../visual_rep/beamer_assets/pipeline.png)
+
 ---
 
 ## Path A — LabBank only (no database, ~5 minutes)
@@ -116,7 +118,7 @@ Since the goal here is getting to LabBank, `labbank_data_job` is the only one yo
 
 ### 4. The "generate your own balance sheet" loop
 
-1. Edit `balance_generate/input_data/bank_data.xlsx` with your own product balances, rates, and currencies. For swaps, edit `ir_derivatives/input/irs_input.xlsx`.
+1. Edit `balance_generate/input_data/bank_data.xlsx` with your own product balances, rates, and currencies. For swaps, edit `ir_derivatives/input/irs_input.xlsx`. If you're changing which products exist (not just their weights), also check `balance_generate/input_data/interest_rt.xlsx` — that's where each product's rate coefficients (`a`, `b`) and its `client_floor`/`client_cap` live (see the methodology doc's "Rate floors and caps" section); a new product with no row there gets no floor/cap at all.
 2. Run `labbank_data_job` in Dagster.
 3. Open LabBank (`streamlit run sandbox/app.py`, or if it's already running, just refresh) and click **"🔄 Reload my data"** in the sidebar.
 4. LabBank now shows your balance sheet — Balance Sheet, Metrics, Gap Analysis, etc. all reflect it.

@@ -1,0 +1,165 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="app.diagrams.net" version="21.0.0">
+  <diagram id="labbank-onepager-arch" name="LabBank Architecture (one-pager)">
+    <mxGraphModel dx="1200" dy="380" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="1200" pageHeight="420" math="0" shadow="1">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- ═══ TITLE ═══ -->
+        <mxCell id="title" value="LabBank — From Excel Inputs to Regulatory Metrics"
+          style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=20;fontStyle=1;fontColor=#1A237E;"
+          vertex="1" parent="1">
+          <mxGeometry x="0" y="8" width="1200" height="32" as="geometry" />
+        </mxCell>
+
+        <!-- ═══ STAGE 1 — EXCEL INPUTS ═══ -->
+        <mxCell id="s1_bg" value=""
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F5E9;strokeColor=#2E7D32;strokeWidth=2;arcSize=6;"
+          vertex="1" parent="1">
+          <mxGeometry x="20" y="70" width="250" height="260" as="geometry" />
+        </mxCell>
+        <mxCell id="s1_hdr" value="1 · EXCEL INPUTS"
+          style="text;html=1;strokeColor=none;fillColor=none;align=center;fontStyle=1;fontSize=12;fontColor=#2E7D32;"
+          vertex="1" parent="1">
+          <mxGeometry x="20" y="80" width="250" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="s1_1" value="bank_data.xlsx&#10;Products · balances · rates"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#2E7D32;strokeColor=#1B5E20;fontColor=#ffffff;fontSize=10;arcSize=8;"
+          vertex="1" parent="1">
+          <mxGeometry x="40" y="112" width="210" height="42" as="geometry" />
+        </mxCell>
+        <mxCell id="s1_2" value="fixing_input.xlsx&#10;Historical WIBOR / EURIBOR"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#2E7D32;strokeColor=#1B5E20;fontColor=#ffffff;fontSize=10;arcSize=8;"
+          vertex="1" parent="1">
+          <mxGeometry x="40" y="164" width="210" height="42" as="geometry" />
+        </mxCell>
+        <mxCell id="s1_3" value="dep_beh_models_*.xlsx&#10;NMD decay assumptions"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#2E7D32;strokeColor=#1B5E20;fontColor=#ffffff;fontSize=10;arcSize=8;"
+          vertex="1" parent="1">
+          <mxGeometry x="40" y="216" width="210" height="42" as="geometry" />
+        </mxCell>
+        <mxCell id="s1_4" value="irs_input.xlsx  (optional)&#10;Interest rate swap trades"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#2E7D32;strokeColor=#1B5E20;fontColor=#ffffff;fontSize=10;arcSize=8;"
+          vertex="1" parent="1">
+          <mxGeometry x="40" y="268" width="210" height="42" as="geometry" />
+        </mxCell>
+
+        <!-- ═══ STAGE 2 — PYTHON + DAGSTER ═══ -->
+        <mxCell id="s2_bg" value=""
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EDE7F6;strokeColor=#4A148C;strokeWidth=2;arcSize=6;"
+          vertex="1" parent="1">
+          <mxGeometry x="310" y="70" width="250" height="260" as="geometry" />
+        </mxCell>
+        <mxCell id="s2_hdr" value="2 · PYTHON + DAGSTER"
+          style="text;html=1;strokeColor=none;fillColor=none;align=center;fontStyle=1;fontSize=12;fontColor=#4A148C;"
+          vertex="1" parent="1">
+          <mxGeometry x="310" y="80" width="250" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="s2_1" value="Balance sheet generation&#10;Synthetic transactions"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1565C0;strokeColor=#0D47A1;fontColor=#ffffff;fontSize=10;arcSize=8;"
+          vertex="1" parent="1">
+          <mxGeometry x="330" y="112" width="210" height="38" as="geometry" />
+        </mxCell>
+        <mxCell id="s2_2" value="Cash-flow engine&#10;Contractual + behavioural CFs"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1565C0;strokeColor=#0D47A1;fontColor=#ffffff;fontSize=10;arcSize=8;"
+          vertex="1" parent="1">
+          <mxGeometry x="330" y="156" width="210" height="38" as="geometry" />
+        </mxCell>
+        <mxCell id="s2_3" value="IRRBB calc&#10;NII · EVE · EBA SOT"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#B71C1C;strokeColor=#7F0000;fontColor=#ffffff;fontSize=10;arcSize=8;"
+          vertex="1" parent="1">
+          <mxGeometry x="330" y="200" width="210" height="38" as="geometry" />
+        </mxCell>
+        <mxCell id="s2_4" value="Liquidity calc&#10;LCR · NSFR"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E65100;strokeColor=#BF360C;fontColor=#ffffff;fontSize=10;arcSize=8;"
+          vertex="1" parent="1">
+          <mxGeometry x="330" y="244" width="210" height="38" as="geometry" />
+        </mxCell>
+        <mxCell id="s2_lbl" value="Orchestrated by Dagster · 9 assets · 6 jobs"
+          style="text;html=1;strokeColor=none;fillColor=none;align=center;fontSize=9;fontStyle=2;fontColor=#4A148C;"
+          vertex="1" parent="1">
+          <mxGeometry x="310" y="288" width="250" height="16" as="geometry" />
+        </mxCell>
+
+        <!-- ═══ STAGE 3 — SQL SERVER ═══ -->
+        <mxCell id="s3_bg" value=""
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFEBEE;strokeColor=#B71C1C;strokeWidth=2;arcSize=6;"
+          vertex="1" parent="1">
+          <mxGeometry x="600" y="70" width="250" height="260" as="geometry" />
+        </mxCell>
+        <mxCell id="s3_hdr" value="3 · SQL SERVER"
+          style="text;html=1;strokeColor=none;fillColor=none;align=center;fontStyle=1;fontSize=12;fontColor=#B71C1C;"
+          vertex="1" parent="1">
+          <mxGeometry x="600" y="80" width="250" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="s3_1" value="Single audit trail&#10;9 schemas, one integration bus"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#C62828;strokeColor=#7F0000;fontColor=#ffffff;fontSize=10;arcSize=8;"
+          vertex="1" parent="1">
+          <mxGeometry x="620" y="118" width="210" height="46" as="geometry" />
+        </mxCell>
+        <mxCell id="s3_2" value="Transactions · loans · deposits&#10;cash flows · repricing gaps"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#C62828;strokeColor=#7F0000;fontColor=#ffffff;fontSize=10;arcSize=8;"
+          vertex="1" parent="1">
+          <mxGeometry x="620" y="174" width="210" height="46" as="geometry" />
+        </mxCell>
+        <mxCell id="s3_3" value="Every downstream number&#10;traces back to one CF row"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#C62828;strokeColor=#7F0000;fontColor=#ffffff;fontSize=10;arcSize=8;fontStyle=2;"
+          vertex="1" parent="1">
+          <mxGeometry x="620" y="230" width="210" height="46" as="geometry" />
+        </mxCell>
+
+        <!-- ═══ STAGE 4 — REPORTS + LABBANK ═══ -->
+        <mxCell id="s4_bg" value=""
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FBE9E7;strokeColor=#BF360C;strokeWidth=2;arcSize=6;"
+          vertex="1" parent="1">
+          <mxGeometry x="890" y="70" width="290" height="260" as="geometry" />
+        </mxCell>
+        <mxCell id="s4_hdr" value="4 · REPORTS + LABBANK"
+          style="text;html=1;strokeColor=none;fillColor=none;align=center;fontStyle=1;fontSize=12;fontColor=#BF360C;"
+          vertex="1" parent="1">
+          <mxGeometry x="890" y="80" width="290" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="s4_1" value="bank_report / finance_report&#10;Jupyter → HTML / PDF"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#BF360C;strokeColor=#870000;fontColor=#ffffff;fontSize=10;arcSize=8;"
+          vertex="1" parent="1">
+          <mxGeometry x="910" y="112" width="250" height="38" as="geometry" />
+        </mxCell>
+        <mxCell id="s4_2" value="irrbb_report.xlsx · lcr_nsfr_report.xlsx&#10;Regulatory-style exports"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#217346;strokeColor=#17612d;fontColor=#ffffff;fontSize=10;arcSize=8;"
+          vertex="1" parent="1">
+          <mxGeometry x="910" y="156" width="250" height="38" as="geometry" />
+        </mxCell>
+        <mxCell id="s4_3" value="LabBank (Streamlit)&#10;Stress balance sheet, IRS &amp; NMD live — no SQL needed"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#00838F;strokeColor=#006064;fontColor=#ffffff;fontSize=10;arcSize=8;fontStyle=1;"
+          vertex="1" parent="1">
+          <mxGeometry x="910" y="200" width="250" height="46" as="geometry" />
+        </mxCell>
+        <mxCell id="s4_lbl" value="LabBank reads pre-built tensors — try it without SQL Server"
+          style="text;html=1;strokeColor=none;fillColor=none;align=center;fontSize=9;fontStyle=2;fontColor=#BF360C;"
+          vertex="1" parent="1">
+          <mxGeometry x="890" y="252" width="290" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- ═══ ARROWS BETWEEN STAGES ═══ -->
+        <mxCell id="arr_12" value="" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#455A64;strokeWidth=3;endArrow=block;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" source="s1_bg" target="s2_bg" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="arr_23" value="" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#455A64;strokeWidth=3;endArrow=block;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" source="s2_bg" target="s3_bg" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="arr_34" value="" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#455A64;strokeWidth=3;endArrow=block;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" source="s3_bg" target="s4_bg" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ═══ TAGLINE ═══ -->
+        <mxCell id="tagline" value="Every number in the final reports traces back to transaction-level data and cash-flow rows stored in SQL."
+          style="text;html=1;strokeColor=none;fillColor=none;align=center;fontSize=12;fontStyle=2;fontColor=#546E7A;"
+          vertex="1" parent="1">
+          <mxGeometry x="0" y="352" width="1200" height="24" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

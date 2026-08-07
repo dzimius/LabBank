@@ -1,0 +1,17 @@
+# Dependencies for sandbox/app.py (the LabBank Streamlit sandbox) only.
+#
+# Deliberately scoped down from the repo-root requirements.txt, which also
+# pulls in the full SQL pipeline (dagster, pyodbc, sqlalchemy) and
+# pywin32 (Windows-only — breaks `pip install` on Linux deploy targets like
+# Streamlit Community Cloud). The sandbox reads pre-built .npz tensors and
+# the input Excel files directly; it never touches SQL Server or QuantLib.
+#
+# Streamlit Community Cloud auto-discovers a requirements.txt in the same
+# directory as the app's main file, so pointing a deploy at sandbox/app.py
+# picks this one up instead of the root one.
+
+streamlit>=1.35.0
+numpy>=1.26.0
+pandas>=2.0.3
+plotly>=5.18.0
+openpyxl>=3.1.5

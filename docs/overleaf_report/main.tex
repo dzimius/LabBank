@@ -1,0 +1,852 @@
+% ─────────────────────────────────────────────────────────────────────────────
+% LabBank — one-shot ALM system report (10-12 pages)
+% Compile: pdflatex main.tex  (run twice for the table of contents)
+%
+% STATUS: first-iteration PLAN, not a finished camera-ready document.
+%
+% Done: pipeline.png (post-Dagster-bracket, exported from the draw.io GUI) is
+% in images/; the balance-sheet-tab annotated mockup is also in images/, as a
+% plain PNG (labbank_balance_sheet_annotated.png) — it used to be embedded as
+% an .svg via the svg package/Inkscape, but that pipeline mis-rendered the
+% text overlay (garbled/duplicated glyphs) on Overleaf's compiler, so it was
+% rasterised once to PNG and embedded with \imgfull like every other figure.
+%
+% Remaining TODOs before this is publish-ready:
+%   1. Replace the two \sqlplaceholder boxes in Section 7 ("See It Yourself")
+%      with real SSMS/Azure Data Studio screenshots.
+%   2. Replace the two \figplaceholder "before/after" boxes in Section 3
+%      ("Change Something, See What Happens") with real before/after
+%      screenshots of the Metrics tab.
+%   3. Fill in the LinkedIn / email placeholders — title page + "Contact"
+%      section at the end (search REPLACE_WITH_).
+%   4. Update \reportdate below if you want something other than today's date.
+% ─────────────────────────────────────────────────────────────────────────────
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[a4paper,top=2.2cm,bottom=2.4cm,left=2.3cm,right=2.3cm]{geometry}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{microtype}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage[most]{tcolorbox}
+\usepackage{amsmath}
+\usepackage{hyperref}
+
+\graphicspath{{images/}}
+
+% ── Palette (matches visual_rep/labbank_presentation.tex) ──────────────────────
+\definecolor{labblue}{RGB}{21,  101, 192}
+\definecolor{labred} {RGB}{198,  40,  40}
+\definecolor{labgrn} {RGB}{ 46, 125,  50}
+\definecolor{labpur} {RGB}{106,  27, 154}
+\definecolor{labdark}{RGB}{ 26,  35, 126}
+\definecolor{labgrey}{RGB}{ 96, 125, 139}
+
+\newcommand{\reportdate}{\today}
+
+% ── Section styling ─────────────────────────────────────────────────────────────
+\titleformat{\section}
+  {\normalfont\Large\bfseries\color{labdark}}
+  {\thesection}{0.6em}{}[{\color{labblue!40}\titlerule[1pt]}]
+\titleformat{\subsection}
+  {\normalfont\large\bfseries\color{labblue}}
+  {\thesubsection}{0.6em}{}
+
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\footrulewidth}{0pt}
+\fancyhead[L]{\small\color{labgrey}LabBank --- Laboratory Banking ALM System}
+\fancyhead[R]{\small\color{labgrey}\thepage}
+\fancypagestyle{plain}{\fancyhf{}\renewcommand{\headrulewidth}{0pt}}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=labblue,
+  urlcolor=labblue,
+  citecolor=labblue,
+  pdftitle={LabBank -- A Laboratory Banking ALM System},
+  pdfauthor={LabBank Project}
+}
+
+% ── Convenience macros ───────────────────────────────────────────────────────────
+\newcommand{\imgfull}[2][0.92\textwidth]{%
+  \begin{center}\includegraphics[width=#1]{#2}\end{center}}
+\newcommand{\pos}[1]{\textcolor{labgrn}{\textbf{#1}}}
+\newcommand{\neg}[1]{\textcolor{labred}{\textbf{#1}}}
+\newcommand{\hi} [1]{\textcolor{labblue}{\textbf{#1}}}
+
+\newtcolorbox{pitchbox}[1][Why this matters]{
+  enhanced, breakable, colback=labblue!5, colframe=labblue!55,
+  boxrule=0.8pt, arc=2mm, left=8pt, right=8pt, top=6pt, bottom=6pt,
+  title={#1}, colbacktitle=labdark, coltitle=white, fonttitle=\bfseries\small,
+  attach boxed title to top left={xshift=8pt, yshift=-2mm},
+  boxed title style={boxrule=0pt, arc=1mm}
+}
+
+\newtcolorbox{sqlplaceholder}[2][7.2cm]{
+  enhanced, breakable, colback=white, colframe=labgrey,
+  boxrule=1pt, sharp corners=south, arc=1mm,
+  title={#2}, colbacktitle=labdark, coltitle=white, fonttitle=\bfseries\small,
+  height=#1, valign=center, halign=center
+}
+
+% Generic "asset not ready yet" box — dashed border so it reads as a plan
+% placeholder, not a broken figure. #1 = height, #2 = what belongs here.
+% Currently unused (both pipeline.png spots now call \imgfull directly) —
+% kept in case images/pipeline.png isn't ready yet when you compile; swap
+% back to \figplaceholder[7cm]{...} at either \imgfull[...]{pipeline.png} call.
+\newtcolorbox{figplaceholderbox}[1][6cm]{
+  enhanced, breakable, colback=labgrey!4, colframe=labgrey,
+  boxrule=0pt, arc=1mm, borderline={1pt}{-1pt}{labgrey, dashed},
+  height=#1, valign=center, halign=center
+}
+\newcommand{\figplaceholder}[2][6cm]{%
+  \begin{figplaceholderbox}[#1]
+    \normalfont\color{labgrey}
+    {\bfseries PLACEHOLDER --- not yet exported}\\[4pt]
+    \itshape #2
+  \end{figplaceholderbox}
+}
+
+\newcommand{\schemarow}[4]{\texttt{#1} & \texttt{#2} & #3 & #4 \\}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\begin{document}
+% ─────────────────────────────────────────────────────────────────────────────
+
+% ═══ TITLE PAGE ═══
+\begin{titlepage}
+\begin{center}
+\vspace*{0.6cm}
+{\color{labdark}\fontsize{40}{44}\selectfont\bfseries LabBank}\\[8pt]
+{\color{labgrey}\Large A Laboratory Banking ALM System}\\[22pt]
+{\large\color{black} A digital twin of a bank's balance sheet and transaction ledger ---\\[2pt]
+ built to be explored, stress-tested, and rebuilt with your own numbers}\\[22pt]
+
+\imgfull[0.94\textwidth]{pipeline.png}
+
+\vspace{10pt}
+{\small\itshape\color{labgrey}The pipeline that builds it (above) and the app you explore it with (below).}
+
+\vspace{8pt}
+\imgfull[0.56\textwidth]{labbank_balance_sheet_annotated.png}
+
+\vspace{16pt}
+{\small\color{labgrey}
+Python \;\textbullet\; SQL Server \;\textbullet\; Dagster \;\textbullet\; Streamlit \;\textbullet\; EBA/RTS/2022/10}\\[6pt]
+{\small\color{labgrey}\reportdate}
+\end{center}
+\vfill
+\begin{center}
+\small \href{https://github.com/dzimius/LabBank}{github.com/dzimius/LabBank}\quad|\quad
+\href{mailto:REPLACE_WITH_YOUR_EMAIL}{REPLACE\_WITH\_YOUR\_EMAIL}\quad|\quad
+\href{https://www.linkedin.com/in/REPLACE_WITH_YOUR_HANDLE}{linkedin.com/in/REPLACE\_WITH\_YOUR\_HANDLE}
+\end{center}
+\end{titlepage}
+
+\tableofcontents
+\thispagestyle{plain}
+\newpage
+
+% =============================================================================
+\section{The Problem, and the Idea}
+% =============================================================================
+
+LabBank is an educational, hands-on ALM system: a \textbf{digital twin} of a
+bank's balance sheet and transaction ledger, built so you \textbf{learn
+interest rate risk and liquidity risk by testing them}, not by reading about
+them. Build your own balance sheet, edit a product's rate or a deposit's decay
+assumption, and watch the change ripple all the way through to NII, EVE, LCR,
+and NSFR --- the same regulatory metrics a real bank reports. Nothing here is a
+static example: every product, rate, and cash-flow row is real data you can
+inspect, edit, and regenerate.
+
+\textbf{Why that's hard to get right.} A bank's balance sheet produces
+thousands of cash flows every day, and rates reset, balances prepay, deposits
+decay, and shock scenarios apply simultaneously across every position in every
+currency. Most systems hide that complexity behind aggregated dashboards, so
+the moment a number looks wrong, nobody can point at the row that produced it,
+and nobody can safely ask ``what if'' without a change-request ticket. LabBank
+makes the opposite choice on both counts: every metric is something you can
+test yourself, and every number is something you can trace yourself.
+
+\begin{pitchbox}[Core principle]
+Every number in every report traces back to a \textbf{single row} in a
+\textbf{single cash-flow table}. No aggregation happens before it is recorded.
+That means NII, EVE, LCR, and NSFR are not four separate models --- they are four
+different aggregations of the \textit{same} underlying cash-flow schedule.
+\end{pitchbox}
+
+\subsection{What this project demonstrates}
+\begin{itemize}[itemsep=2pt]
+  \item A \textit{complete} ALM pipeline built from scratch: raw transaction
+        generation $\rightarrow$ market/behavioural enrichment $\rightarrow$
+        cash flows $\rightarrow$ regulatory metrics $\rightarrow$ reporting.
+  \item An interactive sandbox (the LabBank Streamlit app,
+        Section~\ref{sec:labbankapp}) where
+        editing the balance sheet mix, the IRS book, or an NMD decay curve
+        immediately recomputes NII/EVE/SOT/LCR/NSFR --- so you can see, not
+        just read, how a given ALM lever moves the numbers.
+  \item How NII, EVE, LCR, and NSFR are all derived from the same cash-flow
+        rows, just aggregated differently --- so there is no reconciliation gap
+        between risk views.
+  \item How an interest-rate-swap overlay shifts the repricing gap without
+        touching the underlying balance sheet.
+  \item How Dagster orchestration enforces dependency order across the pipeline
+        and gives every run a queryable audit trail.
+  \item A SQL Server data model designed to be inspected directly ---
+        \texttt{SELECT * FROM cf.products} is a legitimate way to understand
+        this system, not a debugging escape hatch.
+\end{itemize}
+
+\subsection{Who this is for}
+Two audiences, one codebase. \textbf{Practitioners} who sit between ALM, risk
+analytics, finance, data engineering, and reporting, and want to see how those
+pieces actually connect end to end. \textbf{Learners} --- students, career
+switchers, anyone studying IRRBB/liquidity methodology --- who want a real
+balance sheet to experiment on instead of a static textbook example: change an
+assumption, break something, see exactly which number moved and why. Either
+way, it is not a toy notebook and not a closed black-box model: every formula
+has a direct SQL or Python equivalent you can query yourself.
+
+% =============================================================================
+\section{Architecture at a Glance}
+\label{sec:architecture}
+% =============================================================================
+
+Four layers, one integration bus:
+\[
+\text{Excel inputs} \;\rightarrow\; \text{Python modules (Dagster-orchestrated)}
+\;\rightarrow\; \text{SQL Server (9 schemas)} \;\rightarrow\; \text{Reports}
+\]
+
+\imgfull[\textwidth]{pipeline.png}
+
+SQL Server is the single integration bus. Every stage reads from tables the
+previous stage wrote, instead of passing hidden in-memory state --- which means
+every stage can be re-run independently, and every intermediate result can be
+audited by querying the database directly. Dagster sits on top of all four
+processing stages (balance-sheet generation, SQL storage, IRRBB/liquidity
+calculation, and reporting) and enforces the order they run in.
+
+\subsection{Pipeline, step by step}
+\begin{enumerate}[itemsep=2pt]
+  \item \textbf{Balance sheet generation} --- synthetic transactions drawn from
+        \texttt{bank\_data.xlsx} using truncated-normal balance distributions
+        and real historical WIBOR rates. Written to \texttt{dbo.transactions}
+        and five \texttt{schemat.*} tables.
+  \item \textbf{Market data enrichment} --- yield curves bootstrapped into
+        \texttt{mkt.curves}; historical fixings into \texttt{mkt.fixings};
+        behavioural parameters (prepayment, NMD decay) into \texttt{bs.*}.
+  \item \textbf{Cash flow generation} --- for every transaction, a full schedule
+        of contractual amortisation plus behavioural adjustments is written to
+        \texttt{cf.products}. Repricing gaps land in \texttt{irrbb.ir\_gap\_*}.
+  \item \textbf{IR derivatives (optional)} --- swap legs from
+        \texttt{irs\_input.xlsx}, cash flows written to \texttt{cf.ir\_swap\_*},
+        swap gap merged into \texttt{irrbb.ir\_gap\_beh}.
+  \item \textbf{IRRBB calculation} --- six EBA shock scenarios applied to every
+        curve; NII over a 1-year horizon, EVE as the present value of run-off
+        cash flows.
+  \item \textbf{Liquidity calculation} --- LCR and NSFR, written to
+        \texttt{results.lcr\_nsfr}.
+  \item \textbf{Reporting} --- Jupyter notebooks read live from SQL and export
+        to HTML/PDF; Excel outputs for IRRBB and LCR/NSFR; a Streamlit app for
+        interactive stress-testing.
+\end{enumerate}
+
+% =============================================================================
+\section{The LabBank App --- Your Digital Twin, Interactively}
+\label{sec:labbankapp}
+% =============================================================================
+
+Everything in Section~\ref{sec:architecture} exists so that this app has
+something real to sit on top of. The Streamlit app (\texttt{sandbox/app.py}) reads a pre-built demo
+balance sheet --- no SQL Server required --- and lets you edit it directly:
+change the product mix, the IRS book, or a non-maturity-deposit decay
+assumption, and every downstream metric recomputes live.
+
+\begin{center}
+\ttfamily\small
+python -m venv venv \quad.\textbackslash venv\textbackslash Scripts\textbackslash Activate.ps1\quad
+pip install -r requirements.txt\quad streamlit run sandbox\textbackslash app.py
+\end{center}
+
+\subsection{The Balance Sheet tab}
+The tab you land on. Edit the asset and liability mix directly --- every other
+tab reacts to whatever you set here.
+
+\imgfull[0.92\textwidth]{labbank_balance_sheet_annotated.png}
+
+\subsection{The other five tabs}
+\begin{itemize}[itemsep=2pt]
+  \item \textbf{IRS Book} --- add/remove swap trades, change notional or fixed
+        rate, toggle \texttt{pay\_fixed} per swap; a leg summary compares
+        baseline vs.\ your edits.
+  \item \textbf{NMD Stress} --- pick a non-maturity deposit product and edit its
+        decay profile directly; a chart compares your stressed profile against
+        the baseline.
+  \item \textbf{Metrics} --- the results dashboard: NII, EVE, LCR, NSFR baseline
+        vs.\ modified, the EBA Supervisory Outlier Test with pass/fail called
+        out explicitly, per-scenario $\Delta$NII/$\Delta$EVE charts, and an IRS
+        contribution breakdown.
+  \item \textbf{Gap Analysis} --- repricing-gap panels (with and without the IRS
+        overlay) and the 12-month behavioural liquidity gap.
+  \item \textbf{Market Curves} --- base and shocked curves per currency, plus a
+        panel to try rate environments that aren't one of the 7 EBA scenarios.
+\end{itemize}
+
+\subsection{Change something, see what happens}
+This is the point of the whole exercise. Every edit above is additive and
+immediate --- there is no ``recalculate'' button to press and no batch job to
+wait on.
+
+\begin{pitchbox}[A worked example]
+Open \textbf{Balance Sheet}, shift 10 percentage points of asset mix from
+fixed-rate mortgages into floating-rate mortgages, keeping both sides at
+100\%. Switch to \textbf{Metrics}: the repricing gap becomes more
+asset-sensitive, so a parallel-up shock now helps NII \textit{more} than
+before, and a parallel-down shock hurts it more --- while $\Delta$EVE moves the
+other way, since floating-rate assets carry far less duration risk than the
+fixed-rate mortgages they replaced. Same balance sheet size, same products,
+one slider moved --- and the NII-vs-EVE trade-off from
+Section~\ref{sec:irrbb} is now something you watched happen, not just a
+formula you read.
+\end{pitchbox}
+
+\begin{minipage}[t]{0.48\textwidth}
+\begin{figplaceholderbox}[6cm]
+  \normalfont\color{labgrey}
+  {\bfseries Metrics tab --- baseline}\\[4pt]
+  \itshape [ screenshot before the edit ]
+\end{figplaceholderbox}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.48\textwidth}
+\begin{figplaceholderbox}[6cm]
+  \normalfont\color{labgrey}
+  {\bfseries Metrics tab --- after shifting 10pp fixed $\rightarrow$ floating}\\[4pt]
+  \itshape [ screenshot after the edit ]
+\end{figplaceholderbox}
+\end{minipage}
+
+\vspace{6pt}
+\small\color{labgrey}\textit{Any lever works for this comparison --- NMD decay
+speed, swap notional, the balance sheet mix itself. The point is that changing
+one input and re-reading the Metrics tab \textit{is} the analysis; there's no
+separate model to reconcile it against.}
+\normalsize\color{black}
+
+% =============================================================================
+\section{Orchestration --- Dagster}
+% =============================================================================
+
+Business logic lives in plain Python workflow scripts; Dagster wraps each one
+as a software-defined asset. That buys dependency enforcement, retries, run
+history, and a live web UI --- without rewriting a single calculation.
+
+\begin{center}
+\small
+\begin{tabular}{ll}
+\toprule
+\textbf{Job} & \textbf{Purpose} \\
+\midrule
+\texttt{balance\_sheet\_job}  & Generate the balance sheet, load enrichment data, process IRS positions. \\
+\texttt{full\_run\_job}       & Complete pipeline: BS $\rightarrow$ CFs $\rightarrow$ IRS $\rightarrow$ IRRBB + LCR/NSFR. \\
+\texttt{irs\_update\_job}     & Reload swaps, recompute IRRBB only --- balance sheet unchanged. \\
+\texttt{irrbb\_recalc\_job}   & Recompute NII / EVE / SOT from existing cash flows after a curve update. \\
+\texttt{liq\_only\_job}       & Standalone LCR / NSFR refresh. \\
+\texttt{optimize\_prep\_job}  & Rebuild fast-approximation tensors and run the accuracy check. \\
+\texttt{labbank\_data\_job}   & Full pipeline + optimize\_prep in one step --- the one to run after editing your own input data. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{pitchbox}[Key property]
+Steps 5, 6, and 7 of the pipeline can each be re-run independently without
+touching the balance sheet or cash flows --- enforced by the Dagster job
+definitions, not by convention.
+\end{pitchbox}
+
+% =============================================================================
+\section{Data Model --- SQL Schema Overview}
+% =============================================================================
+
+Nine schemas, each owned by one stage of the pipeline. Downstream stages read
+from upstream tables rather than sharing in-memory objects, which is what makes
+every stage independently re-runnable and auditable with a plain SQL client.
+
+\imgfull[\textwidth]{sql_schema.png}
+
+If you are exploring the database yourself: \texttt{dbo.transactions} and
+\texttt{schemat.*} answer ``what does the bank actually hold'', \texttt{cf.products}
+answers ``what cash flows come out of that'', and \texttt{irrbb.irrbb\_report} /
+\texttt{results.lcr\_nsfr} give you the final regulatory-style numbers.
+
+\subsection{The core entity relationships}
+The diagram above shows how data \textit{flows} between schemas; the one below shows
+how the master ledger is \textit{structured} --- the same view you would get by
+right-clicking a database in SQL Server Management Studio and choosing ``Database
+Diagram''. \texttt{dbo.transactions} is the hub: every position the bank holds is
+exactly one row there. Each \texttt{schemat.*} table adds product-specific detail for
+that same \texttt{transaction\_id} --- a 1:1 relationship, since a given position is a
+loan, a deposit, a security, or an equity item, never more than one at once.
+
+\imgfull[0.9\textwidth]{transaction_erd.png}
+
+% =============================================================================
+\section{Schedule of SQL Tables}
+\label{sec:sqltables}
+% =============================================================================
+
+Nine schemas, roughly thirty tables --- every one of them traceable to the
+pipeline stage that writes it (Section~\ref{sec:architecture}) and the ERD
+above. The full table-by-table inventory (schema, table, key columns,
+purpose) is reference material rather than something a document this length
+needs to print in full --- it lives in the ``Full table reference'' section
+of the methodology document (\texttt{docs/02\_methodology.md}), referenced in
+Section~\ref{sec:tryityourself}.
+
+% =============================================================================
+\section{See It Yourself --- Live SQL Server Queries}
+\label{sec:seeitforyourself}
+% =============================================================================
+
+Every claim in this document can be checked with a \texttt{SELECT} statement
+against the running database. Two examples below --- what a single contract
+looks like end to end, and what the final regulatory numbers look like.
+
+\subsection{A single contract, start to finish}
+Pick any transaction from the master ledger, then pull its full cash-flow
+schedule:
+
+\begin{center}
+\ttfamily\small
+SELECT TOP 20 * FROM dbo.transactions WHERE product\_code = '1000';\\
+SELECT * FROM cf.products WHERE schedule\_id = (\\
+\ \ SELECT schedule\_id FROM schemat.loans WHERE transaction\_id = 'REPLACE\_ME'\\
+) ORDER BY cf\_start\_dt;
+\end{center}
+
+\begin{sqlplaceholder}[7.5cm]{Screenshot 1 --- contract $\rightarrow$ cash-flow schedule}
+\normalfont\itshape\color{labgrey}
+[ paste your SQL Server Management Studio result grid here ---\\
+ one contract row, then its full \texttt{cf.products} schedule ]
+\end{sqlplaceholder}
+
+\subsection{Final regulatory-style output}
+\begin{center}
+\ttfamily\small
+SELECT * FROM results.irrbb\_report ORDER BY currency, scenario;\\
+SELECT * FROM results.lcr\_nsfr ORDER BY currency;
+\end{center}
+
+\begin{sqlplaceholder}[7.5cm]{Screenshot 2 --- Supervisory Outlier Test \& LCR/NSFR}
+\normalfont\itshape\color{labgrey}
+[ paste your SQL Server Management Studio result grid here ---\\
+ \texttt{results.irrbb\_report} and/or \texttt{results.lcr\_nsfr} ]
+\end{sqlplaceholder}
+
+\begin{pitchbox}[Try it on your own bank]
+Point \texttt{balance\_generate/input\_data/bank\_data.xlsx} at your own product
+mix, run the \texttt{labbank\_data\_job} in Dagster, and every table above
+repopulates with your numbers --- same schema, same queries, your balance sheet.
+\end{pitchbox}
+
+% =============================================================================
+\section{Balance Sheet \& Product Universe}
+% =============================================================================
+
+The demo book below is 10.0 B PLN on each side, product-by-product:
+
+\begin{center}
+\small
+\begin{minipage}[t]{0.47\textwidth}
+\centering
+\textbf{Assets} \quad(10.00 B PLN)\\[4pt]
+\begin{tabular}{@{}lrr@{}}
+\toprule
+Product & B PLN & \% \\
+\midrule
+Mortgage (floating)          & 2.80  & 28.0\% \\
+Consumer loan (floating)     & 1.80  & 18.0\% \\
+Bond / securities (floating) & 1.60  & 16.0\% \\
+Bond / securities (fixed)    & 1.20  & 12.0\% \\
+Mortgage (fixed)             & 1.00  & 10.0\% \\
+SME investment loan (floating) & 0.60 & 6.0\% \\
+Consumer loan (fixed)        & 0.60  & 6.0\% \\
+Cash / central bank reserves & 0.20  & 2.0\% \\
+Interbank placement          & 0.20  & 2.0\% \\
+\midrule
+\textbf{Total assets} & \textbf{10.00} & \textbf{100.0\%} \\
+\bottomrule
+\end{tabular}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.47\textwidth}
+\centering
+\textbf{Liabilities + Equity} \quad(10.00 B PLN)\\[4pt]
+\begin{tabular}{@{}lrr@{}}
+\toprule
+Product & B PLN & \% \\
+\midrule
+Current account & 3.80 & 38.0\% \\
+Term deposit     & 2.20 & 22.0\% \\
+Savings account  & 1.60 & 16.0\% \\
+Issued bond      & 1.20 & 12.0\% \\
+Tier~1 equity    & 1.20 & 12.0\% \\
+\midrule
+\textbf{Total L + E} & \textbf{10.00} & \textbf{100.0\%} \\
+\bottomrule
+\end{tabular}
+\end{minipage}
+\end{center}
+
+Every product is a row of parameters in an Excel sheet --- rate type, tenor,
+amortisation, RWA weight, PD/LGD, LCR outflow rate, ASF/RSF weight. Adding a
+new product family (credit cards, T-bills, a corporate working-capital split)
+means adding a row, not writing code.
+
+\textbf{Rate types:} \textbf{F}ixed (locked) \;|\; \textbf{V}ariable (index +
+spread) \;|\; \textbf{A}dministrative (bank-set, floored at 0\%).
+
+\subsection{How the balance sheet is generated}
+Every run produces a fresh synthetic bank, not a fixed dataset --- two levers
+control that: how much each product holds, and what rate each position carries.
+
+\begin{itemize}[itemsep=2pt]
+  \item \textbf{Outstanding balances} --- for each (product, client-type) bucket,
+        individual transaction balances are drawn from a \textbf{truncated normal
+        distribution}, parameterised per bucket (mean, std.\ dev., lower/upper
+        bound) in the input Excel. Draws accumulate until their sum reaches that
+        bucket's target share of the balance sheet; the final draw is trimmed so
+        the bucket total matches the target exactly. Loans are drawn at their
+        \textit{initial} notional and then amortised down (annuity, constant, or
+        bullet, per product) to the \textit{current} outstanding balance, re-solving
+        until the current-balance totals also hit target.
+  \item \textbf{Interest rates} --- not one flat market rate applied everywhere:
+        each position's rate is anchored to the \textbf{historical index fixing at
+        its own vintage}. A fixed-rate contract looks up the fixing on its own
+        \texttt{start\_date} and locks it for life, so an old fixed-rate mortgage
+        still carries whatever WIBOR was years ago, exactly like a real seasoned
+        book. A floating or administrative-rate product instead reprices off a
+        recent fixing (as of the report date, net of its repricing delay). On top
+        of the index, \texttt{client\_rt = a · index\_rt + b}, with a
+        per-contract margin drawn from its own truncated-normal distribution and,
+        where set, a product-level floor.
+  \item \textbf{Start / maturity dates} --- start dates are random business days,
+        weighted toward more recent origination (newer vintages are more likely
+        than older ones, mimicking a growing back book); maturity follows from the
+        product's tenor via a standard business-day calendar.
+\end{itemize}
+
+\begin{pitchbox}[Why this matters]
+Because balances and rates are drawn from distributions rather than hand-set,
+re-running the generator gives a structurally similar but numerically different
+bank each time --- useful for testing that a metric behaves correctly across many
+balance sheets, not just the one you happened to build first.
+\end{pitchbox}
+
+% =============================================================================
+\section{Cash Flow Engine \& Behavioural Modelling}
+% =============================================================================
+
+For every product, the engine generates two things per period: \textbf{capital
+cash flows} (contractual amortisation plus behavioural adjustments) and
+\textbf{interest cash flows} (coupon payments at the contracted client rate).
+
+\begin{itemize}[itemsep=2pt]
+  \item \textbf{Loans} --- a constant prepayment rate (CPR), set per
+        (product, tenor bucket) and reloaded every pipeline run --- change the
+        Excel input, no code change needed.
+  \item \textbf{Non-maturity deposits} --- exponential decay: a fraction leaves
+        each month, the remainder is treated as sticky long-term funding.
+  \item \textbf{Rate floors/caps} --- per-product, data-driven; the shipped
+        demo floors every deposit-type product at 0\% so a downward shock can
+        never push what the bank pays depositors negative.
+\end{itemize}
+
+The output, \texttt{cf.products}, has one row per (transaction, payment date):
+contractual \textit{and} behavioural outstanding balance and cash flow, the
+market forward rate, and the all-in client rate. NII is computed from interest
+cash flows within the 1-year horizon; EVE uses the full behavioural run-off
+schedule to maturity.
+
+\subsection{Repricing gap \& interest rate swaps}
+The \textbf{repricing gap} is the net volume of assets minus liabilities
+repricing in each tenor bucket. Swaps overlay this gap \textit{without}
+changing the underlying balance sheet: the swap gap is computed separately and
+merged into the balance-sheet repricing gap before IRRBB is calculated --- so
+LabBank can show ``balance sheet only'' vs. ``balance sheet + IRS'' side by side.
+
+\imgfull{repricing_gap.png}
+
+The net gap per tenor bucket --- positive means more assets than liabilities
+repricing there, i.e.\ asset-sensitive. The LabBank app's Gap Analysis tab
+renders this same view interactively, alongside its running cumulative total.
+
+% =============================================================================
+\section{IRRBB --- Interest Rate Risk in the Banking Book}
+\label{sec:irrbb}
+% =============================================================================
+
+\imgfull[0.8\textwidth]{shock_curves.png}
+
+Six EBA/RTS/2022/10 supervisory scenarios (parallel up/down, steepener,
+flattener, short-rate up/down) plus an ``own'' scenario, applied per currency
+curve, floored at 0\% per tenor.
+
+\subsection{NII --- two components per scenario}
+\begin{itemize}[itemsep=2pt]
+  \item \textbf{Locked interest} --- income from cash flows already
+        contracted. Immune to the shock for fixed-rate products; re-prices at
+        the shocked curve (stable-margin transform) for floating-rate ones.
+  \item \textbf{Renewal} --- income from capital maturing within the 1-year
+        horizon, reinvested at the \textit{shocked market rate} --- this
+        applies even to fixed-rate products, since a maturing fixed deposit or
+        loan renews at whatever the new environment offers.
+\end{itemize}
+
+\imgfull{nii_scenarios.png}
+
+Each bar is the full-year NII under that scenario's shocked curve; the solid
+segment is locked interest, the hatched segment is renewal. Reading the whole
+ladder at once shows what a single base-scenario number cannot: which shocks
+help NII (parallel-up, steepener) and which hurt it (parallel-down, flattener),
+and by how much relative to base.
+
+\subsection{EVE --- present value under run-off}
+\[
+\mathrm{EVE} = \sum_i \mathrm{CF}_i^{\mathrm{behavioural}} \cdot d(t_i)
+\qquad
+\Delta\mathrm{EVE}_s = \mathrm{EVE}_s - \mathrm{EVE}_{\mathrm{base}}
+\]
+EVE loads every maturity (no 1-year cut-off) under a run-off assumption ---
+no new business, existing book winds down. A negative $\Delta$EVE means economic
+net worth falls under that scenario, typically because long fixed-rate assets
+lose value faster than liabilities as rates rise --- the classic NII-vs-EVE
+trade-off.
+
+\imgfull{eve_results.png}
+
+\subsection{Supervisory Outlier Test}
+A scenario's $\Delta$EVE / $\Delta$NII gets a \textbf{50\% haircut if it comes
+out positive}, before it counts toward the regulatory total:
+\[
+\Delta\mathrm{EVE}^{\mathrm{reg}} = \min(\Delta\mathrm{EVE}, 0)
+  + 0.5 \cdot \max(\Delta\mathrm{EVE}, 0)
+\]
+Thresholds: EVE SOT breaches at $\Delta\mathrm{EVE}^{\mathrm{reg}}/T_1 < -15\%$;
+NII SOT breaches at $\Delta\mathrm{NII}^{\mathrm{reg}}/T_1 < -5\%$.
+
+\imgfull{eba_sot.png}
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrrrrc@{}}
+\toprule
+Scenario & $\Delta$EVE$_{\mathrm{reg}}$ (M PLN) & $/T_1$ & $\Delta$NII$_{\mathrm{reg}}$ (M PLN) & $/T_1$ & Breach \\
+\midrule
+Parallel +250 bps  & $-$85.4 & $-$7.11\% & $+$21.3 & $+$1.78\% & --- \\
+Parallel $-$250 bps & $+$46.5 & $+$3.87\% & $-$42.5 & $-$3.54\% & --- \\
+Steepener           & $-$15.9 & $-$1.32\% & $+$16.5 & $+$1.37\% & --- \\
+Flattener           & $+$3.8  & $+$0.32\% & $-$29.9 & $-$2.49\% & --- \\
+Short rate +350 bps & $-$29.2 & $-$2.43\% & $-$9.6  & $-$0.80\% & --- \\
+Short rate $-$350 bps & $+$15.3 & $+$1.27\% & $+$4.8 & $+$0.40\% & --- \\
+Own                 & $+$18.3 & $+$1.53\% & $-$17.0 & $-$1.42\% & --- \\
+\bottomrule
+\end{tabular}
+\end{center}
+\small\color{labgrey}\textit{Tier 1 capital: 1.20 B PLN. No scenario breaches either threshold for this
+demo book --- the whole point of running the balance-sheet optimiser
+(Section~\ref{sec:tryityourself}, roadmap) is to keep it that way as the mix changes.}
+\normalsize\color{black}
+
+% =============================================================================
+\section{Liquidity Risk --- LCR \& NSFR}
+% =============================================================================
+
+\[
+\mathrm{LCR} = \frac{\mathrm{HQLA}}{\text{Net outflows}_{30\mathrm{d}}} \geq 100\%
+\qquad\qquad
+\mathrm{NSFR} = \frac{\mathrm{ASF}}{\mathrm{RSF}} \geq 100\%
+\]
+
+\textbf{HQLA} = Level~1 liquid assets at their respective haircuts.\quad
+\textbf{Net outflows} = stressed deposit run-off and interbank maturities within
+30 days.\quad \textbf{ASF} = stable funding weighted by tenor and type.\quad
+\textbf{RSF} = assets weighted by illiquidity.
+
+\imgfull[0.85\textwidth]{lcr_nsfr.png}
+
+Beyond the point-in-time ratios, the \textbf{behavioural liquidity gap} shows the
+net cash position across the full tenor ladder (up to 60 months), using
+behavioural cash flows --- loan prepayments included, NMD decay applied.
+
+\imgfull{liq_gap.png}
+
+The LabBank app's Gap Analysis tab renders this same periodic view
+interactively, alongside its running cumulative total --- a sustained negative
+cumulative gap is what identifies the point at which the bank would need
+additional funding.
+
+% =============================================================================
+\section{Reporting \& Outputs}
+% =============================================================================
+
+LabBank produces two kinds of output, and the distinction matters: two
+\textbf{static} notebook reports that read the database once and freeze the
+result --- the point-in-time artefact you'd actually attach to a committee pack
+or send to a regulator --- and the \textbf{interactive} Streamlit app
+(Section~\ref{sec:labbankapp}) where every number recomputes as you edit. The
+static reports are what you'd generate \textit{after} you've used the app to
+land on a balance sheet you want to document; the app is where you get there.
+
+\subsection{The static reports}
+
+\textbf{ALM/Compliance report} --- \texttt{bank\_report.ipynb}, executed
+against live SQL and exported to HTML/PDF via \texttt{export\_report.py}. Built
+for a risk/ALM committee audience: balance sheet composition and product
+breakdown, market curves (zero rates, discount factors, EBA shocked curves),
+the repricing gap with and without the IRS overlay, the behavioural liquidity
+gap, loan/deposit run-off profiles, CF-based NII by scenario, the EBA
+Supervisory Outlier Test with the regulatory haircut applied, a linear-vs-exact
+non-linearity check, LCR/NSFR, and a closing ALM-insights page (sensitivity
+heatmap, repricing ladder, sensitivity tornado).
+
+\imgfull[0.92\textwidth]{bank_report_bs_summary.png}
+\begin{center}
+\small\color{labgrey}\textit{Balance sheet summary from \texttt{bank\_report.ipynb} --- composition, fixed vs.\ variable rate exposure, and funding structure, all read live from \texttt{dbo.transactions}.}
+\end{center}
+
+\imgfull[0.92\textwidth]{bank_report_bs_breakdown.png}
+\begin{center}
+\small\color{labgrey}\textit{Balance sheet product breakdown from the same report --- every product line is a row you can trace back to \texttt{dbo.transactions}.}
+\end{center}
+
+\textbf{Finance/CFO report} --- \texttt{finance\_report.ipynb}, generated and
+executed by \texttt{make\_finance\_report.py}. Same underlying cash-flow data,
+reaggregated for a finance/treasury audience instead of a risk one: an
+executive P\&L summary, the interest income/expense waterfall, product margin
+vs.\ benchmark, funding cost structure, fixed-vs-variable exposure, the NII
+bridge (locked interest vs.\ renewal), a margin profile by tenor, and Economic
+Profit (margin over FTP, plus fee, minus expected loss, cost of capital, and
+OpEx) both in total and per product.
+
+\imgfull[0.92\textwidth]{finance_report_nii_waterfall.png}
+\begin{center}
+\small\color{labgrey}\textit{Interest income/expense waterfall and NII-by-product from \texttt{finance\_report.ipynb} --- the same NII total as the compliance report, split the way a treasury desk would ask for it.}
+\end{center}
+
+\subsection{Other outputs}
+
+\begin{itemize}[itemsep=2pt]
+  \item \textbf{Interactive exploration} --- the LabBank Streamlit app
+        (Section~\ref{sec:labbankapp}) lets you stress the balance sheet, IRS
+        book, and NMD assumptions and watch NII/EVE/SOT/LCR/NSFR update live,
+        no SQL Server required.
+  \item \textbf{Power BI \& Excel} --- \texttt{ir\_gap.pbix} connects live to
+        \texttt{schemat.*}; \texttt{irrbb\_report.xlsx} and
+        \texttt{lcr\_nsfr\_report.xlsx} are ready for regulatory templates.
+\end{itemize}
+
+\begin{pitchbox}[Full documentation]
+This document is the pitch, not the manual. The repository ships two written
+guides that go deeper than a 12-page PDF can: a \textbf{setup guide} covering
+SQL Server, Python environment, and Dagster from a clean machine, and a
+\textbf{methodology} document walking through every formula in this report ---
+NII, EVE, the SOT haircut, LCR/NSFR, behavioural modelling --- with the exact
+SQL table or Python function that computes it. Both are in \texttt{docs/} in
+the repository, as Markdown and as standalone HTML.
+\end{pitchbox}
+
+% =============================================================================
+\section{Why LabBank}
+% =============================================================================
+
+\begin{itemize}[itemsep=3pt]
+  \item \textbf{Auditable by construction} --- one warehouse, nine schemas, one
+        trail from raw transaction to regulatory output. No hidden in-memory
+        state anywhere in the pipeline.
+  \item \textbf{Methodology you can check} --- EBA/RTS/2022/10 shock
+        construction, SOT gain haircut, behavioural CPR and NMD decay
+        --- every formula has a direct SQL or Python equivalent.
+  \item \textbf{Reproducible} --- Dagster enforces dependency order; any stage
+        can be re-run in isolation and the run history is queryable.
+  \item \textbf{Built to be extended} --- new products are Excel rows, not code
+        changes; the \texttt{opt\_prep} tensor layer is already in place for the
+        balance-sheet optimisation phase.
+\end{itemize}
+
+\begin{pitchbox}[Scope, honestly]
+This is a laboratory project, not production banking software --- the balance
+sheet is synthetic and behavioural models are illustrative rather than
+calibrated to a real portfolio. What it demonstrates is \textit{how} a
+production-grade ALM pipeline should be architected, end to end, and how its
+metrics relate to each other without a reconciliation gap.
+\end{pitchbox}
+
+% =============================================================================
+\section{Try It Yourself}
+\label{sec:tryityourself}
+% =============================================================================
+
+\textbf{Fastest path --- no SQL Server, no setup beyond Python:} same four
+commands as Section~\ref{sec:labbankapp} --- \texttt{streamlit run
+sandbox\textbackslash app.py} after the usual venv + \texttt{pip install}.
+
+\textbf{Full path --- your own balance sheet, with SQL Server as the audit layer:}
+edit \texttt{bank\_data.xlsx}, run the \texttt{labbank\_data\_job} in Dagster,
+click ``Reload my data'' in the app --- every table in
+Section~\ref{sec:sqltables} repopulates with your numbers. See
+Section~\ref{sec:labbankapp} for a full walkthrough of the app itself.
+
+\subsection{Roadmap}
+Three phases, one project --- the first two are shipped and are what the rest
+of this document describes; the third is where LabBank is heading next.
+
+\begin{pitchbox}[Phase 1 --- Build (shipped)]
+Generate a synthetic bank from your own product mix: \texttt{balance\_generate}
+$\rightarrow$ cash flows $\rightarrow$ IRRBB/liquidity, orchestrated by
+Dagster (Section~\ref{sec:architecture}).
+\end{pitchbox}
+
+\begin{center}\Large$\downarrow$\end{center}
+
+\begin{pitchbox}[Phase 2 --- Explore (shipped)]
+Stress it interactively: the LabBank Streamlit sandbox
+(Section~\ref{sec:labbankapp}) --- edit the balance sheet, IRS book, and NMD
+assumptions and watch NII/EVE/LCR/NSFR update live.
+\end{pitchbox}
+
+\begin{center}\Large$\downarrow$\end{center}
+
+\begin{pitchbox}[Phase 3 --- Optimise (in progress)]
+Find the best balance sheet, not just stress a given one ---
+\texttt{bs\_optimization/}: a deterministic constrained solver (economic
+profit vs.\ $\Delta$EVE/$\Delta$NII breach trade-off), a joint
+balance-sheet + swap-overlay solver, and a stochastic Monte-Carlo solver are
+functional today, not yet part of the guided path. An AI-driven optimiser is
+the further direction from here --- not yet started.
+\end{pitchbox}
+
+% =============================================================================
+\section*{Contact}
+\addcontentsline{toc}{section}{Contact}
+% =============================================================================
+
+\begin{center}
+\large\color{labdark}\textbf{LabBank}\\[4pt]
+\normalsize\color{labgrey}Laboratory Banking ALM System\\[16pt]
+\normalsize\color{black}
+\href{https://github.com/dzimius/LabBank}{github.com/dzimius/LabBank}\\[6pt]
+\href{mailto:REPLACE_WITH_YOUR_EMAIL}{REPLACE\_WITH\_YOUR\_EMAIL}\\[6pt]
+\href{https://www.linkedin.com/in/REPLACE_WITH_YOUR_HANDLE}{linkedin.com/in/REPLACE\_WITH\_YOUR\_HANDLE}
+\end{center}
+
+\end{document}

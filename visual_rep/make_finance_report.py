@@ -26,6 +26,7 @@ CELL_TITLE = md("""\
 | 5 | NII Bridge — Locked Interest vs Renewal |
 | 6 | Repricing Profile |
 | 7 | Rate Sensitivity (Business View) |
+| 8 | Economic Profit (EP) — Total & Per-Product |
 """)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -91,8 +92,11 @@ PROD_LABELS = {
     '1000': 'Mortgage Fixed',        '1100': 'Mortgage Float',
     '2000': 'Consumer Loan Fixed',   '2100': 'Consumer Loan Float',
     '3000': 'Bond / Securities',     '3100': 'Bond / Securities',
-    '5000': 'Issued Bond',           '6000': 'Current Account',
-    '7060': 'Term Deposit',          '8000': 'Savings Account',
+    '3200': 'T-Bill',                '3500': 'Cash / Central Bank',
+    '4100': 'SME Investment Loan',   '5000': 'Issued Bond',
+    '6000': 'Current Account',       '6300': 'Current Account (SME)',
+    '7060': 'Term Deposit',          '7900': 'Interbank Placement',
+    '8000': 'Savings Account',
 }
 
 print(f'Setup complete  |  {REPORT_DATE.date()}  |  {CCY}')
@@ -757,6 +761,172 @@ for bkt in _common_bkts:
 """)
 
 # ─────────────────────────────────────────────────────────────────────────────
+CELL_EP_MD = md("""\
+---
+## 8. Economic Profit (EP) — Total & Per-Product
+
+**EP = Margin (over FTP) + Fee − Expected Loss − Cost of Capital − OpEx**, the same objective
+`bs_optimization/` uses to compare candidate balance sheets. Shown here for the book *as it stands
+today* — not as an optimization — split by product so you can see which products are economically
+strong vs. weak on a fully-loaded basis, not just on raw interest margin.
+
+Sourced from `optimize_prep/output/product_params.npz` and `ftp_rates.npz` (the same per-product
+economics `bs_optimization/` reads), not from SQL like the rest of this report — see the technical
+notes for why that's a separate data source. Regenerate both via the `labbank_data_job`/
+`optimize_prep_job` Dagster jobs (or `optimize_prep/python_code/opt_prep_workflow.py` +
+`build_ftp_rates.py` directly) if you've changed the balance sheet and want fresh EP figures.
+
+Acquisition cost is intentionally excluded — it's a cost of *growing* the balance sheet in the
+optimizer, not a steady-state cost, so it's zero for the book as it stands.
+""")
+
+CELL_EP = code("""\
+import sys, os
+
+_OPT_PREP_DIR = os.path.normpath(os.path.join(os.getcwd(), '..', 'optimize_prep', 'python_code'))
+if _OPT_PREP_DIR not in sys.path:
+    sys.path.insert(0, _OPT_PREP_DIR)
+from bs_vector import BalanceSheetParams
+from ftp_store import load_ftp_rates, margin_unit_rate
+
+PARAMS_PATH = os.path.normpath(os.path.join(os.getcwd(), '..', 'optimize_prep', 'output', 'product_params.npz'))
+EP_OPEX_RATE = 0.0065   # flat opex rate on non-equity balance -- matches bs_optimizer.py's OPEX_RATE
+
+ep_params = BalanceSheetParams.load(PARAMS_PATH)
+ep_ftp_rate = load_ftp_rates(ep_params.cohort_id)
+if ep_ftp_rate is None:
+    print('  No FTP cache found (optimize_prep/output/ftp_rates.npz) -- Margin will equal '
+          'client-rate NII until build_ftp_rates.py is run.')
+    ep_ftp_rate = np.zeros_like(ep_params.nii_unit_rate)
+
+ep_margin_rate = margin_unit_rate(ep_params.nii_unit_rate, ep_ftp_rate, ep_params.bs_side)
+
+ep_df = pd.DataFrame({
+    'product_code': ep_params.product_code,
+    'bs_side':      ep_params.bs_side,
+    'balance':      ep_params.balance_arr,
+    'margin':       ep_params.balance_arr * ep_margin_rate,
+    'fee':          ep_params.balance_arr * ep_params.fee_unit_rate,
+    'el':           ep_params.balance_arr * ep_params.el_unit,
+    'coc':          ep_params.balance_arr * ep_params.rwa_factor * ep_params.cet1_target * ep_params.coc_rate,
+    'opex':         np.where(ep_params.is_equity, 0.0, ep_params.balance_arr * EP_OPEX_RATE),
+})
+ep_df['ep'] = ep_df['margin'] + ep_df['fee'] - ep_df['el'] - ep_df['coc'] - ep_df['opex']
+
+# ── aggregate cohorts -> one row per product_code ─────────────────────────────
+ep_prod = (ep_df.groupby(['product_code', 'bs_side'], as_index=False)
+                 .agg(balance=('balance','sum'), margin=('margin','sum'), fee=('fee','sum'),
+                      el=('el','sum'), coc=('coc','sum'), opex=('opex','sum'), ep=('ep','sum')))
+ep_prod['label']  = ep_prod['product_code'].map(PROD_LABELS).fillna(ep_prod['product_code'])
+ep_prod['ep_bps'] = np.where(ep_prod['balance'] != 0, ep_prod['ep'] / ep_prod['balance'].abs() * 10000, 0.0)
+ep_prod = ep_prod.sort_values('ep', ascending=False)
+
+_ep_total_bal = ep_prod['balance'].abs().sum()
+_tot_margin, _tot_fee = ep_prod['margin'].sum(), ep_prod['fee'].sum()
+_tot_el, _tot_coc     = ep_prod['el'].sum(),     ep_prod['coc'].sum()
+_tot_opex, _tot_ep    = ep_prod['opex'].sum(),   ep_prod['ep'].sum()
+
+print(f'\\n{"="*66}')
+print(f'  ECONOMIC PROFIT (EP)  |  {CCY}  |  {REPORT_DATE.date()}')
+print(f'{"="*66}')
+print(f'  EP = Margin (over FTP) + Fee - EL - CoC - OpEx')
+print(f'  CET1 target {ep_params.cet1_target*100:.1f}%  |  Cost of capital {ep_params.coc_rate*100:.1f}%'
+      f'  |  OpEx rate {EP_OPEX_RATE*100:.2f}% of balance')
+print(f'{"-"*66}')
+print(f'  Margin (over FTP)        {_tot_margin/1e6:>+9.1f}  M PLN')
+print(f'  Fee income               {_tot_fee/1e6:>+9.1f}  M PLN')
+print(f'  Expected loss (EL)       {-_tot_el/1e6:>+9.1f}  M PLN')
+print(f'  Cost of capital (CoC)    {-_tot_coc/1e6:>+9.1f}  M PLN')
+print(f'  Operating cost (OpEx)    {-_tot_opex/1e6:>+9.1f}  M PLN')
+print(f'{"-"*66}')
+print(f'  ECONOMIC PROFIT (EP)     {_tot_ep/1e6:>+9.1f}  M PLN   '
+      f'({_tot_ep/total_assets*10000:>+.0f} bps of total assets)')
+print(f'{"="*66}')
+
+# ── Waterfall: book-level EP bridge (Margin -> Fee -> -EL -> -CoC -> -OpEx -> EP) ──
+_ep_components = [
+    ('Margin\\n(over FTP)', _tot_margin/1e6, C_INC),
+    ('Fee\\nincome',        _tot_fee/1e6,     C_INC),
+    ('Expected\\nLoss',     -_tot_el/1e6,     C_EXP),
+    ('Cost of\\nCapital',   -_tot_coc/1e6,    C_EXP),
+    ('Operating\\nCost',    -_tot_opex/1e6,   C_EXP),
+]
+_wf2_labels, _wf2_heights, _wf2_bots, _wf2_cols = [], [], [], []
+_running = 0.0
+for _lbl, _val, _col in _ep_components:
+    _wf2_labels.append(_lbl)
+    _wf2_bots.append(_running if _val >= 0 else _running + _val)
+    _wf2_heights.append(abs(_val))
+    _wf2_cols.append(_col)
+    _running += _val
+_wf2_labels.append('Economic\\nProfit')
+_wf2_bots.append(0.0)
+_wf2_heights.append(_running)
+_wf2_cols.append(C_NET)
+
+fig8c, ax8c = plt.subplots(figsize=(9, 5.5))
+fig8c.suptitle(f'Economic Profit Waterfall  |  {CCY}  |  {REPORT_DATE.date()}',
+               fontsize=13, fontweight='bold')
+_x8c = np.arange(len(_wf2_labels))
+bars8c = ax8c.bar(_x8c, _wf2_heights, bottom=_wf2_bots, color=_wf2_cols,
+                   alpha=0.88, edgecolor='white', linewidth=0.8, width=0.6)
+for i, (bar, (_lbl, _val, _col)) in enumerate(zip(bars8c, _ep_components + [('', _running, C_NET)])):
+    top = bar.get_y() + bar.get_height()
+    ax8c.text(bar.get_x() + bar.get_width()/2, top + 1.5, f'{_val:+.1f}M',
+              ha='center', va='bottom', fontsize=8.5, fontweight='bold')
+    if i < len(_wf2_labels) - 1:
+        ax8c.plot([bar.get_x() + bar.get_width(), bar.get_x() + bar.get_width() + 0.4],
+                  [top, top], color='grey', lw=0.9, ls=':')
+ax8c.set_xticks(_x8c); ax8c.set_xticklabels(_wf2_labels, fontsize=9)
+ax8c.axhline(0, color='black', lw=0.8)
+ax8c.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v,_: f'{v:.0f}M'))
+ax8c.set_ylabel('M PLN'); ax8c.set_title(f'Total book: EP = {_tot_ep/1e6:+.1f}M PLN '
+                                          f'({_tot_ep/total_assets*10000:+.0f} bps of total assets)')
+plt.tight_layout(); plt.show()
+
+print(f'\\n  {"Product":<25}{"Side":>5} {"Bal(M)":>9} {"Margin(M)":>10} {"Fee(M)":>7} '
+      f'{"EL(M)":>7} {"CoC(M)":>7} {"OpEx(M)":>8} {"EP(M)":>8} {"EP(bps)":>9}')
+print('  ' + '-'*102)
+for _, r in ep_prod.iterrows():
+    print(f'  {r["label"]:<25}{r["bs_side"]:>5} {r["balance"]/1e6:>9,.0f} {r["margin"]/1e6:>+10.1f} '
+          f'{r["fee"]/1e6:>+7.1f} {-r["el"]/1e6:>+7.1f} {-r["coc"]/1e6:>+7.1f} {-r["opex"]/1e6:>+8.1f} '
+          f'{r["ep"]/1e6:>+8.1f} {r["ep_bps"]:>+9.0f}')
+print('  ' + '-'*102)
+print(f'  {"TOTAL":<25}{"":>5} {_ep_total_bal/1e6:>9,.0f} {_tot_margin/1e6:>+10.1f} {_tot_fee/1e6:>+7.1f} '
+      f'{-_tot_el/1e6:>+7.1f} {-_tot_coc/1e6:>+7.1f} {-_tot_opex/1e6:>+8.1f} {_tot_ep/1e6:>+8.1f} '
+      f'{(_tot_ep/_ep_total_bal*10000):>+9.0f}')
+print('\\n  Note: acquisition cost is excluded -- it only applies when comparing to a')
+print('  rebalanced target mix in the optimizer, not to the book as it stands today.')
+
+# ── Chart: EP by product ──────────────────────────────────────────────────────
+fig8, (ax8a, ax8b) = plt.subplots(1, 2, figsize=(16, 6))
+fig8.suptitle(f'Economic Profit by Product  |  {CCY}  |  {REPORT_DATE.date()}',
+              fontsize=13, fontweight='bold')
+
+_ep_bps_sorted = ep_prod.sort_values('ep_bps', ascending=False)
+_x8a = np.arange(len(_ep_bps_sorted))
+_c8a = [PRODUCT_COLORS.get(lb, C_GR) for lb in _ep_bps_sorted['label']]
+ax8a.bar(_x8a, _ep_bps_sorted['ep_bps'], color=_c8a, alpha=0.85, edgecolor='white')
+ax8a.axhline(0, color='black', lw=0.8)
+for i, v in enumerate(_ep_bps_sorted['ep_bps']):
+    ax8a.text(i, v + (3 if v >= 0 else -8), f'{v:+.0f}', ha='center', fontsize=7.5, fontweight='bold')
+ax8a.set_xticks(_x8a); ax8a.set_xticklabels(_ep_bps_sorted['label'], rotation=30, ha='right', fontsize=8)
+ax8a.set_title('EP per product (bps of its own balance)'); ax8a.set_ylabel('EP (bps)')
+
+_ep_m_sorted = ep_prod.sort_values('ep', ascending=False)
+_x8b = np.arange(len(_ep_m_sorted))
+_c8b = [PRODUCT_COLORS.get(lb, C_GR) for lb in _ep_m_sorted['label']]
+ax8b.bar(_x8b, _ep_m_sorted['ep']/1e6, color=_c8b, alpha=0.85, edgecolor='white')
+ax8b.axhline(0, color='black', lw=0.8)
+for i, v in enumerate(_ep_m_sorted['ep']/1e6):
+    ax8b.text(i, v + (2 if v >= 0 else -5), f'{v:+.0f}M', ha='center', fontsize=7.5, fontweight='bold')
+ax8b.set_xticks(_x8b); ax8b.set_xticklabels(_ep_m_sorted['label'], rotation=30, ha='right', fontsize=8)
+ax8b.set_title(f'EP contribution (M PLN)  --  total {_tot_ep/1e6:+.0f}M'); ax8b.set_ylabel('EP (M PLN)')
+
+plt.tight_layout(); plt.show()
+""")
+
+# ─────────────────────────────────────────────────────────────────────────────
 cells = [
     CELL_TITLE, CELL_SETUP,
     CELL_DATA_MD, CELL_DATA,
@@ -768,6 +938,7 @@ cells = [
     CELL_BRIDGE_MD, CELL_BRIDGE,
     CELL_PMARGIN_MD, CELL_PMARGIN,
     CELL_MARGTIME_MD, CELL_MARGTIME,
+    CELL_EP_MD, CELL_EP,
 ]
 
 nb = {

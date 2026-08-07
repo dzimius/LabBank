@@ -1,0 +1,132 @@
+<svg viewBox="0 0 1040 860" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, Arial, sans-serif">
+  <rect x="0" y="0" width="1040" height="860" fill="#ffffff"/>
+
+  <!-- Title -->
+  <text x="20" y="45" font-size="26" font-weight="700" fill="#0d1b4b">🏦 LabBank ALM Sandbox</text>
+
+  <!-- Tab bar -->
+  <rect x="15" y="65" width="1000" height="34" fill="#ffffff" stroke="#dfe3e8"/>
+  <text x="30" y="87" font-size="13" font-weight="700" fill="#c0392b">⚖️ Balance Sheet</text>
+  <text x="170" y="87" font-size="13" fill="#555">🔄 IRS Book</text>
+  <text x="275" y="87" font-size="13" fill="#555">🏦 NMD Stress</text>
+  <text x="395" y="87" font-size="13" fill="#555">📈 Metrics</text>
+  <text x="485" y="87" font-size="13" fill="#555">📊 Gap Analysis</text>
+  <text x="615" y="87" font-size="13" fill="#555">📉 Market Curves</text>
+  <rect x="25" y="94" width="130" height="3" fill="#c0392b"/>
+
+  <!-- Callout 1: tab bar -->
+  <circle cx="995" cy="82" r="13" fill="#c0392b"/>
+  <text x="995" y="87" font-size="13" font-weight="700" fill="#fff" text-anchor="middle">1</text>
+
+  <!-- Total assets row -->
+  <text x="20" y="130" font-size="12" fill="#333">Total Assets (PLN)</text>
+  <rect x="20" y="138" width="260" height="30" rx="4" fill="#f4f6f8" stroke="#c7ccd1"/>
+  <text x="35" y="158" font-size="12" fill="#1a1a2e">10000000000</text>
+  <rect x="295" y="138" width="110" height="30" rx="4" fill="#eef4fb" stroke="#2c5f8a"/>
+  <text x="350" y="158" font-size="11" fill="#2c5f8a" text-anchor="middle">↺ Reset BS</text>
+
+  <!-- Callout 2: total assets -->
+  <circle cx="290" cy="153" r="13" fill="#c0392b"/>
+  <text x="290" y="158" font-size="13" font-weight="700" fill="#fff" text-anchor="middle">2</text>
+  <!-- Callout 3: reset -->
+  <circle cx="420" cy="153" r="13" fill="#c0392b"/>
+  <text x="420" y="158" font-size="13" font-weight="700" fill="#fff" text-anchor="middle">3</text>
+
+  <!-- Info banner -->
+  <rect x="20" y="180" width="1000" height="34" rx="4" fill="#eef4fb"/>
+  <text x="35" y="201" font-size="11" fill="#1a3a6e">✏️ Edit the New % column — type the new percentage directly. Both sides must sum to 100%.</text>
+
+  <!-- Assets column -->
+  <text x="20" y="245" font-size="16" font-weight="700" fill="#1a1a2e">Assets</text>
+  <rect x="20" y="255" width="470" height="26" fill="#1a3a6e"/>
+  <text x="30" y="273" font-size="10.5" fill="#fff">Product</text>
+  <text x="185" y="273" font-size="10.5" fill="#fff">Base %</text>
+  <text x="255" y="273" font-size="10.5" fill="#fff" font-weight="700">✏️ New %</text>
+  <text x="385" y="273" font-size="10.5" fill="#fff">Rate %</text>
+
+  <!-- Callout 4: New % column -->
+  <circle cx="255" cy="290" r="13" fill="#c0392b"/>
+  <text x="255" y="295" font-size="13" font-weight="700" fill="#fff" text-anchor="middle">4</text>
+
+  <g font-size="11" fill="#222">
+    <rect x="20" y="281" width="470" height="24" fill="#fafbfc" stroke="#eee"/>
+    <text x="30" y="297">mortgage_fixed_ind</text><text x="190" y="297">13.0</text><text x="260" y="297">10.5</text><text x="390" y="297">4.20%</text>
+    <rect x="20" y="305" width="470" height="24" fill="#ffffff" stroke="#eee"/>
+    <text x="30" y="321">mortgage_float_ind</text><text x="190" y="321">28.0</text><text x="260" y="321">26.0</text><text x="390" y="321">5.10%</text>
+    <rect x="20" y="329" width="470" height="24" fill="#fafbfc" stroke="#eee"/>
+    <text x="30" y="345">cash_loan_fixed_ind</text><text x="190" y="345">6.0</text><text x="260" y="345">6.0</text><text x="390" y="345">6.80%</text>
+    <rect x="20" y="353" width="470" height="24" fill="#ffffff" stroke="#eee"/>
+    <text x="30" y="369">cash_loan_float_ind</text><text x="190" y="369">18.0</text><text x="260" y="369">18.0</text><text x="390" y="369">7.40%</text>
+    <rect x="20" y="377" width="470" height="24" fill="#fafbfc" stroke="#eee"/>
+    <text x="30" y="393">…</text>
+  </g>
+
+  <rect x="20" y="405" width="200" height="26" rx="4" fill="#e8f5e9"/>
+  <text x="30" y="422" font-size="11" fill="#2e7d32">Sum: 100.00% ✓</text>
+
+  <!-- Callout 5: sum validation -->
+  <circle cx="235" cy="418" r="13" fill="#c0392b"/>
+  <text x="235" y="423" font-size="13" font-weight="700" fill="#fff" text-anchor="middle">5</text>
+
+  <!-- Liabilities column -->
+  <text x="525" y="245" font-size="16" font-weight="700" fill="#1a1a2e">Liabilities + Equity</text>
+  <rect x="525" y="255" width="490" height="26" fill="#1a3a6e"/>
+  <text x="535" y="273" font-size="10.5" fill="#fff">Product</text>
+  <text x="695" y="273" font-size="10.5" fill="#fff">Base %</text>
+  <text x="765" y="273" font-size="10.5" fill="#fff" font-weight="700">✏️ New %</text>
+  <text x="895" y="273" font-size="10.5" fill="#fff">Rate %</text>
+  <g font-size="11" fill="#222">
+    <rect x="525" y="281" width="490" height="24" fill="#fafbfc" stroke="#eee"/>
+    <text x="535" y="297">term_deposit_ind</text><text x="700" y="297">9.0</text><text x="770" y="297">9.0</text><text x="900" y="297">3.10%</text>
+    <rect x="525" y="305" width="490" height="24" fill="#ffffff" stroke="#eee"/>
+    <text x="535" y="321">current_account_ind</text><text x="700" y="321">17.0</text><text x="770" y="321">17.0</text><text x="900" y="321">0.00%</text>
+    <rect x="525" y="329" width="490" height="24" fill="#fafbfc" stroke="#eee"/>
+    <text x="535" y="345">saving_account_ind</text><text x="700" y="345">8.0</text><text x="770" y="345">8.0</text><text x="900" y="345">1.20%</text>
+    <rect x="525" y="353" width="490" height="24" fill="#ffffff" stroke="#eee"/>
+    <text x="535" y="369">…</text>
+  </g>
+  <rect x="525" y="405" width="200" height="26" rx="4" fill="#e8f5e9"/>
+  <text x="535" y="422" font-size="11" fill="#2e7d32">Sum: 100.00% ✓</text>
+
+  <!-- Composition section -->
+  <text x="20" y="475" font-size="16" font-weight="700" fill="#1a1a2e">Composition</text>
+  <rect x="20" y="490" width="470" height="130" rx="4" fill="#fafbfc" stroke="#eee"/>
+  <rect x="40" y="530" width="120" height="18" fill="#4C72B0"/>
+  <rect x="160" y="530" width="90" height="18" fill="#DD8452"/>
+  <rect x="250" y="530" width="150" height="18" fill="#55A868"/>
+  <text x="40" y="522" font-size="10" fill="#666">Baseline</text>
+  <rect x="40" y="565" width="140" height="18" fill="#4C72B0"/>
+  <rect x="180" y="565" width="80" height="18" fill="#DD8452"/>
+  <rect x="260" y="565" width="140" height="18" fill="#55A868"/>
+  <text x="40" y="557" font-size="10" fill="#666">Modified</text>
+
+  <rect x="525" y="490" width="490" height="130" rx="4" fill="#fafbfc" stroke="#eee"/>
+  <text x="535" y="510" font-size="10" fill="#999">(Liabilities + Equity composition chart, same layout)</text>
+
+  <!-- Callout 6: composition chart -->
+  <circle cx="493" cy="500" r="13" fill="#c0392b"/>
+  <text x="493" y="505" font-size="13" font-weight="700" fill="#fff" text-anchor="middle">6</text>
+
+  <!-- Divider + Reload my data button (bottom of the Balance Sheet tab) -->
+  <line x1="20" y1="642" x2="1015" y2="642" stroke="#dfe3e8" stroke-width="1"/>
+  <rect x="20" y="656" width="170" height="32" rx="6" fill="#ffffff" stroke="#2c5f8a"/>
+  <text x="105" y="676" font-size="12" fill="#2c5f8a" text-anchor="middle">🔄 Reload my data</text>
+
+  <!-- Callout 7: reload my data -->
+  <circle cx="210" cy="672" r="13" fill="#c0392b"/>
+  <text x="210" y="677" font-size="13" font-weight="700" fill="#fff" text-anchor="middle">7</text>
+
+  <!-- Legend -->
+  <rect x="20" y="712" width="1000" height="128" rx="6" fill="#f4f6f8" stroke="#dfe3e8"/>
+  <text x="40" y="732" font-size="12.5" font-weight="700" fill="#1a1a2e">What each number does</text>
+  <g font-size="11" fill="#333">
+    <text x="40" y="750">① Tab bar — switch between Balance Sheet, IRS Book, NMD Stress, Metrics, Gap Analysis, Market Curves.</text>
+    <text x="40" y="766">② Total Assets — rescale the whole balance sheet without changing product mix.</text>
+    <text x="40" y="782">③ Reset BS — discard edits, restore the shipped demo.</text>
+    <text x="40" y="798">④ New % — type here to change a product's share; both sides must each sum to 100%.</text>
+    <text x="40" y="814">⑤ Sum check — turns red until the column sums to exactly 100%.</text>
+    <text x="525" y="766">⑥ Composition chart — baseline vs. your edited mix, per product, live.</text>
+    <text x="525" y="782">⑦ Reload my data — bottom of this tab. After regenerating your own balance sheet via</text>
+    <text x="525" y="798">    labbank_data_job, click this to pick it up without restarting Streamlit — your edits are kept.</text>
+  </g>
+</svg>

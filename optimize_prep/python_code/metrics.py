@@ -51,6 +51,16 @@ def _get_bias() -> tuple:
     return _bias_cache
 
 
+def reset_bias_cache() -> None:
+    """Drop the lazily-loaded bias_corrections.npz cache so the next call to
+    _get_bias() re-reads from disk. Needed after regenerating the balance
+    sheet (cohort count/order in product_params.npz can change), since this
+    cache lives outside Streamlit's own cache_data/cache_resource and is not
+    cleared by them."""
+    global _bias_cache
+    _bias_cache = None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # AllMetrics container
 # ─────────────────────────────────────────────────────────────────────────────

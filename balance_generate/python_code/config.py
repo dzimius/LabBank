@@ -75,6 +75,9 @@ stats_dict = {
                 },
         "issued_bond": {
                 8: {'mean': 50_000_000, 'std_dev': 40_000_000, 'lower_bound': 10_000_000, 'upper_bound': 200_000_000},
+                },
+        "t_bill": {
+                1: {'mean': 20_000_000, 'std_dev': 15_000_000, 'lower_bound': 2_000_000, 'upper_bound': 60_000_000},
                 }
 }
 

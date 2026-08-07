@@ -1422,6 +1422,7 @@ class ProductFactory:
         "bond_fixed": BondsFixedGen,
         "bond_float": BondsFloatGen,
         "issued_bond": BondsFloatGen,
+        "t_bill": BondsFixedGen,
         "cash": CashGen,
         "saving_account": SavingAccountsGen,
         "current_account": CurrentAccountsGen,

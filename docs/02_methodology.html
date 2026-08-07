@@ -57,6 +57,7 @@ hr { border: none; border-top: 1px solid #ddd; margin: 2.5rem 0; }
 <h2 id="architecture-in-four-layers">Architecture, in four layers</h2>
 <pre><code>Excel inputs  →  Python modules (orchestrated by Dagster)  →  SQL Server (9 schemas)  →  Reports
 </code></pre>
+<p><img alt="LabBank system architecture" src="../visual_rep/beamer_assets/pipeline.png" /></p>
 <p>SQL Server is the single integration bus. Every step reads from tables the previous step wrote, instead of passing hidden in-memory state — which means every stage can be re-run independently and audited by querying the database directly.</p>
 <h2 id="pipeline-step-by-step">Pipeline, step by step</h2>
 <ol>
@@ -66,11 +67,355 @@ hr { border: none; border-top: 1px solid #ddd; margin: 2.5rem 0; }
 <li><strong>IR derivatives (optional)</strong> — swap legs read from <code>irs_input.xlsx</code>, cash-flow schedules written to <code>cf.ir_swap_*</code>, and the swap gap merged into <code>irrbb.ir_gap_beh</code>.</li>
 <li><strong>IRRBB calculation</strong> — six EBA shock scenarios applied to all curves; NII computed over a 1-year horizon, EVE as the present value of run-off cash flows. Both written to <code>irrbb.*</code>.</li>
 <li><strong>Liquidity calculation</strong> — LCR (HQLA vs. stressed 30-day net outflows) and NSFR (available vs. required stable funding over 1 year), written to <code>results.lcr_nsfr</code>.</li>
-<li><strong>Reporting</strong> — Jupyter notebooks read live from SQL and export to HTML; Power BI connects directly to <code>schemat.*</code> for interactive repricing-gap exploration; Excel outputs for IRRBB and LCR/NSFR.</li>
+<li><strong>Reporting</strong> — Jupyter notebooks read live from SQL and export to HTML; Excel outputs for IRRBB and LCR/NSFR.</li>
 </ol>
 <p>Steps 5, 6, and 7 can each be re-run independently without touching the balance sheet or cash flows — enforced by the Dagster job definitions (<code>irrbb_recalc_job</code>, <code>liq_only_job</code>, etc).</p>
+<h2 id="data-model-sql-schema-reference">Data model — SQL schema reference</h2>
+<p>Nine schemas, each owned by one stage of the pipeline. Downstream stages read from upstream tables rather than sharing in-memory objects, which is what makes every stage independently re-runnable and auditable with a plain SQL client.</p>
+<p><img alt="SQL schema overview" src="../visual_rep/beamer_assets/sql_schema.png" /></p>
+<table>
+<thead>
+<tr>
+<th>Schema</th>
+<th>Owned by</th>
+<th>Key tables</th>
+<th>What's in it</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>dbo</code></td>
+<td><code>balance_generate</code></td>
+<td><code>transactions</code>, <code>equity</code></td>
+<td>The master transaction ledger — one row per synthetic client position — and the bank's equity/capital rows.</td>
+</tr>
+<tr>
+<td><code>schemat</code></td>
+<td><code>balance_generate</code>, <code>ir_derivatives</code></td>
+<td><code>loans</code>, <code>deposits</code>, <code>financial_instruments</code>, <code>equity</code>, <code>ir_swaps</code></td>
+<td>Per-product-family detail: contractual terms (rate, maturity, amortisation type, index) for every position, plus the swap book.</td>
+</tr>
+<tr>
+<td><code>sched</code></td>
+<td><code>balance_generate</code></td>
+<td><code>ir_swaps</code> schedules</td>
+<td>Payment schedule scaffolding referenced by <code>schedule_id</code> from <code>schemat.*</code> and <code>cf.*</code>.</td>
+</tr>
+<tr>
+<td><code>mkt</code></td>
+<td><code>balance_gen_add_data</code></td>
+<td><code>curves</code>, <code>fixings</code></td>
+<td>Bootstrapped discount/forward curves and historical index fixings, per currency (PLN, EUR, USD).</td>
+</tr>
+<tr>
+<td><code>bs</code></td>
+<td><code>balance_gen_add_data</code></td>
+<td>behavioural model parameters</td>
+<td>Prepayment (CPR) and NMD decay parameters loaded from the behavioural Excel inputs.</td>
+</tr>
+<tr>
+<td><code>cf</code></td>
+<td><code>cash_flow_calc</code>, <code>ir_derivatives</code></td>
+<td><code>products</code>, <code>ir_swap_*</code>, <code>nii_base_scenario</code></td>
+<td>The core cash-flow schedule — one row per (transaction, payment date) — plus swap cash flows and per-product NII contributions.</td>
+</tr>
+<tr>
+<td><code>irrbb</code></td>
+<td><code>irrbb_calc</code></td>
+<td><code>curves</code>, <code>ir_gap_beh</code>, <code>nii_results</code>, <code>eve_results</code>, <code>irrbb_report</code>, <code>liq_gap_beh</code></td>
+<td>Shocked curves, the repricing gap (with and without the IRS overlay), and all IRRBB results.</td>
+</tr>
+<tr>
+<td><code>results</code></td>
+<td><code>liq_calc</code></td>
+<td><code>lcr_nsfr</code></td>
+<td>Final LCR/NSFR ratios and their components.</td>
+</tr>
+<tr>
+<td><code>opt_prep</code></td>
+<td><code>optimize_prep</code></td>
+<td>product parameter / curve tensor tables</td>
+<td>SQL mirror of the npz tensors LabBank and <code>bs_optimization/</code> read — lets you inspect the fast-approximation inputs with a SELECT instead of unpacking a numpy file.</td>
+</tr>
+</tbody>
+</table>
+<p>If you're exploring the database directly (one of the reasons this project keeps SQL Server rather than hiding it): <code>dbo.transactions</code> and <code>schemat.*</code> are the best starting point for "what does the bank actually hold," <code>cf.products</code> for "what cash flows come out of that," and <code>irrbb.irrbb_report</code> / <code>results.lcr_nsfr</code> for the final regulatory-style numbers.</p>
+<h3 id="full-table-reference">Full table reference</h3>
+<p>Every table the pipeline writes, one row each, grouped by schema and pipeline stage.</p>
+<table>
+<thead>
+<tr>
+<th>Schema</th>
+<th>Table</th>
+<th>Key columns</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>dbo</code></td>
+<td><code>transactions</code></td>
+<td><code>transaction_id</code> (PK), <code>product_code</code>, <code>bs_side</code>, <code>balance_amt</code>, <code>currency</code></td>
+<td>Master ledger — one row per synthetic client position.</td>
+</tr>
+<tr>
+<td><code>dbo</code></td>
+<td><code>equity</code></td>
+<td><code>transaction_id</code>, <code>balance_amt</code></td>
+<td>The bank's capital / equity rows.</td>
+</tr>
+<tr>
+<td><code>schemat</code></td>
+<td><code>loans</code></td>
+<td><code>transaction_id</code> (FK), <code>rate_type</code>, <code>client_rt</code>, <code>maturity_date</code></td>
+<td>Contractual loan terms: rate, maturity, amortisation type, index.</td>
+</tr>
+<tr>
+<td><code>schemat</code></td>
+<td><code>deposits</code></td>
+<td><code>transaction_id</code> (FK), <code>rate_type</code>, <code>lcr_weight</code>, <code>asf_weight</code></td>
+<td>Deposit terms plus LCR/NSFR regulatory weights.</td>
+</tr>
+<tr>
+<td><code>schemat</code></td>
+<td><code>financial_instruments</code></td>
+<td><code>transaction_id</code> (FK), <code>hqla_class</code>, <code>haircut</code>, <code>rsf_weight</code></td>
+<td>Securities: HQLA class and RSF weight for liquidity.</td>
+</tr>
+<tr>
+<td><code>schemat</code></td>
+<td><code>equity</code></td>
+<td><code>transaction_id</code> (FK)</td>
+<td>Tier 1 capital detail linked to <code>dbo.equity</code>.</td>
+</tr>
+<tr>
+<td><code>schemat</code></td>
+<td><code>ir_swaps</code></td>
+<td><code>transaction_id</code> (FK), <code>pay_fixed</code>, <code>fixed_rate</code>, <code>notional</code></td>
+<td>IRS trade book: fixed/floating leg parameters.</td>
+</tr>
+<tr>
+<td><code>sched</code></td>
+<td>(schedule-ID bridge tables)</td>
+<td><code>schedule_id</code> (PK), <code>product_code</code>, <code>rate_type</code>, <code>currency</code></td>
+<td>One row per unique (product, tenor, currency, rate type) group — links <code>schemat.*</code> to CF generation.</td>
+</tr>
+<tr>
+<td><code>mkt</code></td>
+<td><code>curves</code></td>
+<td><code>curve_date</code>, <code>curve_name</code>, <code>tenor</code>, <code>zero_rate</code>, <code>d_f</code></td>
+<td>Bootstrapped discount / forward curves per currency (PLN, EUR, USD).</td>
+</tr>
+<tr>
+<td><code>mkt</code></td>
+<td><code>fixings</code></td>
+<td><code>fixing_date</code>, <code>rate_index</code>, <code>tenor</code>, <code>rate</code></td>
+<td>Historical index fixings (WIBOR, EURIBOR, …).</td>
+</tr>
+<tr>
+<td><code>bs</code></td>
+<td><code>models_loan</code></td>
+<td><code>product_code</code>, <code>tenor</code>, <code>prep_rate</code></td>
+<td>Constant prepayment rate (CPR) by product and tenor bucket.</td>
+</tr>
+<tr>
+<td><code>bs</code></td>
+<td><code>models_deposit_ir</code></td>
+<td><code>product_code</code>, <code>tenor</code>, <code>outstanding</code></td>
+<td>Non-maturity deposit decay profile, IRRBB horizon.</td>
+</tr>
+<tr>
+<td><code>bs</code></td>
+<td><code>models_deposit_liq</code></td>
+<td><code>product_code</code>, <code>tenor</code>, <code>outstanding</code></td>
+<td>Same decay structure, liquidity (60M) horizon.</td>
+</tr>
+<tr>
+<td><code>cf</code></td>
+<td><code>products</code></td>
+<td><code>schedule_id</code> (PK), <code>cf_start_dt</code>, <code>fwd_rt</code>, <code>beh_outstanding</code>, <code>beh_capital_pmt</code>, <code>beh_interest_pmt</code></td>
+<td>The core cash-flow schedule — one row per (transaction, payment date), contractual and behavioural.</td>
+</tr>
+<tr>
+<td><code>cf</code></td>
+<td><code>ir_swap_orig</code> / <code>ir_swap_beh</code></td>
+<td>same layout as <code>cf.products</code></td>
+<td>IRS cash-flow schedules, original and behavioural.</td>
+</tr>
+<tr>
+<td><code>cf</code></td>
+<td><code>nii_base_scenario</code></td>
+<td><code>product_code</code>, <code>client_rt</code>, <code>nii_interest</code>, <code>nii_renewal</code></td>
+<td>Per-product NII contribution before scenario aggregation.</td>
+</tr>
+<tr>
+<td><code>irrbb</code></td>
+<td><code>ir_gap_beh</code> / <code>ir_gap_beh_a</code></td>
+<td>tenor bucket, asset/liability volume</td>
+<td>Repricing gap — contractual, behavioural, and with the IRS overlay.</td>
+</tr>
+<tr>
+<td><code>irrbb</code></td>
+<td><code>ir_swap_gap_beh</code></td>
+<td>tenor bucket, IRS notional</td>
+<td>IRS-only contribution to the repricing gap.</td>
+</tr>
+<tr>
+<td><code>irrbb</code></td>
+<td><code>shocked_curves</code></td>
+<td><code>scenario</code>, <code>currency</code>, <code>tenor</code>, <code>shocked_rate</code></td>
+<td>The 6 EBA + "own" shocked curves per currency.</td>
+</tr>
+<tr>
+<td><code>irrbb</code></td>
+<td><code>nii_results</code></td>
+<td><code>scenario</code>, <code>currency</code>, <code>base_nii</code>, <code>delta_nii</code>, <code>delta_nii_pct</code></td>
+<td>NII aggregated by scenario and currency.</td>
+</tr>
+<tr>
+<td><code>irrbb</code></td>
+<td><code>eve_results</code></td>
+<td><code>scenario</code>, <code>currency</code>, <code>tenor</code>, <code>delta_pv</code>, <code>delta_eve</code></td>
+<td>EVE per scenario, currency, and tenor bucket.</td>
+</tr>
+<tr>
+<td><code>results</code></td>
+<td><code>irrbb_report</code></td>
+<td><code>scenario</code>, <code>currency</code>, <code>delta_eve_reg</code>, <code>sot_eve_pct_reg</code>, <code>delta_nii_reg</code>, <code>sot_nii_pct_reg</code></td>
+<td>Final Supervisory Outlier Test summary — ΔEVE/T1, ΔNII/T1, breach flags.</td>
+</tr>
+<tr>
+<td><code>results</code></td>
+<td><code>lcr_nsfr</code></td>
+<td><code>currency</code>, <code>hqla</code>, <code>net_outflow</code>, <code>lcr</code>, <code>asf</code>, <code>rsf</code>, <code>nsfr</code></td>
+<td>Final LCR and NSFR ratios and their components.</td>
+</tr>
+<tr>
+<td><code>opt_prep</code></td>
+<td><code>curves_tensor</code> / <code>product_params</code></td>
+<td>vectorised, per (scenario, tenor) / per-product</td>
+<td>SQL mirror of the <code>.npz</code> tensors the LabBank app and <code>bs_optimization/</code> read — inspect the fast-approximation inputs with a <code>SELECT</code> instead of unpacking a NumPy file.</td>
+</tr>
+</tbody>
+</table>
 <h2 id="products-on-the-balance-sheet">Products on the balance sheet</h2>
-<p>The shipped demo balance sheet (<code>balance_generate/input_data/bank_data.xlsx</code>, sheet <code>bs_structure</code>) defines every product as a row of parameters — this is also the template to follow when adding a new product (credit cards, a working-capital/investment-loan split for corporates, T-bills, central bank cash, etc.).</p>
+<h3 id="available-product-types">Available product types</h3>
+<p>Every product on the balance sheet is a row of parameters (<code>balance_generate/input_data/bank_data.xlsx</code>, sheet <code>bs_structure</code>) — the same template used for the products shipped today is what you'd copy to add a new one (credit cards, a working-capital/investment-loan split for corporates, T-bills, central bank cash, etc.).</p>
+<p>Each product type carries risk parameters — RWA weight and PD/LGD for assets; LCR outflow rate and ASF/RSF weight for liabilities and other assets. <strong>These are illustrative values loosely inspired by the shape of real regulatory categories (Basel/CRR risk-weight bands, LCR/NSFR factor tables), not a precise regulatory calibration.</strong> They're plain columns in an Excel file — change them for your own scenario, and there's no code to touch.</p>
+<p><strong>Asset types:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Description</th>
+<th>Rate types available</th>
+<th>RWA weight</th>
+<th>PD / LGD</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Mortgage</td>
+<td>Long-dated residential real estate loan to individuals, amortising</td>
+<td>Fixed or floating</td>
+<td>~35%</td>
+<td>~1.0–1.5% / ~20%</td>
+</tr>
+<tr>
+<td>Consumer / cash loan</td>
+<td>Unsecured personal loan to individuals, shorter tenor, amortising</td>
+<td>Fixed or floating</td>
+<td>~75%</td>
+<td>~2.0–2.5% / ~45%</td>
+</tr>
+<tr>
+<td>SME investment / working-capital loan</td>
+<td>Loan to a small/medium enterprise for capex or working capital</td>
+<td>Floating</td>
+<td>~75%</td>
+<td>~1.5% / ~35%</td>
+</tr>
+<tr>
+<td>Government bond</td>
+<td>Sovereign debt held as a liquidity buffer / investment</td>
+<td>Fixed or floating</td>
+<td>0%</td>
+<td>~0.5% / ~45% (HQLA Level 1, 0% haircut)</td>
+</tr>
+<tr>
+<td>Cash / central bank reserves</td>
+<td>Overnight liquid balance at the central bank</td>
+<td>—</td>
+<td>0%</td>
+<td>— (HQLA Level 1, 0% haircut)</td>
+</tr>
+<tr>
+<td>Interbank placement</td>
+<td>Short-term money-market lending to other banks</td>
+<td>Floating</td>
+<td>~20%</td>
+<td>~0.2% / ~45%</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Liability &amp; equity types:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Description</th>
+<th>Rate type</th>
+<th>LCR outflow rate</th>
+<th>ASF factor</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Interbank deposit</td>
+<td>Short-term money-market borrowing from other banks</td>
+<td>Floating</td>
+<td>~100% (fully runs off in stress)</td>
+<td>~0%</td>
+</tr>
+<tr>
+<td>Current account (retail / SME)</td>
+<td>Non-maturing transactional deposit, bank-managed ("administrative") rate</td>
+<td>Administrative</td>
+<td>~5%</td>
+<td>~80–95%</td>
+</tr>
+<tr>
+<td>Savings account</td>
+<td>Non-maturing deposit, market-linked but bank-discretionary rate</td>
+<td>Floating</td>
+<td>~10%</td>
+<td>~90%</td>
+</tr>
+<tr>
+<td>Term deposit</td>
+<td>Fixed-term deposit with a contracted maturity and rate</td>
+<td>Fixed</td>
+<td>~5%</td>
+<td>~90%</td>
+</tr>
+<tr>
+<td>Issued bond</td>
+<td>The bank's own wholesale debt issuance</td>
+<td>Floating</td>
+<td>n/a</td>
+<td>100%</td>
+</tr>
+<tr>
+<td>Equity (common shares, retained earnings, risk reserves)</td>
+<td>Capital base — no contractual cash flows</td>
+<td>—</td>
+<td>n/a</td>
+<td>100%</td>
+</tr>
+</tbody>
+</table>
+<h3 id="the-shipped-demo-instance">The shipped demo instance</h3>
+<p>Here's exactly how those types are configured in the demo <code>bank_data.xlsx</code> today:</p>
 <table>
 <thead>
 <tr>
@@ -323,10 +668,10 @@ sign = +1 for assets, −1 for liabilities
 <h2 id="eba-shock-scenario-construction">EBA shock scenario construction</h2>
 <p>Six supervisory scenarios (per EBA/RTS/2022/10) are applied to each currency curve — parallel up/down, steepener, flattener, and short-rate up/down — plus an "own" scenario. Shocks are floored at 0% per tenor (rates can't be shocked below zero in this construction). Example PLN parameters: parallel shock ±250 bps, short-rate ±350 bps, long-rate ±150 bps; the "own" scenario adds a −100 bps parallel shock.</p>
 <h2 id="supervisory-outlier-test-eba-sot">Supervisory Outlier Test (EBA SOT)</h2>
-<p>The SOT applies a <strong>50% haircut per tenor bucket</strong> to any scenario leg that produces a <em>gain</em>, before summing across buckets:</p>
-<pre><code>ΔEVE_regulatory = Σ_b [ min(ΔEVE_b, 0) + 0.5 × max(ΔEVE_b, 0) ]
+<p>The SOT applies a <strong>50% haircut</strong> to a scenario's ΔEVE if it comes out as a <em>gain</em>, before it counts toward the regulatory total:</p>
+<pre><code>ΔEVE_regulatory = min(ΔEVE, 0) + 0.5 × max(ΔEVE, 0)
 </code></pre>
-<p>Applying the haircut at bucket level (not on the total) is deliberate and conservative — it prevents a gain in one bucket from offsetting a loss in another before the haircut is applied. The same bucket-level logic is applied to the NII SOT.</p>
+<p>The same logic is applied to the NII SOT.</p>
 <p>Thresholds:</p>
 <ul>
 <li><strong>EVE SOT</strong>: ΔEVE_regulatory / Tier 1 capital &lt; −15% → breach.</li>
@@ -345,7 +690,20 @@ NSFR = Available Stable Funding / Required Stable Funding   ≥ 100%
 <h2 id="behavioural-liquidity-gap">Behavioural liquidity gap</h2>
 <p>Beyond the regulatory ratios, the liquidity gap shows the net cash position across the full tenor ladder (up to 60 months), using behavioural cash flows — loan prepayments included, NMD decay applied. A sustained negative cumulative gap identifies the point at which the bank would need additional funding — the primary input for contingency funding planning, distinct from the point-in-time LCR/NSFR ratios.</p>
 <h2 id="exploring-this-interactively-labbank">Exploring this interactively — LabBank</h2>
-<p>The Streamlit app (<code>sandbox/app.py</code>) lets you stress every piece described above without touching SQL: change balance sheet composition, add or edit swaps, stress NMD decay assumptions, and immediately see NII, EVE, EBA SOT, LCR, and NSFR respond — plus the repricing gap and liquidity gap charts. See the <a href="01_setup_guide.md">setup guide</a> to run it.</p>
+<p>The Streamlit app (<code>sandbox/app.py</code>) lets you stress every piece described above without touching SQL. See the <a href="01_setup_guide.md">setup guide</a> to run it — this section is a tour of what each tab does.</p>
+<h3 id="balance-sheet">⚖️ Balance Sheet</h3>
+<p>The tab you land on. Edit the balance sheet mix and immediately see the composition change; every other tab reacts to whatever you set here.</p>
+<p><img alt="LabBank Balance Sheet tab, annotated" src="images/labbank_balance_sheet_annotated.svg" /></p>
+<h3 id="irs-book">🔄 IRS Book</h3>
+<p>Edit the interest rate swap book: add/remove trades, change notional or fixed rate, toggle <code>pay_fixed</code> per swap (same convention as <code>irs_input.xlsx</code> — see the IRS section above). A leg summary table shows net receive-fixed vs. pay-fixed notional and the weighted-average fixed rate on each side, baseline vs. your edits.</p>
+<h3 id="nmd-stress">🏦 NMD Stress</h3>
+<p>Pick a non-maturity deposit product (current account or savings account) and edit its <strong>outstanding-percentage decay profile</strong> directly — how much of the balance is assumed to still be on the books at each future tenor. A chart compares your stressed profile against the baseline. An "advanced" expander lets you set a renewal rate for capital that runs off within the horizon. Changes here flow into both the Metrics and Gap Analysis tabs as an additive ΔNII/ΔEVE overlay.</p>
+<h3 id="metrics">📈 Metrics</h3>
+<p>The results dashboard: NII, EVE, LCR, and NSFR, baseline vs. modified, plus RWA and the Tier 1/RWA ratio against a configurable minimum. Below that: the EBA Supervisory Outlier Test (ΔEVE/T1 and ΔNII/T1 against the −15%/−5% thresholds, pass/fail called out explicitly), then per-scenario ΔNII and ΔEVE bar charts, an IRS contribution breakdown, a full scenario table, and an LCR/NSFR diagnostic that flags if you've zeroed out all HQLA-eligible assets.</p>
+<h3 id="gap-analysis">📊 Gap Analysis</h3>
+<p>Three repricing-gap panels — assets vs. liabilities repricing per bucket with the IRS overlay shown separately, net gap with and without IRS side by side, and the cumulative net gap — followed by the 12-month behavioural liquidity gap (principal inflows vs. outflows per month, and the cumulative net position).</p>
+<h3 id="market-curves">📉 Market Curves</h3>
+<p>The base forward/zero curve per currency, the full set of EBA shock scenario curves overlaid, and a "hypothetical scenarios" panel where you can pick a stylised curve shape (normal, steep, humped, flat, inverted) and rate level (low/medium/high) to see NII/EVE under a rate environment that isn't one of the 7 EBA scenarios.</p>
 <h2 id="whats-next-balance-sheet-optimisation">What's next — balance sheet optimisation</h2>
 <p>Balance sheet optimisation (constrained economic-profit vs. ΔEVE/ΔNII breach trade-off) is the next phase, implemented in <code>bs_optimization/</code> as four solvers (deterministic, joint balance-sheet + swap overlay, stochastic Monte Carlo, and a natural-hedge minimiser). It's functional but not yet part of the guided LabBank path — treat it as a preview of where this project is heading rather than a finished, documented feature.</p>
 <h2 id="a-note-on-scope">A note on scope</h2>

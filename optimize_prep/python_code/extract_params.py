@@ -50,7 +50,7 @@ SHOCKED_SCENARIO_IDS = ["par_up", "par_dn", "steep", "flat", "sr_up", "sr_dn", "
 
 # Monthly cohort products — have meaningful start_date and scheduled cash flows
 COHORT_PRODUCT_CODES = frozenset({"1000", "1100", "2000", "2100", "4100",
-                                   "3000", "3100", "7060", "7900", "5000"})
+                                   "3000", "3100", "3200", "7060", "7900", "5000"})
 # Single-row products — behavioural models, no maturity, or equity
 SINGLE_ROW_PRODUCT_CODES = frozenset({"3500", "6000", "8000", "6300",
                                        "5300", "5100", "5400"})
