@@ -190,56 +190,93 @@ def make_pipeline():
 
 
 # ── 2. SQL SCHEMA DIAGRAM ─────────────────────────────────────────────────────
+# ── Shared diagram palette (single navy family -- no per-box rainbow hues) ────
+_DIAG_NAVY       = '#1A3A6E'
+_DIAG_NAVY_DARK  = '#0D1B3E'
+_DIAG_FILL       = '#EEF2F8'
+_DIAG_FILL_END   = '#E4ECF7'   # marginally deeper tint for the pipeline's terminal box
+_DIAG_ARROW      = '#5B7088'
+_DIAG_DESC       = '#8A8A8A'
+
+
+def _rect_edge_point(box, target_center):
+    """Point where the ray from `box`'s center to `target_center` crosses
+    box's own boundary -- so a connector always lands exactly on the
+    rectangle edge (never floating off it or piercing past it), regardless
+    of the angle between the two boxes."""
+    x, y, w, h = box
+    cx, cy = x + w / 2, y + h / 2
+    tx, ty = target_center
+    dx, dy = tx - cx, ty - cy
+    if dx == 0 and dy == 0:
+        return (cx, cy)
+    scales = []
+    if dx != 0:
+        scales.append((w / 2) / abs(dx))
+    if dy != 0:
+        scales.append((h / 2) / abs(dy))
+    s = min(scales)
+    return (cx + dx * s, cy + dy * s)
+
+
 def make_sql_schema():
     fig, ax = plt.subplots(figsize=(13, 6))
     ax.set_xlim(0, 13); ax.set_ylim(0, 6.5)
     ax.axis('off')
     fig.patch.set_facecolor('white')
 
-    schemas = [
-        (0.3, 4.5, 2.8, 1.8, '#E3F2FD', '#1565C0', 'dbo',
-         'transactions\nequity', 'Master balance sheet'),
-        (0.3, 2.0, 2.8, 2.0, '#E8F5E9', '#2E7D32', 'schemat',
-         'loans · deposits\nequity · ir_swaps\nsched.ir_swaps', 'Product schedules\n& swap book'),
-        (0.3, 0.2, 2.8, 1.5, '#FFF8E1', '#F57F17', 'mkt',
-         'curves', 'Discount / fwd curves\nPLN · EUR · USD'),
-        (4.8, 4.0, 2.8, 2.2, '#FFF3E0', '#E65100', 'cf',
-         'products\nnii_base_scenario\nnii_own_scenarios\neve_own_scenarios', 'Cash flow outputs'),
-        (4.8, 1.0, 2.8, 2.5, '#FFEBEE', '#C62828', 'irrbb',
-         'curves · ir_gap_beh\nnii_results · eve_results\nirrbb_report\nliq_gap_beh', 'IRRBB risk metrics'),
-        (9.4, 3.5, 2.8, 1.8, '#E0F7FA', '#00695C', 'results',
-         'lcr_nsfr', 'Liquidity ratios\nLCR · NSFR'),
-    ]
+    schemas = {
+        'dbo':      (0.3, 4.5, 2.8, 1.8, 'transactions\nequity', 'Master balance sheet'),
+        'schemat':  (0.3, 2.0, 2.8, 2.0, 'loans · deposits\nequity · ir_swaps\nsched.ir_swaps',
+                     'Product schedules\n& swap book'),
+        'mkt':      (0.3, 0.2, 2.8, 1.5, 'curves', 'Discount / fwd curves\nPLN · EUR · USD'),
+        'cf':       (4.8, 4.0, 2.8, 2.2, 'products\nnii_base_scenario\nnii_own_scenarios\neve_own_scenarios',
+                     'Cash flow outputs'),
+        'irrbb':    (4.8, 1.0, 2.8, 2.5, 'curves · ir_gap_beh\nnii_results · eve_results\nirrbb_report\nliq_gap_beh',
+                     'IRRBB risk metrics'),
+        'results':  (9.4, 3.5, 2.8, 1.8, 'lcr_nsfr', 'Liquidity ratios\nLCR · NSFR'),
+    }
+    boxes = {name: (x, y, w, h) for name, (x, y, w, h, *_ ) in schemas.items()}
+    centers = {name: (x + w / 2, y + h / 2) for name, (x, y, w, h) in boxes.items()}
 
-    for (x, y, w, h, fc, ec, schema, tables, desc) in schemas:
+    for name, (x, y, w, h, tables, desc) in schemas.items():
+        is_terminal = (name == 'results')
         rect = FancyBboxPatch((x, y), w, h,
                               boxstyle='round,pad=0.1',
-                              facecolor=fc, edgecolor=ec, linewidth=2.0)
+                              facecolor=_DIAG_FILL_END if is_terminal else _DIAG_FILL,
+                              edgecolor=_DIAG_NAVY, linewidth=2.4 if is_terminal else 1.6)
         ax.add_patch(rect)
-        ax.text(x + w/2, y + h - 0.25, f'[{schema}]',
-                ha='center', va='center', fontsize=9, fontweight='bold', color=ec)
+        ax.text(x + w/2, y + h - 0.25, f'[{name}]',
+                ha='center', va='center', fontsize=9, fontweight='bold', color=_DIAG_NAVY)
         ax.text(x + w/2, y + h/2 - 0.1, tables,
                 ha='center', va='center', fontsize=7.5, color='#333333', linespacing=1.5)
         ax.text(x + w/2, y + 0.2, desc,
-                ha='center', va='center', fontsize=7, color='#888888', style='italic')
+                ha='center', va='center', fontsize=7, color=_DIAG_DESC, style='italic')
 
     links = [
-        (3.1, 5.4, 4.8, 5.4, 'reads →'),
-        (3.1, 3.0, 4.8, 3.0, 'reads →'),
-        (1.7, 4.5, 1.7, 4.0, ''),
-        (3.1, 1.0, 4.8, 2.25, 'reads →'),
-        (7.6, 5.1, 9.4, 4.9, 'feeds →'),
-        (7.6, 2.25, 9.4, 4.4, 'feeds →'),
+        ('dbo',     'cf',      'reads'),
+        ('schemat', 'irrbb',   'reads'),
+        ('dbo',     'schemat', None),
+        ('mkt',     'irrbb',   'reads'),
+        ('cf',      'results', 'feeds'),
+        ('irrbb',   'results', 'feeds'),
     ]
-    for (x1, y1, x2, y2, lbl) in links:
-        ax.annotate('', xy=(x2, y2), xytext=(x1, y1),
-                    arrowprops=dict(arrowstyle='->', color='#607D8B', lw=1.4))
+    for src, dst, lbl in links:
+        p1 = _rect_edge_point(boxes[src], centers[dst])
+        p2 = _rect_edge_point(boxes[dst], centers[src])
+        ax.annotate('', xy=p2, xytext=p1,
+                    arrowprops=dict(arrowstyle='-|>', color=_DIAG_ARROW, lw=1.4,
+                                    shrinkA=0, shrinkB=0, mutation_scale=14))
         if lbl:
-            mx, my = (x1+x2)/2, (y1+y2)/2
-            ax.text(mx, my+0.12, lbl, ha='center', fontsize=7, color='#607D8B')
+            mx, my = (p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2
+            dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+            perp_off = (0.16, 0.0) if abs(dy) > abs(dx) else (0.0, 0.16)
+            ax.text(mx + perp_off[0], my + perp_off[1], f'{lbl} →',
+                    ha='center', va='center', fontsize=7, color=_DIAG_ARROW,
+                    fontweight='bold')
 
     ax.set_title('LabBank — SQL Schema Overview', fontsize=13, fontweight='bold',
-                 pad=8, color='#1A237E')
+                 pad=8, color=_DIAG_NAVY_DARK)
     fig.tight_layout()
     save(fig, 'sql_schema.png')
 
@@ -253,7 +290,7 @@ def make_transaction_erd():
     ax.axis('off')
     fig.patch.set_facecolor('white')
 
-    def entity_box(x, y, w, h, header, cols, pk_idx=0, fc='#E3F2FD', ec='#1565C0'):
+    def entity_box(x, y, w, h, header, cols, pk_idx=0, fc=_DIAG_FILL, ec=_DIAG_NAVY):
         rect = FancyBboxPatch((x, y), w, h, boxstyle='square,pad=0',
                                facecolor=fc, edgecolor=ec, linewidth=1.6)
         ax.add_patch(rect)
@@ -290,7 +327,7 @@ def make_transaction_erd():
     ]
     hub_x, hub_y, hub_w, hub_h = 3.9, 3.15, 3.2, 2.85
     hub_rows = entity_box(hub_x, hub_y, hub_w, hub_h, 'dbo.transactions',
-                           hub_cols, fc='#FFF8E1', ec='#E65100')
+                           hub_cols, fc=_DIAG_FILL_END, ec=_DIAG_NAVY)
 
     children = [
         ('schemat.loans', [('transaction_id', 'FK'), ('rate_type  (F/V/A)', ''),
@@ -308,8 +345,11 @@ def make_transaction_erd():
     ]
 
     for name, cols, cx, cy, cw, ch in children:
-        rows = entity_box(cx, cy, cw, ch, name, cols, fc='#E8F5E9', ec='#2E7D32')
+        rows = entity_box(cx, cy, cw, ch, name, cols, fc=_DIAG_FILL, ec=_DIAG_NAVY)
         # connector: child's transaction_id (FK) row  ↔  hub's transaction_id (PK) row
+        # -- plain line, no arrowhead/cardinality marks: every relationship here
+        # is the same 1:1 FK-to-PK pattern, already stated once in the subtitle
+        # below, so repeating "1 ... 1" at each line was pure clutter.
         cxr0, cxr1, cyr = rows['transaction_id']
         hxr0, hxr1, hyr = hub_rows['transaction_id']
         child_pt = (cxr0, cyr) if cxr0 > hub_x + hub_w else \
@@ -317,16 +357,11 @@ def make_transaction_erd():
         hub_pt = (hxr1, hyr) if child_pt[0] >= hxr1 else \
                  (hxr0, hyr) if child_pt[0] <= hxr0 else (hxr0, hyr)
         ax.plot([hub_pt[0], child_pt[0]], [hub_pt[1], child_pt[1]],
-                color='#455A64', lw=1.3, zorder=1,
+                color=_DIAG_ARROW, lw=1.3, zorder=1,
                 solid_capstyle='round')
-        # cardinality: 1 : 1 — each transaction has at most one matching detail row
-        ax.text(hub_pt[0] + (0.18 if child_pt[0] >= hxr1 else -0.18), hub_pt[1] + 0.14,
-                '1', ha='center', fontsize=8, fontweight='bold', color='#455A64')
-        ax.text(child_pt[0] + (-0.18 if child_pt[0] >= hxr1 else 0.18), child_pt[1] + 0.14,
-                '1', ha='center', fontsize=8, fontweight='bold', color='#455A64')
 
     ax.set_title('LabBank — Core Entity Relationships  (dbo.transactions hub)',
-                 fontsize=13, fontweight='bold', y=0.98, color='#1A237E')
+                 fontsize=13, fontweight='bold', y=0.98, color=_DIAG_NAVY_DARK)
     ax.text(5.5, 9.15,
             'One row per position in dbo.transactions; each schemat.* table adds product-specific\n'
             'detail for the same transaction_id (1:1 — every position belongs to exactly one product table).',
