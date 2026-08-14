@@ -226,7 +226,7 @@ def make_sql_schema():
     fig.patch.set_facecolor('white')
 
     schemas = {
-        'dbo':      (0.3, 4.5, 2.8, 1.8, 'transactions\nequity', 'Master balance sheet'),
+        'dbo':      (0.3, 4.5, 2.8, 1.8, 'transactions', 'Master balance sheet'),
         'schemat':  (0.3, 2.0, 2.8, 2.0, 'loans · deposits\nequity · ir_swaps\nsched.ir_swaps',
                      'Product schedules\n& swap book'),
         'mkt':      (0.3, 0.2, 2.8, 1.5, 'curves', 'Discount / fwd curves\nPLN · EUR · USD'),
@@ -283,82 +283,65 @@ def make_sql_schema():
 
 # ── 2b. TRANSACTION-HUB ENTITY DIAGRAM ────────────────────────────────────────
 def make_transaction_erd():
-    """SSMS-style database diagram: dbo.transactions as the hub, with 1:1
-    FK lines (transaction_id) out to each schemat.* product-detail table."""
+    """Conceptual diagram: dbo.transactions as the hub (fact table), with
+    1:1 links out to each schemat.* product-detail table -- each box shows
+    what PRODUCT TYPES live there (from b_s_gen_objects.py's table_registry:
+    every product_name maps to exactly one of loans/deposits/
+    financial_instruments/equity), not raw column names -- this is meant to
+    orient a reader who's never seen the schema, not double as an SSMS
+    screenshot."""
     fig, ax = plt.subplots(figsize=(11, 8.6))
     ax.set_xlim(0, 11); ax.set_ylim(0, 9.6)
     ax.axis('off')
     fig.patch.set_facecolor('white')
 
-    def entity_box(x, y, w, h, header, cols, pk_idx=0, fc=_DIAG_FILL, ec=_DIAG_NAVY):
+    def content_box(x, y, w, h, header, body, desc, fc=_DIAG_FILL, ec=_DIAG_NAVY,
+                    lw=1.6):
         rect = FancyBboxPatch((x, y), w, h, boxstyle='square,pad=0',
-                               facecolor=fc, edgecolor=ec, linewidth=1.6)
+                               facecolor=fc, edgecolor=ec, linewidth=lw)
         ax.add_patch(rect)
-        head_h = 0.42
+        head_h = 0.5
         ax.add_patch(mpatches.Rectangle((x, y + h - head_h), w, head_h,
                                          facecolor=ec, edgecolor=ec))
         ax.text(x + w/2, y + h - head_h/2, header, ha='center', va='center',
-                fontsize=9.5, fontweight='bold', color='white')
-        row_h = (h - head_h) / max(len(cols), 1)
-        rows = {}
-        for i, (label, key) in enumerate(cols):
-            ry = y + h - head_h - row_h * (i + 0.5)
-            rows[label] = (x, x + w, ry)
-            tag = 'PK ' if key == 'PK' else ('FK ' if key == 'FK' else '')
-            weight = 'bold' if key in ('PK', 'FK') else 'normal'
-            key_color = '#B8860B' if key == 'PK' else ec
-            if tag:
-                ax.text(x + 0.12, ry, tag, ha='left', va='center',
-                        fontsize=7.2, fontweight='bold', color=key_color,
-                        fontfamily='monospace')
-            ax.text(x + (0.42 if tag else 0.12), ry, label, ha='left', va='center',
-                    fontsize=7.8, fontweight=weight, color='#212121',
-                    fontfamily='monospace')
-            if i > 0:
-                ax.plot([x, x + w], [y + h - head_h - row_h * i]*2,
-                        color=ec, lw=0.4, alpha=0.4)
-        return rows
+                fontsize=10, fontweight='bold', color='white')
+        ax.text(x + w/2, y + (h - head_h) * 0.58 + 0.05, body,
+                ha='center', va='center', fontsize=8.3, color='#212121',
+                linespacing=1.9)
+        ax.text(x + w/2, y + 0.28, desc, ha='center', va='center',
+                fontsize=7.3, color=_DIAG_DESC, style='italic')
 
-    # Hub: dbo.transactions
-    hub_cols = [
-        ('transaction_id', 'PK'), ('product_code', ''), ('product_name', ''),
-        ('bs_side  (A / L)', ''), ('balance_amt', ''), ('currency', ''),
-        ('client_id', ''), ('client_type_id', ''),
-    ]
-    hub_x, hub_y, hub_w, hub_h = 3.9, 3.15, 3.2, 2.85
-    hub_rows = entity_box(hub_x, hub_y, hub_w, hub_h, 'dbo.transactions',
-                           hub_cols, fc=_DIAG_FILL_END, ec=_DIAG_NAVY)
+    # Hub: dbo.transactions -- role, not a column list. This is the fact
+    # table every regulatory/finance report in this project reads from.
+    hub_x, hub_y, hub_w, hub_h = 3.7, 3.65, 3.6, 2.1
+    hub_box = (hub_x, hub_y, hub_w, hub_h)
+    content_box(hub_x, hub_y, hub_w, hub_h, 'dbo.transactions',
+                'FACT TABLE', 'One row per position\nmain source table for all reporting',
+                fc=_DIAG_FILL_END, ec=_DIAG_NAVY, lw=2.2)
 
-    children = [
-        ('schemat.loans', [('transaction_id', 'FK'), ('rate_type  (F/V/A)', ''),
-                            ('client_rt · index_rt', ''), ('maturity_date', ''),
-                            ('schedule_id', '')], 0.2, 5.9, 3.1, 2.5),
-        ('schemat.deposits', [('transaction_id', 'FK'), ('rate_type', ''),
-                               ('lcr_weight · asf_weight', ''),
-                               ('schedule_id', '')], 7.7, 5.9, 3.1, 2.2),
-        ('schemat.financial_instruments', [('transaction_id', 'FK'),
-                               ('hqla_class · haircut', ''),
-                               ('rsf_weight', ''), ('schedule_id', '')],
-                               0.2, 0.3, 3.4, 2.2),
-        ('schemat.equity', [('transaction_id', 'FK'), ('balance_amt', ''),
-                             ('currency', '')], 7.7, 0.3, 3.1, 1.75),
-    ]
+    children = {
+        'schemat.loans': ('Mortgages · Cash Loans\nInvestment (SME) Loans',
+                           'Fixed & floating-rate lending', 0.2, 5.9, 3.1, 2.3),
+        'schemat.deposits': ('Current Accounts\nSavings · Term Deposits',
+                              'Client & bank funding', 7.7, 5.9, 3.1, 2.3),
+        'schemat.financial_instruments': ('Bonds (Fixed/Float) · T-Bills\nCash',
+                                           'HQLA & investment book', 0.2, 0.4, 3.4, 2.3),
+        'schemat.equity': ('Common Shares\nRetained Earnings · Reserves',
+                            'Regulatory capital', 7.7, 0.4, 3.1, 2.3),
+    }
 
-    for name, cols, cx, cy, cw, ch in children:
-        rows = entity_box(cx, cy, cw, ch, name, cols, fc=_DIAG_FILL, ec=_DIAG_NAVY)
-        # connector: child's transaction_id (FK) row  ↔  hub's transaction_id (PK) row
-        # -- plain line, no arrowhead/cardinality marks: every relationship here
-        # is the same 1:1 FK-to-PK pattern, already stated once in the subtitle
+    hub_center = (hub_x + hub_w / 2, hub_y + hub_h / 2)
+    for name, (body, desc, cx, cy, cw, ch) in children.items():
+        child_box = (cx, cy, cw, ch)
+        content_box(cx, cy, cw, ch, name, body, desc)
+        child_center = (cx + cw / 2, cy + ch / 2)
+        p1 = _rect_edge_point(hub_box, child_center)
+        p2 = _rect_edge_point(child_box, hub_center)
+        # plain connector, no arrowhead/cardinality marks -- every relationship
+        # here is the same 1:1 pattern, already stated once in the subtitle
         # below, so repeating "1 ... 1" at each line was pure clutter.
-        cxr0, cxr1, cyr = rows['transaction_id']
-        hxr0, hxr1, hyr = hub_rows['transaction_id']
-        child_pt = (cxr0, cyr) if cxr0 > hub_x + hub_w else \
-                   (cxr1, cyr) if cxr1 < hub_x else (cxr0 + (cxr1-cxr0)/2, cyr)
-        hub_pt = (hxr1, hyr) if child_pt[0] >= hxr1 else \
-                 (hxr0, hyr) if child_pt[0] <= hxr0 else (hxr0, hyr)
-        ax.plot([hub_pt[0], child_pt[0]], [hub_pt[1], child_pt[1]],
-                color=_DIAG_ARROW, lw=1.3, zorder=1,
-                solid_capstyle='round')
+        ax.plot([p1[0], p2[0]], [p1[1], p2[1]], color=_DIAG_ARROW, lw=1.3,
+                zorder=1, solid_capstyle='round')
 
     ax.set_title('LabBank — Core Entity Relationships  (dbo.transactions hub)',
                  fontsize=13, fontweight='bold', y=0.98, color=_DIAG_NAVY_DARK)

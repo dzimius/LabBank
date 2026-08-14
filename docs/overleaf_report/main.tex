@@ -405,12 +405,12 @@ answers ``what cash flows come out of that'', and \texttt{irrbb.irrbb\_report} /
 
 \subsection{The core entity relationships}
 The diagram above shows how data \textit{flows} between schemas; the one below shows
-how the master ledger is \textit{structured} --- the same view you would get by
-right-clicking a database in SQL Server Management Studio and choosing ``Database
-Diagram''. \texttt{dbo.transactions} is the hub: every position the bank holds is
-exactly one row there. Each \texttt{schemat.*} table adds product-specific detail for
-that same \texttt{transaction\_id} --- a 1:1 relationship, since a given position is a
-loan, a deposit, a security, or an equity item, never more than one at once.
+how the master ledger is \textit{structured}. \texttt{dbo.transactions} is the hub
+--- the fact table every regulatory/finance report in this project ultimately reads
+from, one row per position. Each \texttt{schemat.*} table adds product-specific
+detail for that same \texttt{transaction\_id} --- a 1:1 relationship, since a given
+position is a loan, a deposit, a security, or an equity item, never more than one
+at once.
 
 \imgfull[0.9\textwidth]{transaction_erd.png}
 
