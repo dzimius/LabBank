@@ -72,7 +72,7 @@ from ns_curve_model import ns_design_matrix, DIEBOLD_LI_TAU                    #
 from curve_scenario_bank import build_scenario_bank                            # noqa: E402
 
 OUTPUT_DIR   = os.path.normpath(os.path.join(_HERE, "..", "output"))
-REPORT_DATE  = pd.to_datetime("2024-12-31")   # matches extract_params.REPORT_DATE / eve_calc_workflow
+REPORT_DATE  = pd.to_datetime("2026-06-30")   # matches extract_params.REPORT_DATE / eve_calc_workflow
 CURRENCY     = "PLN"
 EVE_FLOOR    = 0.0
 DISC_CURVE_MAP = {"PLN": "PLN_disc_curve", "EUR": "EUR_disc_curve", "USD": "USD_disc_curve"}

@@ -64,7 +64,7 @@ from eba_shock_curves import (                                                  
 )
 
 CURRENCY        = "PLN"
-REPORT_DATE     = pd.Timestamp("2024-12-31")     # matches extract_params.REPORT_DATE
+REPORT_DATE     = pd.Timestamp("2026-06-30")     # matches extract_params.REPORT_DATE
 SCENARIO_IDS    = ["base", "par_up", "par_dn", "steep", "flat", "sr_up", "sr_dn"]
 SHOCKED_SCENS   = SCENARIO_IDS[1:]
 TENORS_YEARS    = (3, 4, 5, 6, 7)

@@ -16,7 +16,7 @@ Output is written next to the notebook:
 
 This is a code-free companion to optimization_report.html (the existing
 full export, which still includes source code) -- see export_report.py in
-visual_rep/ for the identical pattern used on bank_report.ipynb.
+visual_rep/ for the identical pattern used on ALM_report.ipynb.
 
 Requirements
 ------------
