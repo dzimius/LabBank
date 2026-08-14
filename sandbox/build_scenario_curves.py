@@ -262,7 +262,11 @@ if __name__ == "__main__":
     print(f"  hyp_delta_eve_unit: {irrbb['hyp_delta_eve_unit'].shape}")
     print(f"  hyp_shock_ids:      {list(irrbb['hyp_shock_ids'])}")
 
-    out = {**sc_data, **irrbb}
+    # cohort_id lets sandbox/app.py detect a stale cache (product_params.npz
+    # regenerated with a different cohort set) and fall back to the linear
+    # approximation instead of a shape-mismatch crash — see ftp_store.py's
+    # load_ftp_rates() for the same convention.
+    out = {**sc_data, **irrbb, "cohort_id": params.cohort_id}
     np.savez(OUT_PATH, **out)
     mb = sum(v.nbytes for v in out.values() if hasattr(v, "nbytes")) / 1e6
-    print(f"\nSaved → {OUT_PATH}  (~{mb:.1f} MB)")
+    print(f"\nSaved -> {OUT_PATH}  (~{mb:.1f} MB)")

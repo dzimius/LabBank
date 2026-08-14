@@ -18,12 +18,15 @@ import streamlit as st
 # ── path setup ────────────────────────────────────────────────────────────────
 PROJECT_ROOT  = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 OPTPREP_CODE  = os.path.join(PROJECT_ROOT, "optimize_prep", "python_code")
+BSOPT_CODE    = os.path.join(PROJECT_ROOT, "bs_optimization", "python_code")
 
-if OPTPREP_CODE not in sys.path:
-    sys.path.insert(0, OPTPREP_CODE)
+for _p in (OPTPREP_CODE, BSOPT_CODE):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from bs_vector import BalanceSheetParams, CurveTensors, CohortRates  # noqa: E402
 from metrics   import compute_all_metrics, AllMetrics, reset_bias_cache  # noqa: E402
+from ep_fast   import build_ep_context, compute_ep_components  # noqa: E402
 
 # ── file paths ─────────────────────────────────────────────────────────────────
 PARAMS_PATH         = os.path.join(PROJECT_ROOT, "optimize_prep", "output", "product_params.npz")
@@ -55,6 +58,25 @@ def load_curves() -> CurveTensors:
 @st.cache_resource
 def load_cohort_rates() -> CohortRates:
     return CohortRates.load(PARAMS_PATH)
+
+
+@st.cache_resource
+def load_ep_context() -> tuple:
+    """Product<->cohort map + margin-over-FTP rate per cohort, needed for the
+    Economic Profit waterfall (Metrics tab). Ironically, these are exactly the
+    "optimizer-only fields... irrelevant here" load_params() warns about above
+    (vol_elasticity, acq_cost_rate, coc_rate, cet1_target, fee_unit_rate) --
+    the EP feature is what finally puts them to use."""
+    return build_ep_context(load_params())
+
+
+def compute_ep(amounts: np.ndarray, cr: CohortRates, mask_irs: bool = False) -> dict:
+    """EP decomposition at per-cohort `amounts` (PLN) -- thin wrapper around
+    ep_fast.compute_ep_components binding params/pm/margin_rate from the
+    cached loaders so callers only pass what actually varies (the weights)."""
+    params = load_params()
+    pm, margin_rate = load_ep_context()
+    return compute_ep_components(amounts, pm, params, cr, margin_rate, mask_irs=mask_irs)
 
 
 @st.cache_data
@@ -89,6 +111,8 @@ def load_scenario_curves() -> dict:
                 "hyp_eve_pv_factor", "hyp_delta_eve_unit", "hyp_shock_ids"):
         if key in data:
             result[key] = data[key].astype(float) if key != "hyp_shock_ids" else data[key].tolist()
+    if "cohort_id" in data:
+        result["cohort_id"] = data["cohort_id"]
     return result
 
 

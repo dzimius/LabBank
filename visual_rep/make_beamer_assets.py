@@ -22,7 +22,7 @@ from sqlalchemy import create_engine, text
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'beamer_assets')
 os.makedirs(OUT, exist_ok=True)
 
-REPORT_DATE = pd.to_datetime('2024-12-31')
+REPORT_DATE = pd.to_datetime('2026-06-30')
 CCY = 'PLN'
 RD  = REPORT_DATE
 
@@ -105,7 +105,7 @@ def save(fig, name):
     path = os.path.join(OUT, name)
     fig.savefig(path, dpi=150, bbox_inches='tight', facecolor='white')
     plt.close(fig)
-    print(f'  saved → {name}')
+    print(f'  saved -> {name}')
 
 def tkey(lbl):
     if lbl == '1D':   return 0
@@ -114,7 +114,7 @@ def tkey(lbl):
     if lbl.endswith('M'): return int(lbl[:-1])
     return 99_999
 
-# Coarse tenor grouping for gap ladders — same scheme as bank_report.ipynb's
+# Coarse tenor grouping for gap ladders — same scheme as ALM_report.ipynb's
 # IRS Book / IR Gap by Product Group sections (monthly to 6M, then annual).
 GAP_GRP_ORDER = ['1M', '2M', '3M', '4M', '5M', '6M', '6M–1Y',
                  '2Y', '3Y', '4Y', '5Y', '>5Y']
@@ -572,27 +572,24 @@ def make_repricing_gap():
            .reindex([g for g in GAP_GRP_ORDER if g in gap['grp'].unique()]))
     x = np.arange(len(grp))
 
-    fig, ax1 = plt.subplots(figsize=(12, 4.5))
+    net_irs = (grp['gap_cf'] + grp['gap_irs']) / 1e9
+
+    fig, ax = plt.subplots(figsize=(12, 4.5))
     fig.suptitle(f'Repricing Gap Ladder  |  {CCY}  |  {RD.date()}',
                  fontsize=12, fontweight='bold')
 
-    bar_col = [C_A if v >= 0 else C_L for v in grp['gap_cf']]
-    ax1.bar(x, grp['gap_cf'] / 1e9, color=bar_col, alpha=0.80, edgecolor='white')
-    legend_handles = [
-        mpatches.Patch(color=C_A, alpha=0.7, label='Asset-sensitive (+)'),
-        mpatches.Patch(color=C_L, alpha=0.7, label='Liability-sensitive (−)'),
-    ]
-    if grp['gap_irs'].abs().sum() > 0:
-        ax1.bar(x, grp['gap_irs'] / 1e9, color='#F57F17', alpha=0.65,
-                edgecolor='white', label='IRS adjustment')
-        legend_handles.append(mpatches.Patch(color='#F57F17', alpha=0.65, label='IRS adjustment'))
-    ax1.axhline(0, color='black', lw=0.8)
-    ax1.set_xticks(x)
-    ax1.set_xticklabels(grp.index, fontsize=9)
-    ax1.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f'{v:.1f}B'))
-    ax1.set_ylabel('B PLN')
-    ax1.set_title('Net Repricing Gap by Tenor Bucket  (positive = asset-sensitive)')
-    ax1.legend(handles=legend_handles, fontsize=8)
+    bar_col = [C_A if v >= 0 else C_L for v in net_irs]
+    ax.bar(x, net_irs, color=bar_col, alpha=0.80, edgecolor='white')
+    ax.axhline(0, color='black', lw=0.8)
+    ax.set_xticks(x)
+    ax.set_xticklabels(grp.index, fontsize=9)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f'{v:.1f}B'))
+    ax.set_ylabel('B PLN')
+    ax.set_title('Net Repricing Gap by Tenor Bucket, Balance Sheet + IRS  (positive = asset-sensitive)')
+    ax.legend(handles=[
+        mpatches.Patch(color=C_A, alpha=0.8, label='Asset-sensitive (+)'),
+        mpatches.Patch(color=C_L, alpha=0.8, label='Liability-sensitive (−)'),
+    ], fontsize=8, loc='upper right')
     fig.tight_layout()
     save(fig, 'repricing_gap.png')
 
@@ -636,13 +633,50 @@ def make_shock_curves():
     save(fig, 'shock_curves.png')
 
 
+def _scenario_bar(df, val_col, base_scenario_id, title, ylabel, filename):
+    """Single clean bar-per-scenario chart, shared shape for NII and EVE:
+    base bar shows its absolute level, every other bar shows its delta vs
+    base, colored by whether that delta helps (C_A) or hurts (C_L)."""
+    order = ['base', 'par_up', 'par_dn', 'steep', 'flat', 'sr_up', 'sr_dn']
+    df = df.copy()
+    df['_ord'] = df['scenario_id'].map(lambda s: order.index(s) if s in order else 99)
+    df = df.sort_values('_ord').reset_index(drop=True)
+    df['label'] = df['scenario_id'].map(SCEN_LABELS).fillna(df['scenario_id'])
+
+    base_val = float(df[df['scenario_id'] == base_scenario_id][val_col].sum())
+    x = np.arange(len(df))
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    fig.suptitle(title, fontsize=12, fontweight='bold')
+
+    bar_cols = [C_A if v >= base_val else C_L for v in df[val_col]]
+    ax.bar(x, df[val_col] / 1e6, color=bar_cols, alpha=0.85, edgecolor='white')
+    for i, (_, row) in enumerate(df.iterrows()):
+        v = row[val_col] / 1e6
+        d = v - base_val / 1e6
+        txt = f'{v:.0f}M' if row['scenario_id'] == base_scenario_id else f'{d:+.0f}M'
+        ax.text(i, v + 2, txt, ha='center', fontsize=8, fontweight='bold')
+    ax.axhline(0, color='black', lw=0.8)
+    ax.set_xticks(x)
+    ax.set_xticklabels(df['label'], fontsize=9)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f'{v:.0f}M'))
+    ax.set_ylabel(ylabel)
+    fig.tight_layout()
+    save(fig, filename)
+
+
 # ── 9. NII BY SCENARIO ────────────────────────────────────────────────────────
 def make_nii_scenarios():
+    # NII here is the EBA/RTS/2022/10 "constant balance sheet" figure: no new
+    # business over the 1-year horizon, capital maturing within it renews at
+    # the SAME notional under the shocked market rate (see nii_fast.py /
+    # irrbb_calc's nii_calc_objects.py) — this chart used to break each bar
+    # into locked-interest vs. renewal to show that mechanic, but the split
+    # added noise without changing the read, so it's now a single bar per
+    # scenario like make_eve_results() below.
     sc = rsql('''
         SELECT scenario_id,
-               SUM(nii_interest) AS nii_int,
-               SUM(nii_renewal)  AS nii_ren,
-               SUM(nii_total)    AS nii_tot
+               SUM(nii_total) AS nii_tot
         FROM irrbb.nii_results
         WHERE report_date=:rd AND currency=:ccy
         GROUP BY scenario_id
@@ -652,37 +686,9 @@ def make_nii_scenarios():
         print('  [nii_scenarios] no data — skipping')
         return
 
-    order = ['base', 'par_up', 'par_dn', 'steep', 'flat', 'sr_up', 'sr_dn']
-    sc['_ord'] = sc['scenario_id'].map(lambda s: order.index(s) if s in order else 99)
-    sc = sc.sort_values('_ord').reset_index(drop=True)
-    sc['label'] = sc['scenario_id'].map(SCEN_LABELS).fillna(sc['scenario_id'])
-
-    base_nii = float(sc[sc['scenario_id'] == 'base']['nii_tot'].sum())
-    x = np.arange(len(sc))
-
-    fig, ax = plt.subplots(figsize=(12, 5))
-    fig.suptitle(f'NII by Scenario (locked + renewal)  |  {CCY}  |  {RD.date()}',
-                 fontsize=12, fontweight='bold')
-
-    bar_cols = [C_A if v >= base_nii else C_L for v in sc['nii_tot']]
-    bars = ax.bar(x, sc['nii_int'] / 1e6, color=bar_cols, alpha=0.85,
-                  edgecolor='white', label='Locked interest')
-    ax.bar(x, sc['nii_ren'] / 1e6, bottom=sc['nii_int'] / 1e6,
-           color=bar_cols, alpha=0.38, hatch='///', edgecolor='grey',
-           linewidth=0.5, label='Renewal')
-    for i, (_, row) in enumerate(sc.iterrows()):
-        v = row['nii_tot'] / 1e6
-        d = v - base_nii / 1e6
-        txt = f'{v:.0f}M' if row['scenario_id'] == 'base' else f'{d:+.0f}M'
-        ax.text(i, v + 2, txt, ha='center', fontsize=8, fontweight='bold')
-    ax.axhline(0, color='black', lw=0.8)
-    ax.set_xticks(x)
-    ax.set_xticklabels(sc['label'], fontsize=9)
-    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f'{v:.0f}M'))
-    ax.set_ylabel('M PLN')
-    ax.legend(fontsize=8)
-    fig.tight_layout()
-    save(fig, 'nii_scenarios.png')
+    _scenario_bar(sc, 'nii_tot', 'base',
+                  f'NII by Scenario  |  {CCY}  |  {RD.date()}',
+                  'M PLN', 'nii_scenarios.png')
 
 
 # ── 10. EVE BY SCENARIO ───────────────────────────────────────────────────────
@@ -699,46 +705,9 @@ def make_eve_results():
         print('  [eve_results] no data — skipping')
         return
 
-    order = ['base', 'par_up', 'par_dn', 'steep', 'flat', 'sr_up', 'sr_dn']
-    ev['_ord'] = ev['scenario_id'].map(lambda s: order.index(s) if s in order else 99)
-    ev = ev.sort_values('_ord').reset_index(drop=True)
-    ev['label'] = ev['scenario_id'].map(SCEN_LABELS).fillna(ev['scenario_id'])
-    base_eve = float(ev[ev['scenario_id'] == 'base']['eve'].sum())
-
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5),
-                                    gridspec_kw={'width_ratios': [1.2, 1]})
-    fig.suptitle(f'Economic Value of Equity (EVE)  |  {CCY}  |  {RD.date()}',
-                 fontsize=12, fontweight='bold')
-
-    x = np.arange(len(ev))
-    cols = [C_A if v >= base_eve else C_L for v in ev['eve']]
-    ax1.bar(x, ev['eve'] / 1e9, color=cols, alpha=0.85, edgecolor='white')
-    for i, (_, row) in enumerate(ev.iterrows()):
-        ax1.text(i, row['eve'] / 1e9 + 0.03, f'{row["eve"]/1e9:.2f}B',
-                 ha='center', fontsize=8, fontweight='bold')
-    ax1.set_xticks(x)
-    ax1.set_xticklabels(ev['label'], rotation=25, ha='right', fontsize=8.5)
-    ax1.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f'{v:.1f}B'))
-    ax1.set_ylabel('B PLN')
-    ax1.set_title('EVE level by scenario (PV of all run-off CFs)')
-
-    ev_non_base = ev[ev['scenario_id'] != 'base'].copy()
-    ev_non_base['delta'] = ev_non_base['eve'] - base_eve
-    delta_cols = [C_A if v >= 0 else C_L for v in ev_non_base['delta']]
-    x2 = np.arange(len(ev_non_base))
-    ax2.barh(x2, ev_non_base['delta'] / 1e6, color=delta_cols, alpha=0.85, edgecolor='white')
-    for i, (_, row) in enumerate(ev_non_base.iterrows()):
-        v = row['delta'] / 1e6
-        ax2.text(v + (2 if v >= 0 else -2), i, f'{v:+.0f}M',
-                 va='center', ha='left' if v >= 0 else 'right', fontsize=8)
-    ax2.set_yticks(x2)
-    ax2.set_yticklabels(ev_non_base['label'], fontsize=8.5)
-    ax2.axvline(0, color='black', lw=0.8)
-    ax2.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f'{v:.0f}M'))
-    ax2.set_xlabel('ΔEVE (M PLN vs base)')
-    ax2.set_title('ΔEVE vs base scenario')
-    fig.tight_layout()
-    save(fig, 'eve_results.png')
+    _scenario_bar(ev, 'eve', 'base',
+                  f'Economic Value of Equity (EVE) by Scenario  |  {CCY}  |  {RD.date()}',
+                  'M PLN', 'eve_results.png')
 
 
 # ── 11. EBA SOT ───────────────────────────────────────────────────────────────
@@ -815,17 +784,24 @@ def make_lcr_nsfr():
         print('  [lcr_nsfr] no data — skipping')
         return
 
-    fig, axes = plt.subplots(1, 3, figsize=(13, 5))
-    fig.suptitle(f'Liquidity Coverage Ratio & Net Stable Funding Ratio  |  {RD.date()}',
-                 fontsize=12, fontweight='bold')
-
     tot = lq.sum(numeric_only=True)
     hqla_v    = tot.get('hqla', 0)
     outflow_v = tot.get('net_outflows_30d', 0)
     lcr_agg   = hqla_v / outflow_v * 100 if outflow_v > 0 else 0
-    asf_v     = tot.get('asf', 0)
-    rsf_v     = tot.get('rsf', 0)
-    nsfr_agg  = asf_v / rsf_v * 100 if rsf_v > 0 else 0
+
+    lq2 = lq.sort_values('currency').reset_index(drop=True)
+    lq2['lcr_pct']  = lq2['lcr'] * 100
+    lq2['nsfr_pct'] = (lq2['asf'] / lq2['rsf'].replace(0, np.nan) * 100).fillna(0)
+    single_ccy = len(lq2) == 1
+
+    # A one-currency book (this demo: PLN only) makes a "by currency" bar
+    # chart degenerate — a single bar with a whole axis/gridline/legend
+    # around it. Show the ratio as a big scorecard number instead; only
+    # fall back to a real table once there's more than one currency to
+    # actually compare.
+    fig, axes = plt.subplots(1, 2, figsize=(11, 5), gridspec_kw={'width_ratios': [1.1, 1]})
+    fig.suptitle(f'Liquidity Coverage Ratio & Net Stable Funding Ratio  |  {RD.date()}',
+                 fontsize=12, fontweight='bold')
 
     # Waterfall: HQLA vs net outflows → LCR
     comp_vals  = [hqla_v / 1e9, -outflow_v / 1e9]
@@ -842,34 +818,49 @@ def make_lcr_nsfr():
     axes[0].set_ylabel('B PLN')
     axes[0].set_title(f'LCR Components\n(aggregate: {lcr_agg:.0f}%)')
 
-    # LCR by currency
-    lq2 = lq.sort_values('currency')
-    if 'lcr' in lq2.columns:
-        lcr_pct = lq2['lcr'] * 100
-        bar_c   = [C_OK if v >= 100 else C_L for v in lcr_pct]
-        axes[1].bar(range(len(lq2)), lcr_pct, color=bar_c, alpha=0.85, edgecolor='white', width=0.5)
-        for i, v in enumerate(lcr_pct):
-            axes[1].text(i, v + 1, f'{v:.0f}%', ha='center', fontsize=9, fontweight='bold')
-        axes[1].axhline(100, color='black', lw=1.8, ls='--', label='Min 100%')
-        axes[1].set_xticks(range(len(lq2)))
-        axes[1].set_xticklabels(lq2['currency'], fontsize=10)
-        axes[1].set_ylabel('LCR (%)')
-        axes[1].set_title('LCR by Currency')
-        axes[1].legend(fontsize=8)
+    axes[1].axis('off')
 
-    # NSFR by currency
-    if 'asf' in lq2.columns and 'rsf' in lq2.columns:
-        nsfr_pct = (lq2['asf'] / lq2['rsf'].replace(0, np.nan) * 100).fillna(0)
-        bar_c3   = [C_OK if v >= 100 else C_L for v in nsfr_pct]
-        axes[2].bar(range(len(lq2)), nsfr_pct, color=bar_c3, alpha=0.85, edgecolor='white', width=0.5)
-        for i, v in enumerate(nsfr_pct):
-            axes[2].text(i, v + 1, f'{v:.0f}%', ha='center', fontsize=9, fontweight='bold')
-        axes[2].axhline(100, color='black', lw=1.8, ls='--', label='Min 100%')
-        axes[2].set_xticks(range(len(lq2)))
-        axes[2].set_xticklabels(lq2['currency'], fontsize=10)
-        axes[2].set_ylabel('NSFR (%)')
-        axes[2].set_title('NSFR by Currency')
-        axes[2].legend(fontsize=8)
+    if single_ccy:
+        ccy = lq2.loc[0, 'currency']
+        axes[1].set_title(f'Ratios — {ccy}')
+
+        def _scorecard(cy, label, pct):
+            ok = pct >= 100
+            col = C_OK if ok else C_L
+            axes[1].text(cy, 0.72, label, ha='center', va='center',
+                         fontsize=11, color='#555', transform=axes[1].transAxes)
+            axes[1].text(cy, 0.50, f'{pct:.0f}%', ha='center', va='center',
+                         fontsize=34, fontweight='bold', color=col,
+                         transform=axes[1].transAxes)
+            axes[1].text(cy, 0.30, f'{"PASS" if ok else "FAIL"}  ·  min 100%',
+                         ha='center', va='center', fontsize=10, fontweight='bold',
+                         color=col, transform=axes[1].transAxes)
+
+        _scorecard(0.27, 'LCR', float(lq2.loc[0, 'lcr_pct']))
+        _scorecard(0.73, 'NSFR', float(lq2.loc[0, 'nsfr_pct']))
+        axes[1].axvline(0.5, ymin=0.15, ymax=0.85, color='#ddd', lw=1)
+    else:
+        axes[1].set_title('LCR / NSFR by Currency')
+        rows = [[row['currency'],
+                 f"{row['lcr_pct']:.0f}%", 'PASS' if row['lcr_pct'] >= 100 else 'FAIL',
+                 f"{row['nsfr_pct']:.0f}%", 'PASS' if row['nsfr_pct'] >= 100 else 'FAIL']
+                for _, row in lq2.iterrows()]
+        tbl = axes[1].table(
+            cellText=rows,
+            colLabels=['CCY', 'LCR', '', 'NSFR', ''],
+            cellLoc='center', loc='center',
+        )
+        tbl.auto_set_font_size(False)
+        tbl.set_fontsize(11)
+        tbl.scale(1, 2.0)
+        for (r, c), cell in tbl.get_celld().items():
+            if r == 0:
+                cell.set_text_props(fontweight='bold')
+                cell.set_facecolor('#f0f0f0')
+            elif c in (2, 4):
+                status = rows[r - 1][c]
+                cell.set_text_props(fontweight='bold',
+                                    color=C_OK if status == 'PASS' else C_L)
 
     fig.tight_layout()
     save(fig, 'lcr_nsfr.png')

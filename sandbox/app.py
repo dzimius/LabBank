@@ -15,6 +15,7 @@ from baseline import (
     TOLERANCE,
     apply_irs_delta,
     build_bs_editor_df,
+    compute_ep,
     compute_weights,
     get_nmd_product_info,
     load_bs_structure,
@@ -75,6 +76,12 @@ def _build_stressed_nmd_for_gap(
 
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="LabBank Sandbox", page_icon="🏦", layout="wide")
+st.markdown("""
+<style>
+[data-testid="stMetricDelta"] { font-size: 1.35rem; }
+[data-testid="stMetricDelta"] svg { width: 1.35rem; height: 1.35rem; }
+</style>
+""", unsafe_allow_html=True)
 st.title("🏦 LabBank ALM Sandbox")
 
 # ── data loaders ──────────────────────────────────────────────────────────────
@@ -188,8 +195,8 @@ else:
     st.session_state["hyp_label"]   = None
 
 # ── tabs ──────────────────────────────────────────────────────────────────────
-tab_bs, tab_irs, tab_nmd, tab_metrics, tab_gap, tab_curves = st.tabs(
-    ["⚖️  Balance Sheet", "🔄  IRS Book", "🏦  NMD Stress", "📈  Metrics", "📊  Gap Analysis", "📉  Market Curves"]
+tab_bs, tab_irs, tab_nmd, tab_metrics, tab_profit, tab_gap, tab_curves = st.tabs(
+    ["⚖️  Balance Sheet", "🔄  IRS Book", "🏦  NMD Stress", "📈  ALM Metrics", "💰  Finance Metrics", "📊  Gap Analysis", "📉  Market Curves"]
 )
 
 
@@ -494,7 +501,16 @@ with tab_metrics:
         _mkt_mc = run_metrics(_w_c, params, curves, ta_val)
 
         _sc_ld  = load_scenario_curves()
-        _has_pc = "hyp_nii_unit_rate" in _sc_ld
+        # scenario_curves.npz is a per-cohort cache (see build_scenario_curves.py)
+        # that goes stale whenever product_params.npz is regenerated with a
+        # different cohort set (e.g. a new product added) -- fall back to the
+        # linear approximation below instead of a shape-mismatch crash.
+        _has_pc = (
+            "hyp_nii_unit_rate" in _sc_ld
+            and "cohort_id" in _sc_ld
+            and len(_sc_ld["cohort_id"]) == len(params.cohort_id)
+            and np.array_equal(_sc_ld["cohort_id"], params.cohort_id)
+        )
         _hyp_shape = st.session_state.get("hyp_shape_sel", "current")
         _hyp_level = st.session_state.get("hyp_level_sel", "")
         _hyp_key   = f"{_hyp_shape}_{_hyp_level}"
@@ -795,6 +811,75 @@ with tab_metrics:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# TAB 4b — FINANCE METRICS (Economic Profit)
+# ═════════════════════════════════════════════════════════════════════════════
+with tab_profit:
+
+    # ── Economic Profit ────────────────────────────────────────────────────────
+    st.subheader("Economic Profit")
+    st.caption(
+        "EP = Margin (over FTP) + Fee − Expected Loss − Cost of Capital − OpEx "
+        "− AcqCost — the same objective the balance-sheet optimizer "
+        "(`bs_optimization/`) maximises, computed here instantly for whatever "
+        "mix is on the Balance Sheet tab right now, baseline vs. modified, "
+        "including the IRS Book tab's swap edits."
+    )
+
+    _mod_new_pcts_ep = {(r["product_code"], r["bs_side"]): r["new_pct"]
+                        for _, r in combined_bs.iterrows()}
+    _mod_amounts_ep  = compute_weights(params, _mod_new_pcts_ep) * ta_val
+
+    ep_base = compute_ep(params.balance_arr.copy(), cohort_rates)
+    ep_mod  = compute_ep(_mod_amounts_ep, cohort_rates)
+
+    # ── IRS overlay: compute_weights() always leaves product '0000' (IRS) at
+    # its static npz baseline (see baseline.compute_weights), same as every
+    # other metric in this tab -- the user's IRS Book edits are layered on
+    # top analytically, same convention as _compute_adj()/apply_irs_delta()
+    # above. FTP=0 for the swap book (verified: margin_rate == nii_unit_rate
+    # for product '0000'), so its margin moves exactly with its NII -- add
+    # the same delta to both. Fee/EL/CoC/OpEx/AcqCost have no live formula
+    # for the swap book here (same limitation the NII/EVE overlay accepts).
+    _ana_irs_new_ep = compute_irs_metrics(st.session_state["_cur_irs"], curves)
+    _irs_nii_delta  = _ana_irs_new_ep["nii_base"] - ana_irs_baseline["nii_base"]
+    ep_mod["nii"]    += _irs_nii_delta
+    ep_mod["margin"] += _irs_nii_delta
+    ep_mod["ep"]     += _irs_nii_delta
+
+    def _ep_waterfall(title, comp, total_color):
+        cats = ["NII", "± FTP", "Margin", "+ Fee", "− EL", "− CoC", "− OpEx", "− AcqCost", "EP"]
+        vals = [comp["nii"], comp["ftp"], comp["margin"], comp["fee"],
+                -comp["el"], -comp["coc"], -comp["opex"], -comp["acq_cost"], comp["ep"]]
+        meas = ["relative", "relative", "total", "relative", "relative",
+                "relative", "relative", "relative", "total"]
+        fig = go.Figure(go.Waterfall(
+            x=cats, y=[v / 1e6 for v in vals], measure=meas,
+            text=[f"{v/1e6:+,.0f}M" for v in vals], textposition="outside",
+            increasing=dict(marker_color="#2E7D32"), decreasing=dict(marker_color="crimson"),
+            totals=dict(marker_color=total_color),
+            connector=dict(line=dict(color="lightgrey")),
+        ))
+        fig.update_layout(title=title, height=380, showlegend=False,
+                          margin=dict(t=50, b=5, l=5, r=5), yaxis_title="M PLN")
+        return fig
+
+    ep1, ep2 = st.columns(2)
+    ep1.plotly_chart(_ep_waterfall(f"Baseline — EP {ep_base['ep']/1e6:+,.0f}M", ep_base, "#4C72B0"),
+                     use_container_width=True)
+    ep2.plotly_chart(_ep_waterfall(f"Modified — EP {ep_mod['ep']/1e6:+,.0f}M", ep_mod, "#DD8452"),
+                     use_container_width=True)
+
+    st.metric("Δ Economic Profit (Modified − Baseline)",
+             f"{(ep_mod['ep'] - ep_base['ep'])/1e6:+,.1f} M PLN")
+    st.caption(
+        "AcqCost is charged only on balance growth above the baseline weight "
+        "per product (zero if Modified matches Baseline) — moving weight "
+        "*into* a product shows up here even though the app's other metrics "
+        "don't have an acquisition-cost concept."
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # TAB 4 — GAP ANALYSIS
 # ═════════════════════════════════════════════════════════════════════════════
 with tab_gap:
@@ -913,7 +998,7 @@ with tab_gap:
             fig.add_annotation(
                 x=b, y=_p2_delta_y, xref="x", yref="y",
                 text=f"{arrow}{d:+.0f}", showarrow=False,
-                font=dict(size=9, color=color),
+                font=dict(size=15, color=color),
             )
 
     def _net_gap_bar(title: str, values: list, deltas: list) -> go.Figure:
@@ -1202,71 +1287,11 @@ with tab_nmd:
         st.session_state["nmd_delta_eve_base"] = _total_deve_base
         st.session_state["nmd_delta_eve_sh"]   = _total_deve_sh
 
-        # ── per-product impact display ────────────────────────────────────────
-        # Show the delta for the currently selected product (not the total)
-        _sel_result = compute_nmd_delta(
-            balance=balance, rate=rate, sign=sign,
-            pct_old=pct_base, pct_new=pct_stressed, cum_yf=cum_yf,
-            curves=curves, currency=currency,
-            shocked_scenario_ids=shocked_scens,
-            horizon_yf=1.0,
-        )
-        dnii      = _sel_result["delta_nii"]
-        deve_base = _sel_result["delta_eve_base"]
-        deve_sh   = _sel_result["delta_eve"]
-
-        st.subheader(f"Impact — {pc_sel} {NMD_PRODUCTS[pc_sel]}")
-        st.info(
-            f"Total NMD impact across all products propagated to **Metrics** and **Gap Analysis** tabs. "
-            f"ΔNII total: **{_total_dnii/1e6:+,.2f} M PLN** | "
-            f"ΔEVE base total: **{_total_deve_base/1e6:+,.2f} M PLN**"
-        )
-
-        k1, k2 = st.columns(2)
-        k1.metric(
-            f"ΔNII — {pc_sel} (1Y horizon)",
-            f"{dnii/1e6:+,.2f} M PLN",
-            delta=f"{dnii/1e6:+,.2f}",
-            delta_color="normal",
-        )
-        k2.metric(
-            f"ΔEVE — {pc_sel} (base)",
-            f"{deve_base/1e6:+,.2f} M PLN",
-            delta=f"{deve_base/1e6:+,.2f}",
-            delta_color="normal",
-        )
-
-        t1_cap = st.session_state.get("t1_capital", 1_000_000_000.0)
-        st.markdown("**ΔEVE by Scenario — selected product**")
-        scen_rows = []
-        for scen in shocked_scens:
-            v = deve_sh.get(scen, 0.0)
-            sot_pp = v / t1_cap * 100.0
-            scen_rows.append({
-                "Scenario":       scen,
-                "ΔEVE (M PLN)":   f"{v/1e6:+,.2f}",
-                "ΔEVE / T1 (pp)": f"{sot_pp:+.2f}",
-                "SOT flag":       "✓" if sot_pp >= -15.0 else "✗",
-            })
-        st.dataframe(pd.DataFrame(scen_rows), hide_index=True, use_container_width=True)
-
-        _scen_vals = [deve_sh.get(s, 0.0) / 1e6 for s in shocked_scens]
-        fig_eve = go.Figure([go.Bar(
-            x=shocked_scens, y=_scen_vals,
-            marker_color=["crimson" if v < 0 else "#388E3C" for v in _scen_vals],
-            text=[f"{v:+.2f}" for v in _scen_vals], textposition="outside",
-        )])
-        fig_eve.add_hline(y=0, line_dash="dot", line_color="grey", line_width=1)
-        fig_eve.update_layout(
-            title=f"ΔEVE by Scenario — {pc_sel} (M PLN)", height=280, yaxis_title="M PLN",
-            margin=dict(t=45, b=5, l=5, r=5),
-        )
-        st.plotly_chart(fig_eve, use_container_width=True)
-
         st.caption(
-            f"Product shown: **{pc_sel} — {NMD_PRODUCTS[pc_sel]}** | "
+            f"Model shown: **{pc_sel} — {NMD_PRODUCTS[pc_sel]}** | "
             f"Balance: {balance/1e6:,.0f} M PLN | Rate: {rate*100:.4f}% | "
-            f"Tenors: {K}"
+            f"Tenors: {K} | "
+            "ΔNII / ΔEVE impact is on the **Metrics** and **Gap Analysis** tabs."
         )
 
 
@@ -1276,8 +1301,12 @@ with tab_nmd:
 with tab_curves:
     st.subheader("Market Curves")
     st.caption(
-        "Forward rate curves and zero-coupon rates derived from the pre-computed "
-        "curve tensors.  Base scenario = current market; shock scenarios = IRRBB standard shocks."
+        "Zero-coupon (spot) rates derived from the pre-computed curve tensors. "
+        "Base scenario = current market; shock scenarios = IRRBB standard shocks. "
+        "PLN only — EUR/USD carry no real market data in this demo book, and the "
+        "forward-rate view is dropped in favour of the smoother zero curve (a forward "
+        "curve is a derivative-like quantity and reads as a step function even off a "
+        "smooth zero curve)."
     )
 
     _n_m    = curves.n_months
@@ -1285,59 +1314,45 @@ with tab_curves:
     _yrs    = _months / 12.0            # tenor in years (x-axis)
 
     _all_scens   = curves.scenario_ids.tolist()
-    _all_ccys    = curves.currencies.tolist()
     _base_scen   = _all_scens[0]
     _shock_scens = _all_scens[1:]
     _clrs        = px.colors.qualitative.Plotly
 
-    # ── Plot 1: Base curve — all currencies ──────────────────────────────────
-    st.markdown("**Base (current) market curve**")
-    st.caption(
-        "Solid line = 1-month annualised forward rate.  "
-        "Dashed line = zero-coupon (spot) rate derived from discount factors."
-    )
+    _ccy_sel = "PLN"
+    _ci_sel  = curves.currency_index(_ccy_sel)
+
+    def _zero_pct(scen_idx: int) -> np.ndarray:
+        _df = np.maximum(curves.disc_factors[scen_idx, _ci_sel, :_n_m], 1e-10)
+        return -np.log(_df) / _yrs * 100
+
+    # ── Plot 1: Base zero curve ───────────────────────────────────────────────
+    st.markdown("**Base (current) market curve — PLN**")
 
     fig_base_curve = go.Figure()
-    for _ci, _ccy in enumerate(_all_ccys):
-        _fwd  = curves.fwd_rates[0, _ci, :_n_m] * 100
-        _df   = np.maximum(curves.disc_factors[0, _ci, :_n_m], 1e-10)
-        _zero = -np.log(_df) / _yrs * 100
-        _c = _clrs[_ci % len(_clrs)]
-        fig_base_curve.add_trace(go.Scatter(
-            x=_yrs, y=_fwd,
-            name=f"{_ccy} forward",
-            line=dict(color=_c, width=2),
-        ))
-        fig_base_curve.add_trace(go.Scatter(
-            x=_yrs, y=_zero,
-            name=f"{_ccy} zero",
-            line=dict(color=_c, width=1.5, dash="dash"),
-        ))
-
+    fig_base_curve.add_trace(go.Scatter(
+        x=_yrs, y=_zero_pct(0),
+        name="PLN zero",
+        line=dict(color=_clrs[0], width=2),
+    ))
     fig_base_curve.update_layout(
-        title=f"Forward & Zero Rates — {_base_scen}",
+        title=f"Zero (Spot) Rate — {_base_scen}",
         height=400,
         xaxis=dict(title="Tenor (years)"),
         yaxis=dict(title="Rate (%)", ticksuffix="%"),
-        legend=dict(orientation="h", y=1.12, font_size=11),
         margin=dict(t=60, b=5, l=5, r=5),
     )
     st.plotly_chart(fig_base_curve, use_container_width=True)
 
     st.divider()
 
-    # ── Plot 2: Scenario curves ───────────────────────────────────────────────
-    st.markdown("**IRRBB scenario forward curves**")
-
-    _ccy_sel = st.selectbox("Currency", _all_ccys, index=0, key="mc_ccy_sel")
-    _ci_sel  = curves.currency_index(_ccy_sel)
+    # ── Plot 2: Scenario zero curves ──────────────────────────────────────────
+    st.markdown("**IRRBB scenario zero curves — PLN**")
 
     fig_scen_curves = go.Figure()
     for _si, _scen in enumerate(_all_scens):
-        _fwd_s   = curves.fwd_rates[_si, _ci_sel, :_n_m] * 100
         _is_base = (_si == 0)
         fig_scen_curves.add_trace(go.Scatter(
-            x=_yrs, y=_fwd_s,
+            x=_yrs, y=_zero_pct(_si),
             name=_scen,
             line=dict(
                 color=_clrs[_si % len(_clrs)],
@@ -1347,7 +1362,7 @@ with tab_curves:
         ))
 
     fig_scen_curves.update_layout(
-        title=f"Forward Rates by Scenario — {_ccy_sel}",
+        title=f"Zero Rate by Scenario — {_ccy_sel}",
         height=420,
         xaxis=dict(title="Tenor (years)"),
         yaxis=dict(title="Rate (%)", ticksuffix="%"),
@@ -1383,7 +1398,7 @@ with tab_curves:
     st.caption(
         f"Report date: **{curves.report_date}** | "
         f"Scenarios: {len(_all_scens)}  ({_base_scen} + {len(_shock_scens)} shocks) | "
-        f"Currencies: {', '.join(_all_ccys)} | "
+        f"Currency: PLN | "
         f"Horizon: {_n_m} months ({_n_m // 12} years)"
     )
 

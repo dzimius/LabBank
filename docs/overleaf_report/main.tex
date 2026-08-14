@@ -14,12 +14,9 @@
 % Remaining TODOs before this is publish-ready:
 %   1. Replace the two \sqlplaceholder boxes in Section 7 ("See It Yourself")
 %      with real SSMS/Azure Data Studio screenshots.
-%   2. Replace the two \figplaceholder "before/after" boxes in Section 3
-%      ("Change Something, See What Happens") with real before/after
-%      screenshots of the Metrics tab.
-%   3. Fill in the LinkedIn / email placeholders — title page + "Contact"
+%   2. Fill in the LinkedIn / email placeholders — title page + "Contact"
 %      section at the end (search REPLACE_WITH_).
-%   4. Update \reportdate below if you want something other than today's date.
+%   3. Update \reportdate below if you want something other than today's date.
 % ─────────────────────────────────────────────────────────────────────────────
 \documentclass[11pt,a4paper]{article}
 
@@ -128,16 +125,16 @@
 \vspace*{0.6cm}
 {\color{labdark}\fontsize{40}{44}\selectfont\bfseries LabBank}\\[8pt]
 {\color{labgrey}\Large A Laboratory Banking ALM System}\\[22pt]
-{\large\color{black} A digital twin of a bank's balance sheet and transaction ledger ---\\[2pt]
+{\large\color{black} A digital twin of a bank's balance sheet and cash flow data ---\\[2pt]
  built to be explored, stress-tested, and rebuilt with your own numbers}\\[22pt]
 
-\imgfull[0.94\textwidth]{pipeline.png}
+\imgfull[0.94\textwidth]{pipeline_new.png}
 
-\vspace{10pt}
+\vspace{2pt}
 {\small\itshape\color{labgrey}The pipeline that builds it (above) and the app you explore it with (below).}
 
-\vspace{8pt}
-\imgfull[0.56\textwidth]{labbank_balance_sheet_annotated.png}
+\vspace{3pt}
+\imgfull[0.9\textwidth]{streamlit_metrics_new.png}
 
 \vspace{16pt}
 {\small\color{labgrey}
@@ -161,7 +158,7 @@ Python \;\textbullet\; SQL Server \;\textbullet\; Dagster \;\textbullet\; Stream
 % =============================================================================
 
 LabBank is an educational, hands-on ALM system: a \textbf{digital twin} of a
-bank's balance sheet and transaction ledger, built so you \textbf{learn
+bank's balance sheet and cash flow data, built so you \textbf{learn
 interest rate risk and liquidity risk by testing them}, not by reading about
 them. Build your own balance sheet, edit a product's rate or a deposit's decay
 assumption, and watch the change ripple all the way through to NII, EVE, LCR,
@@ -169,14 +166,21 @@ and NSFR --- the same regulatory metrics a real bank reports. Nothing here is a
 static example: every product, rate, and cash-flow row is real data you can
 inspect, edit, and regenerate.
 
-\textbf{Why that's hard to get right.} A bank's balance sheet produces
-thousands of cash flows every day, and rates reset, balances prepay, deposits
-decay, and shock scenarios apply simultaneously across every position in every
-currency. Most systems hide that complexity behind aggregated dashboards, so
-the moment a number looks wrong, nobody can point at the row that produced it,
-and nobody can safely ask ``what if'' without a change-request ticket. LabBank
-makes the opposite choice on both counts: every metric is something you can
-test yourself, and every number is something you can trace yourself.
+\textbf{Built with tools you already know.}
+LabBank is written in \textbf{standard SQL} and \textbf{Python}, making every calculation
+\textbf{transparent}, \textbf{inspectable}, and easy to modify. Rather than treating the system
+as a black box, users can explore the implementation, change assumptions, extend the models, and
+immediately see how those changes affect the results. This provides a practical environment for
+learning and experimentation, while also reflecting an important advantage of using widely adopted
+technologies in banking software. Students, analysts, and engineers can read the code, trace how
+every metric is calculated, and contribute improvements without learning a proprietary language
+or platform. The entire codebase is \textbf{open source}, allowing it to be explored, extended,
+and improved from a local repository using modern AI coding assistants such as
+\textbf{ChatGPT} or \textbf{Claude Code}. As balance sheets grow and the analytical models become
+more sophisticated, the same architecture can scale naturally---from running locally on a laptop
+to \textbf{parallel execution} across multiple CPU cores or \textbf{cloud infrastructure}. This
+makes it straightforward to analyse larger portfolios, experiment with new modelling approaches,
+and increase computational performance without changing the core analytical workflow.
 
 \begin{pitchbox}[Core principle]
 Every number in every report traces back to a \textbf{single row} in a
@@ -194,7 +198,7 @@ different aggregations of the \textit{same} underlying cash-flow schedule.
         Section~\ref{sec:labbankapp}) where
         editing the balance sheet mix, the IRS book, or an NMD decay curve
         immediately recomputes NII/EVE/SOT/LCR/NSFR --- so you can see, not
-        just read, how a given ALM lever moves the numbers.
+        just read, how a given ALM action moves the numbers.
   \item How NII, EVE, LCR, and NSFR are all derived from the same cash-flow
         rows, just aggregated differently --- so there is no reconciliation gap
         between risk views.
@@ -222,20 +226,25 @@ has a direct SQL or Python equivalent you can query yourself.
 \label{sec:architecture}
 % =============================================================================
 
+The platform combines user-editable Excel inputs, allowing rapid changes to
+model assumptions, with Python calculation engines, SQL Server storage, and
+reporting in a single reproducible workflow.
+
 Four layers, one integration bus:
 \[
 \text{Excel inputs} \;\rightarrow\; \text{Python modules (Dagster-orchestrated)}
 \;\rightarrow\; \text{SQL Server (9 schemas)} \;\rightarrow\; \text{Reports}
 \]
 
-\imgfull[\textwidth]{pipeline.png}
+\imgfull[\textwidth]{pipeline_new.png}
 
-SQL Server is the single integration bus. Every stage reads from tables the
-previous stage wrote, instead of passing hidden in-memory state --- which means
-every stage can be re-run independently, and every intermediate result can be
-audited by querying the database directly. Dagster sits on top of all four
-processing stages (balance-sheet generation, SQL storage, IRRBB/liquidity
-calculation, and reporting) and enforces the order they run in.
+SQL Server acts as the central data hub. Each processing stage reads from
+tables written by the previous stage, rather than relying on hidden
+in-memory state. This allows every stage to be re-run independently, while
+every intermediate result remains fully auditable through direct database
+queries. Dagster orchestrates all four processing stages (balance-sheet
+generation, SQL storage, IRRBB/liquidity calculations, and reporting),
+ensuring they execute in the correct order.
 
 \subsection{Pipeline, step by step}
 \begin{enumerate}[itemsep=2pt]
@@ -285,7 +294,7 @@ tab reacts to whatever you set here.
 
 \imgfull[0.92\textwidth]{labbank_balance_sheet_annotated.png}
 
-\subsection{The other five tabs}
+\subsection{The other six tabs}
 \begin{itemize}[itemsep=2pt]
   \item \textbf{IRS Book} --- add/remove swap trades, change notional or fixed
         rate, toggle \texttt{pay\_fixed} per swap; a leg summary compares
@@ -293,10 +302,14 @@ tab reacts to whatever you set here.
   \item \textbf{NMD Stress} --- pick a non-maturity deposit product and edit its
         decay profile directly; a chart compares your stressed profile against
         the baseline.
-  \item \textbf{Metrics} --- the results dashboard: NII, EVE, LCR, NSFR baseline
-        vs.\ modified, the EBA Supervisory Outlier Test with pass/fail called
-        out explicitly, per-scenario $\Delta$NII/$\Delta$EVE charts, and an IRS
-        contribution breakdown.
+  \item \textbf{ALM Metrics} --- the regulatory dashboard: NII, EVE, LCR, NSFR
+        baseline vs.\ modified, the EBA Supervisory Outlier Test with pass/fail
+        called out explicitly, per-scenario $\Delta$NII/$\Delta$EVE charts, and
+        an IRS contribution breakdown.
+  \item \textbf{Finance Metrics} --- the Economic Profit waterfall: Margin
+        (over FTP), Fee, Expected Loss, Cost of Capital, OpEx, and AcqCost,
+        baseline vs.\ modified, the same objective the balance-sheet optimizer
+        (\texttt{bs\_optimization/}) maximises.
   \item \textbf{Gap Analysis} --- repricing-gap panels (with and without the IRS
         overlay) and the 12-month behavioural liquidity gap.
   \item \textbf{Market Curves} --- base and shocked curves per currency, plus a
@@ -311,7 +324,7 @@ wait on.
 \begin{pitchbox}[A worked example]
 Open \textbf{Balance Sheet}, shift 10 percentage points of asset mix from
 fixed-rate mortgages into floating-rate mortgages, keeping both sides at
-100\%. Switch to \textbf{Metrics}: the repricing gap becomes more
+100\%. Switch to \textbf{ALM Metrics}: the repricing gap becomes more
 asset-sensitive, so a parallel-up shock now helps NII \textit{more} than
 before, and a parallel-down shock hurts it more --- while $\Delta$EVE moves the
 other way, since floating-rate assets carry far less duration risk than the
@@ -322,24 +335,25 @@ formula you read.
 \end{pitchbox}
 
 \begin{minipage}[t]{0.48\textwidth}
-\begin{figplaceholderbox}[6cm]
-  \normalfont\color{labgrey}
-  {\bfseries Metrics tab --- baseline}\\[4pt]
-  \itshape [ screenshot before the edit ]
-\end{figplaceholderbox}
-\end{minipage}\hfill
+    \centering
+    \includegraphics[width=\linewidth]{images/metrics_only.png}
+    
+    \normalfont\color{labgrey}
+    {\bfseries ALM Metrics tab --- baseline}
+\end{minipage}
+\hfill
 \begin{minipage}[t]{0.48\textwidth}
-\begin{figplaceholderbox}[6cm]
-  \normalfont\color{labgrey}
-  {\bfseries Metrics tab --- after shifting 10pp fixed $\rightarrow$ floating}\\[4pt]
-  \itshape [ screenshot after the edit ]
-\end{figplaceholderbox}
+    \centering
+    \includegraphics[width=\linewidth]{images/net_gap_change_streamlit.png}
+
+    \normalfont\color{labgrey}
+    {\bfseries Gap Analysis tab --- after shifting 10pp fixed $\rightarrow$ floating}
 \end{minipage}
 
 \vspace{6pt}
 \small\color{labgrey}\textit{Any lever works for this comparison --- NMD decay
 speed, swap notional, the balance sheet mix itself. The point is that changing
-one input and re-reading the Metrics tab \textit{is} the analysis; there's no
+one input and re-reading the ALM Metrics tab \textit{is} the analysis; there's no
 separate model to reconcile it against.}
 \normalsize\color{black}
 
@@ -428,28 +442,36 @@ schedule:
 
 \begin{center}
 \ttfamily\small
-SELECT TOP 20 * FROM dbo.transactions WHERE product\_code = '1000';\\
-SELECT * FROM cf.products WHERE schedule\_id = (\\
-\ \ SELECT schedule\_id FROM schemat.loans WHERE transaction\_id = 'REPLACE\_ME'\\
-) ORDER BY cf\_start\_dt;
+SELECT TOP 20 * FROM schemat.loans WHERE product\_code = '1000';\\
+
+\vspace{0.6cm}
+
+ SELECT schedule\_id, product\_code, currency, rate\_index, fixing\_dt, cf\_start\_dt, cf\_end\_dt, cf\_yf, d\_f, margin,\\
+client\_rt, con\_outstanding, con\_capital\_pmt, con\_interest\_pmt, con\_total\_pmt,\\
+beh\_outstanding, beh\_capital\_pmt, beh\_interest\_pmt, beh\_total\_pmt\\
+FROM cf.products WHERE product\_code = '1000' AND schedule\_id = (\\
+\hspace*{1em}SELECT schedule\_id FROM schemat.loans WHERE transaction\_id = '1100010000001'\\
+) ORDER BY cf\_start\_dt;\\
 \end{center}
 
-\begin{sqlplaceholder}[7.5cm]{Screenshot 1 --- contract $\rightarrow$ cash-flow schedule}
-\normalfont\itshape\color{labgrey}
-[ paste your SQL Server Management Studio result grid here ---\\
- one contract row, then its full \texttt{cf.products} schedule ]
+\begin{sqlplaceholder}[5.8cm]
+{Screenshot 1 --- contract $\rightarrow$ cash-flow schedule}
+
+\vspace{0.1cm}
+\centering
+\includegraphics[width=\linewidth]{images/sql_cf.png}
+
 \end{sqlplaceholder}
 
 \subsection{Final regulatory-style output}
 \begin{center}
 \ttfamily\small
-SELECT * FROM results.irrbb\_report ORDER BY currency, scenario;\\
-SELECT * FROM results.lcr\_nsfr ORDER BY currency;
+SELECT * FROM results.irrbb\_report;
 \end{center}
 
 \begin{sqlplaceholder}[7.5cm]{Screenshot 2 --- Supervisory Outlier Test \& LCR/NSFR}
 \normalfont\itshape\color{labgrey}
-[ paste your SQL Server Management Studio result grid here ---\\
+\includegraphics[width=\linewidth]{images/sql_irrbb_rep.png}
  \texttt{results.irrbb\_report} and/or \texttt{results.lcr\_nsfr} ]
 \end{sqlplaceholder}
 
@@ -467,50 +489,58 @@ The demo book below is 10.0 B PLN on each side, product-by-product:
 
 \begin{center}
 \small
-\begin{minipage}[t]{0.47\textwidth}
+\begin{minipage}[t]{0.5\textwidth}
 \centering
 \textbf{Assets} \quad(10.00 B PLN)\\[4pt]
-\begin{tabular}{@{}lrr@{}}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{4.3cm}rr@{}}
 \toprule
-Product & B PLN & \% \\
+Product & B PLN & Rate \\
 \midrule
-Mortgage (floating)          & 2.80  & 28.0\% \\
-Consumer loan (floating)     & 1.80  & 18.0\% \\
-Bond / securities (floating) & 1.60  & 16.0\% \\
-Bond / securities (fixed)    & 1.20  & 12.0\% \\
-Mortgage (fixed)             & 1.00  & 10.0\% \\
-SME investment loan (floating) & 0.60 & 6.0\% \\
-Consumer loan (fixed)        & 0.60  & 6.0\% \\
-Cash / central bank reserves & 0.20  & 2.0\% \\
-Interbank placement          & 0.20  & 2.0\% \\
+Mortgage (floating)            & 2.80  & 5.90\% \\
+Consumer loan (floating)       & 1.80  & 13.91\% \\
+Bond / securities (fixed)      & 1.40  & 4.62\% \\
+Bond / securities (floating)   & 1.20  & 3.90\% \\
+Mortgage (fixed)                & 1.00  & 6.52\% \\
+Consumer loan (fixed)          & 0.60  & 11.46\% \\
+SME investment loan (floating) & 0.60  & 5.38\% \\
+T-bill                         & 0.20  & 3.74\% \\
+Cash / central bank reserves   & 0.20  & 0.00\% \\
+Interbank placement            & 0.20  & 3.78\% \\
 \midrule
-\textbf{Total assets} & \textbf{10.00} & \textbf{100.0\%} \\
+\textbf{Total assets} & \textbf{10.00} & \\
 \bottomrule
 \end{tabular}
 \end{minipage}\hfill
 \begin{minipage}[t]{0.47\textwidth}
 \centering
 \textbf{Liabilities + Equity} \quad(10.00 B PLN)\\[4pt]
-\begin{tabular}{@{}lrr@{}}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{4.0cm}rr@{}}
 \toprule
-Product & B PLN & \% \\
+Product & B PLN & Rate \\
 \midrule
-Current account & 3.80 & 38.0\% \\
-Term deposit     & 2.20 & 22.0\% \\
-Savings account  & 1.60 & 16.0\% \\
-Issued bond      & 1.20 & 12.0\% \\
-Tier~1 equity    & 1.20 & 12.0\% \\
+Current account (retail) & 3.40 & 0.00\% \\
+Term deposit (retail)    & 1.80 & 3.39\% \\
+Savings account          & 1.60 & 2.38\% \\
+Issued bond               & 1.20 & 3.91\% \\
+Interbank deposit        & 0.40 & 3.78\% \\
+Current account (SME)    & 0.40 & 3.43\% \\
 \midrule
-\textbf{Total L + E} & \textbf{10.00} & \textbf{100.0\%} \\
+Retained earnings (equity)  & 0.40 & --- \\
+Common shares (equity)      & 0.40 & --- \\
+Risk reserves (equity)      & 0.40 & --- \\
+\midrule
+\textbf{Total L + E} & \textbf{10.00} & \\
 \bottomrule
 \end{tabular}
 \end{minipage}
 \end{center}
+\small\color{labgrey}\textit{All positions in PLN. \% of side omitted --- read directly off the B PLN column against the 10.00 B total. Rate = weighted-average effective client rate (assets: earned; liabilities: paid), read directly from the same cash-flow rows every metric in this report is computed from.}
+\normalsize\color{black}
 
 Every product is a row of parameters in an Excel sheet --- rate type, tenor,
 amortisation, RWA weight, PD/LGD, LCR outflow rate, ASF/RSF weight. Adding a
-new product family (credit cards, T-bills, a corporate working-capital split)
-means adding a row, not writing code.
+new product family (credit cards, a corporate working-capital split) means
+adding a row, not writing code.
 
 \textbf{Rate types:} \textbf{F}ixed (locked) \;|\; \textbf{V}ariable (index +
 spread) \;|\; \textbf{A}dministrative (bank-set, floored at 0\%).
@@ -586,9 +616,12 @@ LabBank can show ``balance sheet only'' vs. ``balance sheet + IRS'' side by side
 
 \imgfull{repricing_gap.png}
 
-The net gap per tenor bucket --- positive means more assets than liabilities
-repricing there, i.e.\ asset-sensitive. The LabBank app's Gap Analysis tab
-renders this same view interactively, alongside its running cumulative total.
+Bars above zero are assets repricing in that bucket, below zero are
+liabilities, coloured by product group (loans, securities, term deposits,
+non-maturity deposits) with the IRS overlay shown separately in green --- so
+the net gap in each bucket, and \textit{which products drive it}, are both
+visible in the same chart. The LabBank app's Gap Analysis tab renders the
+net-gap view interactively, alongside its running cumulative total.
 
 % =============================================================================
 \section{IRRBB --- Interest Rate Risk in the Banking Book}
@@ -601,24 +634,20 @@ Six EBA/RTS/2022/10 supervisory scenarios (parallel up/down, steepener,
 flattener, short-rate up/down) plus an ``own'' scenario, applied per currency
 curve, floored at 0\% per tenor.
 
-\subsection{NII --- two components per scenario}
-\begin{itemize}[itemsep=2pt]
-  \item \textbf{Locked interest} --- income from cash flows already
-        contracted. Immune to the shock for fixed-rate products; re-prices at
-        the shocked curve (stable-margin transform) for floating-rate ones.
-  \item \textbf{Renewal} --- income from capital maturing within the 1-year
-        horizon, reinvested at the \textit{shocked market rate} --- this
-        applies even to fixed-rate products, since a maturing fixed deposit or
-        loan renews at whatever the new environment offers.
-\end{itemize}
+\subsection{NII --- one year, constant balance sheet}
+Full-year NII under each scenario's shocked curve, computed on the standard
+EBA/RTS/2022/10 \textbf{constant balance sheet} assumption: no new business
+over the 1-year horizon, and capital maturing within it renews at the
+\textit{same notional} under the shocked market rate --- this applies even to
+fixed-rate products, since a maturing fixed deposit or loan renews at whatever
+the new environment offers.
 
 \imgfull{nii_scenarios.png}
 
-Each bar is the full-year NII under that scenario's shocked curve; the solid
-segment is locked interest, the hatched segment is renewal. Reading the whole
-ladder at once shows what a single base-scenario number cannot: which shocks
-help NII (parallel-up, steepener) and which hurt it (parallel-down, flattener),
-and by how much relative to base.
+Each bar is the full-year NII under that scenario's shocked curve. Reading the
+whole ladder at once shows what a single base-scenario number cannot: which
+shocks help NII (parallel-up, steepener) and which hurt it (parallel-down,
+flattener), and by how much relative to base.
 
 \subsection{EVE --- present value under run-off}
 \[
@@ -652,19 +681,21 @@ NII SOT breaches at $\Delta\mathrm{NII}^{\mathrm{reg}}/T_1 < -5\%$.
 \toprule
 Scenario & $\Delta$EVE$_{\mathrm{reg}}$ (M PLN) & $/T_1$ & $\Delta$NII$_{\mathrm{reg}}$ (M PLN) & $/T_1$ & Breach \\
 \midrule
-Parallel +250 bps  & $-$85.4 & $-$7.11\% & $+$21.3 & $+$1.78\% & --- \\
-Parallel $-$250 bps & $+$46.5 & $+$3.87\% & $-$42.5 & $-$3.54\% & --- \\
-Steepener           & $-$15.9 & $-$1.32\% & $+$16.5 & $+$1.37\% & --- \\
-Flattener           & $+$3.8  & $+$0.32\% & $-$29.9 & $-$2.49\% & --- \\
-Short rate +350 bps & $-$29.2 & $-$2.43\% & $-$9.6  & $-$0.80\% & --- \\
-Short rate $-$350 bps & $+$15.3 & $+$1.27\% & $+$4.8 & $+$0.40\% & --- \\
-Own                 & $+$18.3 & $+$1.53\% & $-$17.0 & $-$1.42\% & --- \\
+Parallel +250 bps  & $-$83.5 & $-$6.96\% & $+$23.0 & $+$1.92\% & --- \\
+Parallel $-$250 bps & $+$45.5 & $+$3.79\% & $-$49.6 & $-$4.13\% & --- \\
+Steepener           & $-$19.8 & $-$1.65\% & $+$12.0 & $+$1.00\% & --- \\
+Flattener           & $+$5.7  & $+$0.48\% & $-$23.4 & $-$1.95\% & --- \\
+Short rate +350 bps & $-$25.1 & $-$2.09\% & $-$1.9  & $-$0.16\% & --- \\
+Short rate $-$350 bps & $+$12.8 & $+$1.07\% & $-$1.9 & $-$0.16\% & --- \\
+Own                 & $+$17.8 & $+$1.48\% & $-$20.9 & $-$1.74\% & --- \\
 \bottomrule
 \end{tabular}
 \end{center}
-\small\color{labgrey}\textit{Tier 1 capital: 1.20 B PLN. No scenario breaches either threshold for this
-demo book --- the whole point of running the balance-sheet optimiser
-(Section~\ref{sec:tryityourself}, roadmap) is to keep it that way as the mix changes.}
+\small\color{labgrey}\textit{Tier 1 capital: 1.20 B PLN. No SOT breaches for this
+demo book: the long-duration fixed-rate mortgage book on the asset side is largely
+offset by the behavioural duration of non-maturity deposits (current accounts,
+savings) on the liability side, plus prepayment-shortened loan WAL --- the intended
+economics of a well-diversified retail balance sheet.}
 \normalsize\color{black}
 
 % =============================================================================
@@ -697,6 +728,7 @@ additional funding.
 
 % =============================================================================
 \section{Reporting \& Outputs}
+\label{sec:reporting}
 % =============================================================================
 
 LabBank produces two kinds of output, and the distinction matters: two
@@ -709,7 +741,7 @@ land on a balance sheet you want to document; the app is where you get there.
 
 \subsection{The static reports}
 
-\textbf{ALM/Compliance report} --- \texttt{bank\_report.ipynb}, executed
+\textbf{ALM/Compliance report} --- \texttt{ALM\_report.ipynb}, executed
 against live SQL and exported to HTML/PDF via \texttt{export\_report.py}. Built
 for a risk/ALM committee audience: balance sheet composition and product
 breakdown, market curves (zero rates, discount factors, EBA shocked curves),
@@ -719,14 +751,9 @@ Supervisory Outlier Test with the regulatory haircut applied, a linear-vs-exact
 non-linearity check, LCR/NSFR, and a closing ALM-insights page (sensitivity
 heatmap, repricing ladder, sensitivity tornado).
 
-\imgfull[0.92\textwidth]{bank_report_bs_summary.png}
+\imgfull[0.92\textwidth]{ALM_report_bs_summary.png}
 \begin{center}
-\small\color{labgrey}\textit{Balance sheet summary from \texttt{bank\_report.ipynb} --- composition, fixed vs.\ variable rate exposure, and funding structure, all read live from \texttt{dbo.transactions}.}
-\end{center}
-
-\imgfull[0.92\textwidth]{bank_report_bs_breakdown.png}
-\begin{center}
-\small\color{labgrey}\textit{Balance sheet product breakdown from the same report --- every product line is a row you can trace back to \texttt{dbo.transactions}.}
+\small\color{labgrey}\textit{Balance sheet summary from \texttt{ALM\_report.ipynb} --- composition, fixed vs.\ variable rate exposure, and funding structure, all read live from \texttt{dbo.transactions}.}
 \end{center}
 
 \textbf{Finance/CFO report} --- \texttt{finance\_report.ipynb}, generated and
@@ -831,9 +858,130 @@ Find the best balance sheet, not just stress a given one ---
 \texttt{bs\_optimization/}: a deterministic constrained solver (economic
 profit vs.\ $\Delta$EVE/$\Delta$NII breach trade-off), a joint
 balance-sheet + swap-overlay solver, and a stochastic Monte-Carlo solver are
-functional today, not yet part of the guided path. An AI-driven optimiser is
-the further direction from here --- not yet started.
+functional today, not yet part of the guided path. Every solver here is
+\textbf{single-period} --- it finds the best mix for \textit{this} balance
+sheet, not the best path to get there. A \textbf{dynamic, multi-period}
+optimiser (rebalancing over a horizon, not a one-shot target) and an
+AI-driven optimiser are the further directions from here --- neither started
+yet.
 \end{pitchbox}
+
+\subsection{Economic profit --- the optimiser's objective}
+Every solver in Phase 3 maximises the same quantity:
+\[
+\mathrm{EP}(\mathbf{x}) = \mathrm{Margin}(\mathbf{x}) + \mathrm{Fee}(\mathbf{x})
+  - \mathrm{EL}(\mathbf{x}) - \mathrm{CoC}(\mathbf{x}) - \mathrm{OpEx}(\mathbf{x})
+  - \mathrm{AcqCost}(\mathbf{x})
+\]
+where $\mathbf{x}$ is the vector of product weights (fraction of total assets).
+Every term except $\mathrm{AcqCost}$ is linear in $\mathbf{x}$; $\mathrm{AcqCost}$
+is piecewise-linear (zero at the current mix, charged only on growth above it)
+and is folded in via a standard epigraph reformulation, so the whole problem
+stays a true Linear Program.
+
+\begin{center}
+\small
+\begin{tabular}{@{}p{2.6cm}p{11.5cm}@{}}
+\toprule
+\textbf{Term} & \textbf{Definition} \\
+\midrule
+Margin & Client rate net of FTP (Funds Transfer Pricing) --- an internal
+  transfer rate per cohort (market rate at the cohort's repricing tenor plus
+  a liquidity spread) that replaces raw client-rate NII as the income
+  driver, so a product's profitability reflects what it actually costs the
+  bank to fund, not just its headline rate. \\
+Fee & Non-interest fee income, a per-product static assumption (e.g.\
+  mortgage/cash-loan servicing fees). \\
+EL & Expected Loss $= \sum(\mathrm{PD} \times \mathrm{LGD} \times \mathrm{balance})$
+  --- the credit cost of the asset book. \\
+CoC & Cost of Capital $= \mathrm{RWA} \times \mathrm{CET1}_{\mathrm{target}}
+  \times \mathrm{hurdle\ rate}$ --- the regulatory capital charge. \\
+OpEx & Operating cost, a flat rate applied to both assets and liabilities. \\
+AcqCost & Marketing/acquisition cost, charged only on balance growth
+  \textit{above} the current baseline weight --- zero for the book as it
+  stands today, which is why it doesn't appear in the finance report's own
+  EP waterfall (Section~\ref{sec:reporting}): that report describes today's
+  book, not a proposed rebalancing. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\imgfull{optimization_bs_shift.png}
+
+\imgfull{optimization_ep_waterfall.png}
+
+\imgfull{optimization_sot.png}
+
+Baseline vs.\ the deterministic optimiser's result, on this demo book: EP
+rises from 67M to 114M PLN by shifting weight away from low-margin products
+(T-bills among them --- product 3200, cut to zero in the balance-sheet chart
+above) toward higher-margin lending, while every EVE/NII scenario stays
+inside the SOT floor. \textbf{That floor is deliberately tighter than the regulatory
+minimum} --- $-13.5\%$ EVE / $-4.5\%$ NII of Tier~1, exactly 90\% of the EBA
+default ($-15\%$/$-5\%$), an expert-set internal risk-appetite buffer rather
+than the regulatory line itself, giving headroom before an actual EBA
+breach. It's a configuration choice in \texttt{optimizer\_config.xlsx}, not
+a hardcoded constant --- tighten or loosen it to match your own institution's
+risk appetite.
+
+\subsection{Monte Carlo --- risk-adjusted optimisation}
+The deterministic solver above optimises against one curve (today's) plus 7
+fixed EBA shock scenarios --- a single point estimate. A second solver in
+\texttt{bs\_optimization/} instead optimises against a \textit{distribution}
+of plausible near-term curves: fit a Nelson-Siegel model (level/slope/
+curvature) to 20 years of PLN WIBOR history, decompose its historical
+month-to-month moves via PCA into independent risk factors, then simulate
+500 mean-reverting 24-month curve paths from those factors, anchored at
+today's actual curve. The objective becomes
+$\max\; E[\mathrm{EP}] - \lambda \cdot \mathrm{CVaR}_{95}(-\mathrm{EP})$ ---
+maximise expected economic profit while controlling the downside, not just
+the average.
+
+\imgfull[0.85\textwidth]{stochastic_ep_distribution.png}
+
+On this demo book, the risk-adjusted mix doesn't just raise expected EP
+(10M $\rightarrow$ 82M PLN) --- it visibly reshapes the downside: the
+baseline distribution has a real loss tail reaching roughly $-70$M PLN in
+its worst draws, while the optimised distribution's worst-5\% tail (CVaR95)
+moves from $-50$M to $+37$M --- the optimiser stops treating ``the 500
+scenarios'' as noise around a single average and actively shrinks how bad
+the bad outcomes get.
+
+The chart above uses the same fast approximation the optimiser's own
+objective runs on (500 scenarios $\times$ optimisation, needs to be fast to
+search over). A separate, slower pass reprices those same 500 Monte Carlo
+curves through the full cash-flow engine --- exact, not approximated --- to
+get the regulatory-grade EVE/NII SOT breach count under this distribution,
+baseline vs.\ optimised:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrr@{}}
+\toprule
+\textbf{Measure (of 500 curves)} & \textbf{Baseline} & \textbf{Risk-adjusted optimised} \\
+\midrule
+EVE breaches ($< -13.5\%$ T1) & 0 & 0 \\
+NII breaches ($< -4.5\%$ T1)  & 109 (22\%) & 1 (0\%) \\
+Worst EVE (\% T1)             & $-7.4\%$   & $-9.6\%$ \\
+Worst NII (\% T1)             & $-6.5\%$   & $-5.0\%$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{This is a more interesting result than a clean pass, and worth
+stating plainly.} EVE never breaches under either book across all 500
+simulated paths --- but the baseline book breaches the NII floor in 109 of
+them, 22\% of the time. That's the same book that clears all 7 official EBA
+scenarios in Section~\ref{sec:irrbb} without a single breach: point-scenario
+testing and distributional testing are answering genuinely different
+questions, and a book that looks clean under the first can still be exposed
+under the second. The risk-adjusted optimiser all but eliminates the NII
+breaches (down to 1 of 500) --- while, tellingly, its \textit{worst-case} EVE
+outcome is actually deeper than baseline's ($-9.6\%$ vs.\ $-7.4\%$, still
+inside the $-13.5\%$ floor): optimising
+$E[\mathrm{EP}] - \lambda\cdot\mathrm{CVaR}_{95}$ improves the profit
+distribution, not every individual risk metric in every individual
+scenario, and the two are correlated but not identical.
 
 % =============================================================================
 \section*{Contact}
