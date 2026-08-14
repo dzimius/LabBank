@@ -16,13 +16,15 @@ import pandas as pd
 import streamlit as st
 
 # ── path setup ────────────────────────────────────────────────────────────────
+# sandbox/ only ever needs optimize_prep/python_code -- ep_fast.py (and the
+# _ProductMap/OPEX_RATE it uses) moved there from bs_optimization/python_code
+# on 2026-08-14 specifically so this app has zero dependency on
+# bs_optimization/ (which is headed for its own private repo).
 PROJECT_ROOT  = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 OPTPREP_CODE  = os.path.join(PROJECT_ROOT, "optimize_prep", "python_code")
-BSOPT_CODE    = os.path.join(PROJECT_ROOT, "bs_optimization", "python_code")
 
-for _p in (OPTPREP_CODE, BSOPT_CODE):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+if OPTPREP_CODE not in sys.path:
+    sys.path.insert(0, OPTPREP_CODE)
 
 from bs_vector import BalanceSheetParams, CurveTensors, CohortRates  # noqa: E402
 from metrics   import compute_all_metrics, AllMetrics, reset_bias_cache  # noqa: E402

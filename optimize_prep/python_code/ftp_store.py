@@ -44,23 +44,20 @@ regulatory calculation stays client-rate based, unaffected by this.
 from __future__ import annotations
 
 import os
-import sys
 import numpy as np
 import pandas as pd
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 FTP_PATH = os.path.normpath(os.path.join(_HERE, "..", "output", "ftp_rates.npz"))
 
-# ns_curve_model.py (historical Nelson-Siegel fit) lives in bs_optimization's
-# python_code, not optimize_prep's -- reused here rather than duplicated
-# (same NS-fit machinery swap_ladder.py uses for its seasoned buckets).
-_BS_OPT = os.path.normpath(os.path.join(_HERE, "..", "..", "bs_optimization", "python_code"))
-if _BS_OPT not in sys.path:
-    sys.path.insert(0, _BS_OPT)
+# ns_curve_model.py (historical Nelson-Siegel fit) lives alongside this file
+# (moved here from bs_optimization/python_code 2026-08-14, same move as
+# _ProductMap/ep_fast.py -- see that commit) -- same NS-fit machinery
+# swap_ladder.py uses for its seasoned buckets, reused rather than duplicated.
 
 LIQUIDITY_CAP_BPS    = 50.0    # 0.50% at 10Y+
 LIQUIDITY_CAP_MONTHS = 120.0   # 10Y
-REPORT_DATE          = pd.Timestamp("2024-12-31")   # matches extract_params.REPORT_DATE
+REPORT_DATE          = pd.Timestamp("2026-06-30")   # matches extract_params.REPORT_DATE
 
 
 def _liquidity_spread(tenor_m: np.ndarray) -> np.ndarray:
