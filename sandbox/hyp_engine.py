@@ -88,7 +88,15 @@ def build_hyp_rate_matrix(
     renewal_matrix = np.zeros((n, 12, n_scen), dtype=float)
 
     for rs in range(n_scen):
-        fwd_s       = hyp_curves.fwd_rates[rs, pln_idx, :n_m]                        # (n_m,)
+        # hyp_curves.fwd_rates is ordered per hyp_curves.scenario_ids (the full
+        # curve-tensor scenario set, alphabetical) -- NOT per cr.rate_scenario_ids
+        # (the calibrated EBA-scenario set, definition order). Only index 0
+        # ("base") coincides between the two orderings; every other position
+        # must be looked up by name or every non-base scenario silently pulls
+        # the wrong curve (2026-08-15 fix -- this previously scrambled every
+        # shock's label, e.g. "own" was actually built from the par_dn curve).
+        curve_idx   = hyp_curves.scenario_index(str(cr.rate_scenario_ids[rs]))
+        fwd_s       = hyp_curves.fwd_rates[curve_idx, pln_idx, :n_m]                 # (n_m,)
         client_rate = np.clip(safe_a * fwd_s[tenor_idx] + safe_b, safe_floor, safe_cap)  # (n,)
 
         for m in range(12):

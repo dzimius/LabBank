@@ -135,12 +135,19 @@ def build_hyp_irrbb_metrics(params, cr, curves, sc_data: dict) -> dict:
     n   = len(params.product_code)
     n_m = curves.n_months
 
-    # EBA shock IDs (all scenarios except "base")
-    shock_ids   = [str(s) for s in curves.scenario_ids if str(s) != "base"]
-    n_shock     = len(shock_ids)
     p_scen_lst  = [str(s) for s in params.scenario_ids]
     cr_scen_lst = [str(s) for s in cr.rate_scenario_ids]
     cr_base_idx = cr_scen_lst.index("base")
+
+    # EBA shock IDs: curves.scenario_ids also carries own_100_dn/up and
+    # own_1_dn/up (curve-shape-only sensitivity/PV01 scenarios), but those
+    # were never run through the NII/EVE calibration pipeline -- they don't
+    # exist in cr.rate_scenario_ids at all. Restrict to scenarios that are
+    # actually calibrated, or every lookup below silently falls through to
+    # its `except: pass` and reports a misleading 0.00% "no impact" instead
+    # of "not computed" (2026-08-15 fix).
+    shock_ids   = [s for s in cr_scen_lst if s != "base"]
+    n_shock     = len(shock_ids)
 
     # Baseline balance — needed for NII and EVE per-unit computation
     base_bal = params.balance_arr.copy()
@@ -187,7 +194,8 @@ def build_hyp_irrbb_metrics(params, cr, curves, sc_data: dict) -> dict:
                 pass
 
         # ── EVE CF re-discounting at hyp curves ──────────────────────────────
-        eve_mat = _eve_cf_cohort_matrix(base_bal, params, cr, hyp_curves)  # (n, n_cr_scen)
+        eve_mat = _eve_cf_cohort_matrix(base_bal, params, cr, hyp_curves,
+                                         use_precomputed_frac=False)  # (n, n_cr_scen)
 
         # EVE PV factor per unit balance (anchored to CF computation at hyp base)
         all_eve_pv_factor[i] = eve_mat[:, cr_base_idx] / safe_bal

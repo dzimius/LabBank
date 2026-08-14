@@ -320,6 +320,7 @@ def _eve_cf_cohort_matrix(
     params:  BalanceSheetParams,
     cr:      CohortRates,
     curves:  CurveTensors,
+    use_precomputed_frac: bool = True,
 ) -> np.ndarray:
     """EVE (PV of CFs) per cohort per scenario — shape (n, n_scen).
 
@@ -328,6 +329,15 @@ def _eve_cf_cohort_matrix(
 
     Index 0 = base EVE level, indices 1+ = shocked EVE level
     (caller computes delta = shocked - base).
+
+    use_precomputed_frac: the pre-stored cr.eve_pv_frac shortcut (below) is
+    only valid when `curves` IS the curve cr.eve_pv_frac was calibrated
+    against -- set False when `curves` is a different/hypothetical curve
+    (e.g. sandbox/build_scenario_curves.py's per-shape precompute), or this
+    silently discards the CF-based recomputation above and returns the
+    real-curve EVE regardless of what was passed in (2026-08-15 fix -- this
+    previously made EVE bit-identical across every hypothetical curve for
+    the 522/535 cohorts that have a stored eve_pv_frac).
     """
     n       = len(balance)
     n_scen  = cr.n_rate_scen
@@ -364,13 +374,14 @@ def _eve_cf_cohort_matrix(
             pv_frac = (cf_frac * disc_q * val_ccy).sum(axis=1)   # (n_ccy,)
             eve_mat[mask_ccy, rs] = balance[mask_ccy] * params.sign[mask_ccy] * pv_frac
 
-    use_eff = np.any(np.abs(cr.eve_pv_frac) > 1e-18, axis=(1, 2))
-    if use_eff.any():
-        eve_mat[use_eff, :] = (
-            balance[use_eff, None]
-            * params.sign[use_eff, None]
-            * cr.eve_pv_frac[use_eff, :, :].sum(axis=1)
-        )
+    if use_precomputed_frac:
+        use_eff = np.any(np.abs(cr.eve_pv_frac) > 1e-18, axis=(1, 2))
+        if use_eff.any():
+            eve_mat[use_eff, :] = (
+                balance[use_eff, None]
+                * params.sign[use_eff, None]
+                * cr.eve_pv_frac[use_eff, :, :].sum(axis=1)
+            )
 
     return eve_mat
 
