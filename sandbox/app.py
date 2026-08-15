@@ -296,6 +296,7 @@ with tab_curves:
     # ═══════════════════════════════════════════════════════════════════════════
     # HYPOTHETICAL SCENARIO CURVES — shape × level explorer + IRRBB metrics
     # ═══════════════════════════════════════════════════════════════════════════
+    _sc_data = load_scenario_curves()
     st.subheader("Hypothetical Rate Scenarios & IRRBB Metrics")
     st.caption(
         "Select a curve shape and rate level.  The PLN base curve is replaced "
