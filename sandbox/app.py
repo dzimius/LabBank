@@ -1194,8 +1194,15 @@ with tab_nmd:
             pct_prev_base[1:] = pct_base[:-1]
         outflow_base_pct = (pct_prev_base - pct_base) * 100.0
 
-        # Seed editor from session state (so edits to the other product survive tab switch)
-        _init_stressed = st.session_state["nmd_stressed_pct"].get(pc_sel, pct_base)
+        # Always seed the editor from the STABLE baseline, never from session
+        # state -- each product already gets its own widget key (nmd_ed_{pc_sel}_{rc})
+        # below, so Streamlit's own per-key state already preserves edits when
+        # switching products/tabs. Feeding session_state back into `data=` here
+        # created a feedback loop (this rerun's seed = last rerun's own output),
+        # which is the classic Streamlit data_editor desync that needs a second
+        # identical edit before it "sticks" -- same bug class the Balance Sheet
+        # editor already avoids by always passing its static baseline (2026-08-15 fix).
+        _init_stressed = pct_base
         editor_df = pd.DataFrame({
             "Tenor":          tenor_lbl,
             "Baseline %":     (pct_base * 100.0).round(2),
