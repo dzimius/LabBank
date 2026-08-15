@@ -72,13 +72,23 @@ def load_ep_context() -> tuple:
     return build_ep_context(load_params())
 
 
-def compute_ep(amounts: np.ndarray, cr: CohortRates, mask_irs: bool = False) -> dict:
+def compute_ep(amounts: np.ndarray, cr: CohortRates, mask_irs: bool = False,
+                margin_rate_override: np.ndarray | None = None,
+                nii_unit_override: np.ndarray | None = None) -> dict:
     """EP decomposition at per-cohort `amounts` (PLN) -- thin wrapper around
     ep_fast.compute_ep_components binding params/pm/margin_rate from the
-    cached loaders so callers only pass what actually varies (the weights)."""
+    cached loaders so callers only pass what actually varies (the weights).
+
+    margin_rate_override / nii_unit_override: pass both together (e.g. from
+    ep_fast.hyp_margin_rate() + scenario_curves.npz's hyp_nii_unit_rate) to
+    get an EP waterfall consistent with a hypothetical curve instead of the
+    real one -- see sandbox/app.py's Finance Metrics tab."""
     params = load_params()
     pm, margin_rate = load_ep_context()
-    return compute_ep_components(amounts, pm, params, cr, margin_rate, mask_irs=mask_irs)
+    if margin_rate_override is not None:
+        margin_rate = margin_rate_override
+    return compute_ep_components(amounts, pm, params, cr, margin_rate, mask_irs=mask_irs,
+                                  nii_unit_override=nii_unit_override)
 
 
 @st.cache_data

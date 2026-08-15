@@ -86,13 +86,36 @@ def _historical_zero_rate(ns_ts, tenor_years: float, months_ago: int, tau: float
     return rate_bps / 10000.0
 
 
+def floating_ftp_rate(params, is_float: np.ndarray, curve_tensors) -> np.ndarray:
+    """(n,) FTP market-rate + liquidity-spread component for FLOATING cohorts
+    only, refixed to `curve_tensors`'s base scenario at each cohort's fixing
+    tenor. Zero elsewhere (fixed/equity/other cohorts -- caller combines
+    with those separately). Factored out of compute_ftp_rates() so a
+    hypothetical curve can reuse this exact floating-refix logic (see
+    sandbox/app.py's Finance Metrics tab) without re-running the
+    curve-independent fixed-cohort historical-NS-fit branch below on every
+    Streamlit rerun -- fixed cohorts are locked at origination and
+    genuinely don't move with a hypothetical CURRENT-environment curve."""
+    n = len(params.cohort_id)
+    ftp = np.zeros(n, dtype=float)
+    base_idx = curve_tensors.scenario_index("base")
+    for ccy in np.unique(params.currency):
+        ccy_mask = (params.currency == ccy) & is_float
+        if not ccy_mask.any():
+            continue
+        fwd = curve_tensors.fwd_rates[base_idx, curve_tensors.currency_index(str(ccy))]
+        tenor_m = np.clip(params.repricing_tenor_m[ccy_mask], 1.0, 360.0)
+        idx = np.clip(np.round(tenor_m).astype(int) - 1, 0, 359)
+        ftp[ccy_mask] = fwd[idx] + _liquidity_spread(tenor_m)
+    return ftp
+
+
 def compute_ftp_rates(params, curve_tensors) -> np.ndarray:
     """(n,) FTP rate per cohort, decimal (e.g. 0.035 = 3.5%). Zero for equity
     (equity has no client rate / FTP concept in this model -- its cost is
     already captured separately via cost of capital)."""
     n = len(params.cohort_id)
     ftp = np.zeros(n, dtype=float)
-    base_idx = curve_tensors.scenario_index("base")
     is_float = (params.rate_type == "V") & ~params.is_equity
     is_fixed = (params.rate_type == "F") & ~params.is_equity
 
@@ -103,14 +126,7 @@ def compute_ftp_rates(params, curve_tensors) -> np.ndarray:
               f"FTP=0 for these, margin == client rate unchanged")
 
     # ── Floating: refixes to today's (report-date) curve at the fixing tenor ──
-    for ccy in np.unique(params.currency):
-        ccy_mask = (params.currency == ccy) & is_float
-        if not ccy_mask.any():
-            continue
-        fwd = curve_tensors.fwd_rates[base_idx, curve_tensors.currency_index(str(ccy))]
-        tenor_m = np.clip(params.repricing_tenor_m[ccy_mask], 1.0, 360.0)
-        idx = np.clip(np.round(tenor_m).astype(int) - 1, 0, 359)
-        ftp[ccy_mask] = fwd[idx] + _liquidity_spread(tenor_m)
+    ftp += floating_ftp_rate(params, is_float, curve_tensors)
 
     # ── Fixed: locked at origination, historical curve, original tenor ────────
     fixed_idx = np.where(is_fixed)[0]

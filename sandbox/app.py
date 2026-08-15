@@ -31,7 +31,8 @@ from baseline import (
 from gap_engine  import compute_repricing_gap, compute_liq_gap
 from irs_engine  import compute_irs_metrics
 from nmd_engine  import NMD_PRODUCTS, compute_nmd_delta, load_nmd_model
-from hyp_engine  import compute_hyp_metrics
+from hyp_engine  import compute_hyp_metrics, build_hyp_curve_tensors
+from ep_fast     import hyp_margin_rate
 
 # ── hypothetical scenario labels ──────────────────────────────────────────────
 _CURVE_LABELS = {
@@ -829,8 +830,42 @@ with tab_profit:
                         for _, r in combined_bs.iterrows()}
     _mod_amounts_ep  = compute_weights(params, _mod_new_pcts_ep) * ta_val
 
-    ep_base = compute_ep(params.balance_arr.copy(), cohort_rates)
-    ep_mod  = compute_ep(_mod_amounts_ep, cohort_rates)
+    # ── Hypothetical curve overlay: Margin/FTP move with the curve too, not
+    # just NII/EVE (ALM Metrics tab) -- floating-rate FTP refixes to the
+    # hypothetical curve exactly like floating client rates do; fixed-rate
+    # FTP stays locked at origination (unchanged, by design -- see
+    # ftp_store.py). Same precomputed-cache convention as the ALM Metrics
+    # tab: only activates when scenario_curves.npz has this exact hyp
+    # scenario AND its cohort set still matches product_params.npz; falls
+    # back to the real curve (today's behavior) otherwise. (2026-08-15)
+    _hyp_fwd_ep = st.session_state.get("hyp_fwd_pln")
+    _ep_margin_override, _ep_nii_override = None, None
+    if _hyp_fwd_ep is not None:
+        _sc_ld_ep  = load_scenario_curves()
+        _hyp_key_ep = f"{st.session_state.get('hyp_shape_sel', 'current')}_{st.session_state.get('hyp_level_sel', '')}"
+        _has_hyp_ep = (
+            "hyp_nii_unit_rate" in _sc_ld_ep
+            and "cohort_id" in _sc_ld_ep
+            and len(_sc_ld_ep["cohort_id"]) == len(params.cohort_id)
+            and np.array_equal(_sc_ld_ep["cohort_id"], params.cohort_id)
+            and _hyp_key_ep in _sc_ld_ep["scenario_ids"]
+        )
+        if _has_hyp_ep:
+            _pc_idx_ep = _sc_ld_ep["scenario_ids"].index(_hyp_key_ep)
+            _ep_nii_override    = _sc_ld_ep["hyp_nii_unit_rate"][_pc_idx_ep]
+            _hyp_curves_ep       = build_hyp_curve_tensors(curves, _hyp_fwd_ep)
+            _ep_margin_override  = hyp_margin_rate(params, _hyp_curves_ep)
+            st.info(f"Margin/FTP/NII below reflect the **{st.session_state.get('hyp_label', '')}** "
+                    "curve selected on the Market Curves tab.", icon="ℹ️")
+        else:
+            st.caption("ℹ️ A hypothetical curve is selected on the Market Curves tab, but this "
+                       "book/cache doesn't support it here yet — showing the real curve. "
+                       "Run `python sandbox/build_scenario_curves.py` if this persists.")
+
+    ep_base = compute_ep(params.balance_arr.copy(), cohort_rates,
+                         margin_rate_override=_ep_margin_override, nii_unit_override=_ep_nii_override)
+    ep_mod  = compute_ep(_mod_amounts_ep, cohort_rates,
+                         margin_rate_override=_ep_margin_override, nii_unit_override=_ep_nii_override)
 
     # ── IRS overlay: compute_weights() always leaves product '0000' (IRS) at
     # its static npz baseline (see baseline.compute_weights), same as every

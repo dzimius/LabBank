@@ -22,7 +22,7 @@ import numpy as np
 from product_map import _ProductMap, OPEX_RATE
 from nii_eve_cf_fast import compute_nii_cf_all
 from rwa_fast import compute_rwa_fast
-from ftp_store import load_ftp_rates, margin_unit_rate
+from ftp_store import load_ftp_rates, margin_unit_rate, floating_ftp_rate
 
 
 def build_ep_context(params) -> tuple[_ProductMap, np.ndarray]:
@@ -37,7 +37,24 @@ def build_ep_context(params) -> tuple[_ProductMap, np.ndarray]:
     return pm, margin_rate
 
 
-def compute_ep_components(amounts, pm, params, cr, margin_rate, mask_irs=False):
+def hyp_margin_rate(params, hyp_curve_tensors) -> np.ndarray:
+    """Margin-over-FTP rate under a hypothetical curve (2026-08-15, for the
+    Finance Metrics tab's hypothetical overlay): floating cohorts' FTP
+    market-rate component refixes to the hypothetical curve; fixed cohorts
+    stay locked at origination, unchanged (match-funded convention -- see
+    ftp_store.py). Combines with the cached real ftp_rates.npz for fixed
+    cohorts rather than re-running the curve-independent historical NS fit
+    live on every Streamlit rerun."""
+    ftp_real = load_ftp_rates(params.cohort_id)
+    ftp_hyp = (np.zeros_like(params.nii_unit_rate) if ftp_real is None
+               else ftp_real.copy())
+    is_float = (params.rate_type == "V") & ~params.is_equity
+    ftp_hyp[is_float] = floating_ftp_rate(params, is_float, hyp_curve_tensors)[is_float]
+    return margin_unit_rate(params.nii_unit_rate, ftp_hyp, params.bs_side)
+
+
+def compute_ep_components(amounts, pm, params, cr, margin_rate, mask_irs=False,
+                           nii_unit_override=None):
     """EP decomposition (nii/ftp/margin/fee/el/coc/opex/acq_cost/ep) at
     per-cohort `amounts` (PLN, one entry per params.cohort_id row) -- the
     representation sandbox/app.py's balance-sheet editor already produces
@@ -54,6 +71,14 @@ def compute_ep_components(amounts, pm, params, cr, margin_rate, mask_irs=False):
     informational NII/FTP figures only, matching how EVE/NII SOT constraints
     treat the always-pinned IRS book elsewhere in bs_optimizer.py. Margin/
     Fee/EL/CoC/OpEx/AcqCost are hedge-view-invariant by the same convention.
+
+    nii_unit_override: (n,) per-cohort NII unit rate to use instead of the
+    real-curve CF computation below -- pass the precomputed
+    hyp_nii_unit_rate for a given hypothetical scenario (scenario_curves.npz)
+    together with a margin_rate built from hyp_margin_rate() to get an
+    EP waterfall consistent with that hypothetical environment (2026-08-15,
+    Finance Metrics tab). None (default) preserves the real-curve behavior
+    every other caller (bs_optimization, ALM Metrics) already relies on.
     """
     amounts = np.asarray(amounts, dtype=float)
     if mask_irs:
@@ -61,7 +86,10 @@ def compute_ep_components(amounts, pm, params, cr, margin_rate, mask_irs=False):
         amounts_nii = np.where(irs_mask, 0.0, amounts)
     else:
         amounts_nii = amounts
-    nii = compute_nii_cf_all(amounts_nii, params, cr)["base"]
+    if nii_unit_override is not None:
+        nii = float(np.dot(amounts_nii, nii_unit_override))
+    else:
+        nii = compute_nii_cf_all(amounts_nii, params, cr)["base"]
 
     x_w_prod = np.zeros(pm.n_prod, dtype=float)
     np.add.at(x_w_prod, pm.cohort_to_prod, amounts / params.total_assets)
