@@ -904,6 +904,23 @@ with tab_profit:
     ep_mod  = compute_ep(_mod_amounts_ep, cohort_rates,
                          margin_rate_override=_ep_margin_override, nii_unit_override=_ep_nii_override)
 
+    # ── Explicit real-vs-hypothetical comparison, same pattern as the ALM
+    # Metrics tab's "NII base (current)" / "NII base (hyp)" KPIs. The
+    # waterfalls below apply the SAME curve to both Baseline and Modified
+    # (they only differ by balance-sheet mix), so on an unedited sheet both
+    # panels move TOGETHER and look identical to each other -- correct, but
+    # easy to misread as "nothing happened" with no on-screen reference to
+    # what the real curve would have given. This row is that reference,
+    # computed on the baseline mix so it isolates the curve's effect from
+    # any balance-sheet edit. (2026-08-15)
+    if _ep_margin_override is not None:
+        _ep_real_for_cmp = compute_ep(params.balance_arr.copy(), cohort_rates)
+        _kc1, _kc2 = st.columns(2)
+        _kc1.metric("EP on baseline mix — real curve", f"{_ep_real_for_cmp['ep']/1e6:+,.0f} M")
+        _kc2.metric(f"EP on baseline mix — {st.session_state.get('hyp_label', '')}",
+                    f"{ep_base['ep']/1e6:+,.0f} M",
+                    delta=f"{(ep_base['ep'] - _ep_real_for_cmp['ep'])/1e6:+,.1f} M vs. real curve")
+
     # ── IRS overlay: compute_weights() always leaves product '0000' (IRS) at
     # its static npz baseline (see baseline.compute_weights), same as every
     # other metric in this tab -- the user's IRS Book edits are layered on
