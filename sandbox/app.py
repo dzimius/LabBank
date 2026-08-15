@@ -173,20 +173,62 @@ def _init():
 
 _init()
 
-# ── Pre-tab: derive hyp_fwd_pln from Curves-tab selector state ───────────────
-# The Curves tab sets hyp_shape_sel / hyp_level_sel; we read those here (before
-# the Metrics tab code runs) so hyp_fwd_pln is ready when tab_metrics renders.
-_sb_sc      = load_scenario_curves()
-_pre_shape  = st.session_state.get("hyp_shape_sel", "current")
-_pre_level  = st.session_state.get("hyp_level_sel",
-              _sb_sc["levels"][0] if _sb_sc["levels"] else "medium")
-if _pre_shape != "current":
+# ── tabs ──────────────────────────────────────────────────────────────────────
+tab_bs, tab_irs, tab_nmd, tab_metrics, tab_profit, tab_gap, tab_curves = st.tabs(
+    ["⚖️  Balance Sheet", "🔄  IRS Book", "🏦  NMD Stress", "📈  ALM Metrics", "💰  Finance Metrics", "📊  Gap Analysis", "📉  Market Curves"]
+)
+
+# ── Hypothetical curve selectors — rendered onto the tab_curves container,
+# but EXECUTED HERE, first, before any other tab's body runs this script
+# pass. Two reasons: (1) ALM Metrics and Finance Metrics both need
+# hyp_fwd_pln ready before their own code runs, and previously that meant
+# guessing these widgets' value via st.session_state.get(..., default)
+# fallbacks at the top of the script -- reading a snapshot of a widget that
+# hadn't executed even once yet this run, before Streamlit had a chance to
+# reconcile it. (2) rendering the actual widgets here means their state can
+# never be perturbed by anything happening in a LATER tab's code during
+# this same run (e.g. Balance Sheet validation, or any future st.stop()) --
+# they're fully resolved before any of that runs. (2026-08-15)
+_sc_data = load_scenario_curves()
+tab_curves.subheader("Hypothetical Rate Scenarios & IRRBB Metrics")
+tab_curves.caption(
+    "Select a curve shape and rate level.  The PLN base curve is replaced "
+    "by the chosen stylised curve; EBA shock shapes are applied on top.  "
+    "NII, EVE, and SOT metrics are recomputed for the new environment."
+)
+tab_curves.info(
+    "Selecting a curve here updates the **ALM Metrics** and **Finance Metrics** "
+    "tabs with hypothetical measures for that rate environment.",
+    icon="ℹ️",
+)
+_hc1, _hc2 = tab_curves.columns(2)
+with _hc1:
+    _sel_shape = st.radio(
+        "Curve shape",
+        options=["current"] + _sc_data["curve_types"],
+        format_func=lambda x: "Current (base)" if x == "current"
+                              else _CURVE_LABELS.get(x, x),
+        horizontal=False,
+        key="hyp_shape_sel",
+    )
+with _hc2:
+    _level_disabled = (_sel_shape == "current")
+    _sel_level = st.radio(
+        "Rate level" + ("  (n/a for current)" if _level_disabled else ""),
+        options=_sc_data["levels"],
+        format_func=lambda x: _LEVEL_LABELS.get(x, x),
+        horizontal=False,
+        key="hyp_level_sel",
+        disabled=_level_disabled,
+    )
+
+if _sel_shape != "current":
     try:
-        _pre_idx = _sb_sc["scenario_ids"].index(f"{_pre_shape}_{_pre_level}")
-        st.session_state["hyp_fwd_pln"] = _sb_sc["fwd_rates"][_pre_idx].copy()
+        _hyp_idx = _sc_data["scenario_ids"].index(f"{_sel_shape}_{_sel_level}")
+        st.session_state["hyp_fwd_pln"] = _sc_data["fwd_rates"][_hyp_idx].copy()
         st.session_state["hyp_label"]   = (
-            f"{_CURVE_LABELS.get(_pre_shape, _pre_shape)} / "
-            f"{_LEVEL_LABELS.get(_pre_level, _pre_level)}"
+            f"{_CURVE_LABELS.get(_sel_shape, _sel_shape)} / "
+            f"{_LEVEL_LABELS.get(_sel_level, _sel_level)}"
         )
     except ValueError:
         st.session_state["hyp_fwd_pln"] = None
@@ -194,11 +236,6 @@ if _pre_shape != "current":
 else:
     st.session_state["hyp_fwd_pln"] = None
     st.session_state["hyp_label"]   = None
-
-# ── tabs ──────────────────────────────────────────────────────────────────────
-tab_bs, tab_irs, tab_nmd, tab_metrics, tab_profit, tab_gap, tab_curves = st.tabs(
-    ["⚖️  Balance Sheet", "🔄  IRS Book", "🏦  NMD Stress", "📈  ALM Metrics", "💰  Finance Metrics", "📊  Gap Analysis", "📉  Market Curves"]
-)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1448,15 +1485,10 @@ with tab_curves:
 
     # ═══════════════════════════════════════════════════════════════════════════
     # HYPOTHETICAL SCENARIO CURVES — shape × level explorer + IRRBB metrics
+    # (selectors themselves render at the top of the script now, before any
+    # other tab's body -- see the comment there. _sel_shape/_sel_level are
+    # already resolved by the time execution reaches here.)
     # ═══════════════════════════════════════════════════════════════════════════
-    st.subheader("Hypothetical Rate Scenarios & IRRBB Metrics")
-    st.caption(
-        "Select a curve shape and rate level.  The PLN base curve is replaced "
-        "by the chosen stylised curve; EBA shock shapes are applied on top.  "
-        "NII, EVE, and SOT metrics are recomputed for the new environment."
-    )
-
-    _sc_data = load_scenario_curves()
     _sc_yrs  = np.arange(1, _sc_data["n_months"] + 1) / 12.0
 
     _SHAPE_COLORS = {
@@ -1464,33 +1496,6 @@ with tab_curves:
         "humped": "#C44E52", "flat":  "#8172B2", "inverted": "#CCB974",
     }
     _LVL_COLORS = {"low": "#AED6F1", "medium": "#2980B9", "high": "#1A5276"}
-
-    # ── selectors — also drive the Metrics tab hypothetical section ──────────
-    st.info(
-        "Selecting a curve here updates the **Metrics** tab with hypothetical IRRBB measures "
-        "for that rate environment.",
-        icon="ℹ️",
-    )
-    _hc1, _hc2 = st.columns(2)
-    with _hc1:
-        _sel_shape = st.radio(
-            "Curve shape",
-            options=["current"] + _sc_data["curve_types"],
-            format_func=lambda x: "Current (base)" if x == "current"
-                                  else _CURVE_LABELS.get(x, x),
-            horizontal=False,
-            key="hyp_shape_sel",
-        )
-    with _hc2:
-        _level_disabled = (_sel_shape == "current")
-        _sel_level = st.radio(
-            "Rate level" + ("  (n/a for current)" if _level_disabled else ""),
-            options=_sc_data["levels"],
-            format_func=lambda x: _LEVEL_LABELS.get(x, x),
-            horizontal=False,
-            key="hyp_level_sel",
-            disabled=_level_disabled,
-        )
 
     # ── retrieve forward-rate arrays (decimal) ────────────────────────────────
     _pln_idx  = curves.currency_index("PLN")
