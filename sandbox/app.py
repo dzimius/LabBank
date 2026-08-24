@@ -15,7 +15,6 @@ from baseline import (
     TOLERANCE,
     apply_irs_delta,
     build_bs_editor_df,
-    compute_ep,
     compute_weights,
     get_nmd_product_info,
     load_bs_structure,
@@ -31,8 +30,7 @@ from baseline import (
 from gap_engine  import compute_repricing_gap, compute_liq_gap
 from irs_engine  import compute_irs_metrics
 from nmd_engine  import NMD_PRODUCTS, compute_nmd_delta, load_nmd_model
-from hyp_engine  import compute_hyp_metrics, build_hyp_curve_tensors
-from ep_fast     import hyp_margin_rate
+from hyp_engine  import compute_hyp_metrics
 
 # ── hypothetical scenario labels ──────────────────────────────────────────────
 _CURVE_LABELS = {
@@ -43,9 +41,9 @@ _CURVE_LABELS = {
     "inverted": "Inverted",
 }
 _LEVEL_LABELS = {
-    "low":    "Low  (~0.5%)",
-    "medium": "Medium (~2.5%)",
-    "high":   "High  (~5.0%)",
+    "current": "Current level",
+    "low":     "Low  (today − 300bp)",
+    "high":    "High (today + 150bp)",
 }
 
 
@@ -174,28 +172,25 @@ def _init():
 _init()
 
 # ── tabs ──────────────────────────────────────────────────────────────────────
-tab_bs, tab_irs, tab_nmd, tab_metrics, tab_profit, tab_gap, tab_curves = st.tabs(
-    ["⚖️  Balance Sheet", "🔄  IRS Book", "🏦  NMD Stress", "📈  ALM Metrics", "💰  Finance Metrics", "📊  Gap Analysis", "📉  Market Curves"]
+tab_bs, tab_irs, tab_nmd, tab_metrics, tab_gap, tab_curves = st.tabs(
+    ["⚖️  Balance Sheet", "🔄  IRS Book", "🏦  NMD Stress", "📈  ALM Metrics", "📊  Gap Analysis", "📉  Market Curves"]
 )
 
 # ═════════════════════════════════════════════════════════════════════════════
 # TAB 6 — MARKET CURVES
 # (executes FIRST, right after the tabs are created, even though it's visually
 # the last tab -- its hypothetical-curve selectors need to be resolved before
-# ALM Metrics/Finance Metrics run, and rendering them here means their widget
-# state can never be perturbed by anything happening in another tab's code
-# later in this same script pass, e.g. Balance Sheet validation. See the
-# git history for 2026-08-15 if this needs more context.)
+# ALM Metrics runs, and rendering them here means their widget state can
+# never be perturbed by anything happening in another tab's code later in
+# this same script pass, e.g. Balance Sheet validation. See the git history
+# for 2026-08-15 if this needs more context.)
 # ═════════════════════════════════════════════════════════════════════════════
 with tab_curves:
     st.subheader("Market Curves")
     st.caption(
         "Zero-coupon (spot) rates derived from the pre-computed curve tensors. "
         "Base scenario = current market; shock scenarios = IRRBB standard shocks. "
-        "PLN only — EUR/USD carry no real market data in this demo book, and the "
-        "forward-rate view is dropped in favour of the smoother zero curve (a forward "
-        "curve is a derivative-like quantity and reads as a step function even off a "
-        "smooth zero curve)."
+        "PLN only — EUR/USD carry no real market data in this demo book."
     )
 
     _n_m    = curves.n_months
@@ -260,30 +255,6 @@ with tab_curves:
     )
     st.plotly_chart(fig_scen_curves, use_container_width=True)
 
-    # ── Plot 3: Shock shapes (delta from base in bps) ─────────────────────────
-    if _shock_scens:
-        st.markdown("**Shock shape — shift from base (bps)**")
-
-        _base_fwd_sel = curves.fwd_rates[0, _ci_sel, :_n_m]
-        fig_deltas = go.Figure()
-        for _si, _scen in enumerate(_all_scens[1:], start=1):
-            _delta_bps = (curves.fwd_rates[_si, _ci_sel, :_n_m] - _base_fwd_sel) * 10_000
-            fig_deltas.add_trace(go.Scatter(
-                x=_yrs, y=_delta_bps,
-                name=_scen,
-                line=dict(color=_clrs[_si % len(_clrs)], width=1.5),
-            ))
-        fig_deltas.add_hline(y=0, line_dash="dot", line_color="grey", line_width=1)
-        fig_deltas.update_layout(
-            title=f"Rate Shock Profile — {_ccy_sel}",
-            height=300,
-            xaxis=dict(title="Tenor (years)"),
-            yaxis=dict(title="Shift (bps)"),
-            legend=dict(orientation="h", y=1.12, font_size=11),
-            margin=dict(t=50, b=5, l=5, r=5),
-        )
-        st.plotly_chart(fig_deltas, use_container_width=True)
-
     st.caption(
         f"Report date: **{curves.report_date}** | "
         f"Scenarios: {len(_all_scens)}  ({_base_scen} + {len(_shock_scens)} shocks) | "
@@ -294,18 +265,17 @@ with tab_curves:
     st.divider()
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # HYPOTHETICAL SCENARIO CURVES — shape × level explorer + IRRBB metrics
+    # HYPOTHETICAL SCENARIO SELECTOR
+    # (feeds the ALM Metrics tab's hypothetical overlay only -- no charts or
+    # IRRBB results are shown here, to avoid duplicating what ALM Metrics
+    # already reports. See git history for 2026-08-15 if more context is
+    # needed on why this got trimmed down from a full curve/metrics explorer.)
     # ═══════════════════════════════════════════════════════════════════════════
     _sc_data = load_scenario_curves()
-    st.subheader("Hypothetical Rate Scenarios & IRRBB Metrics")
-    st.caption(
-        "Select a curve shape and rate level.  The PLN base curve is replaced "
-        "by the chosen stylised curve; EBA shock shapes are applied on top.  "
-        "NII, EVE, and SOT metrics are recomputed for the new environment."
-    )
+    st.subheader("Hypothetical Rate Scenario")
     st.info(
-        "Selecting a curve here updates the **ALM Metrics** and **Finance Metrics** "
-        "tabs with hypothetical measures for that rate environment.",
+        "Selecting a curve shape and rate level here updates the **ALM Metrics** "
+        "tab with hypothetical NII/EVE/SOT measures for that rate environment.",
         icon="ℹ️",
     )
     _hc1, _hc2 = st.columns(2)
@@ -344,212 +314,33 @@ with tab_curves:
         st.session_state["hyp_fwd_pln"] = None
         st.session_state["hyp_label"]   = None
 
-    _sc_yrs  = np.arange(1, _sc_data["n_months"] + 1) / 12.0
+    if _sel_shape != "current" and st.session_state["hyp_fwd_pln"] is not None:
+        st.markdown(f"**Base vs hypothetical — {st.session_state['hyp_label']}**")
+        _hyp_n_m = _sc_data["n_months"]
+        _hyp_yrs = np.arange(1, _hyp_n_m + 1) / 12.0
+        _hyp_df  = np.maximum(_sc_data["disc_factors"][_hyp_idx, :_hyp_n_m], 1e-10)
+        _hyp_zero_pct = -np.log(_hyp_df) / _hyp_yrs * 100
 
-    _SHAPE_COLORS = {
-        "normal": "#4C72B0", "steep": "#55A868",
-        "humped": "#C44E52", "flat":  "#8172B2", "inverted": "#CCB974",
-    }
-    _LVL_COLORS = {"low": "#AED6F1", "medium": "#2980B9", "high": "#1A5276"}
-
-    # ── retrieve forward-rate arrays (decimal) ────────────────────────────────
-    _pln_idx  = curves.currency_index("PLN")
-    _n_sc     = _sc_data["n_months"]
-    _cur_fwd  = curves.fwd_rates[0, _pln_idx, :_n_sc]           # decimal
-    _cur_fwd_pct  = _cur_fwd * 100.0
-    _cur_df   = np.maximum(curves.disc_factors[0, _pln_idx, :_n_sc], 1e-10)
-    _cur_zero = -np.log(_cur_df) / _sc_yrs * 100.0
-
-    if _sel_shape == "current":
-        _hyp_fwd_dec = _cur_fwd                                  # decimal, (360,)
-        _hyp_fwd_pct = _cur_fwd_pct
-        _hyp_zero    = _cur_zero
-        _hyp_label   = "Current (base)"
-    else:
-        _sid         = f"{_sel_shape}_{_sel_level}"
-        _sc_idx      = _sc_data["scenario_ids"].index(_sid)
-        _hyp_fwd_dec = _sc_data["fwd_rates"][_sc_idx]            # decimal
-        _hyp_fwd_pct = _hyp_fwd_dec * 100.0
-        _hyp_df      = np.maximum(_sc_data["disc_factors"][_sc_idx], 1e-10)
-        _hyp_zero    = -np.log(_hyp_df) / _sc_yrs * 100.0
-        _hyp_label   = f"{_CURVE_LABELS[_sel_shape]} / {_LEVEL_LABELS[_sel_level]}"
-
-    # ── curve comparison chart ─────────────────────────────────────────────────
-    _fig_hyp = go.Figure()
-    _fig_hyp.add_trace(go.Scatter(x=_sc_yrs, y=_cur_fwd_pct, name="Current fwd",
-                                  line=dict(color="#4C72B0", width=2.5)))
-    _fig_hyp.add_trace(go.Scatter(x=_sc_yrs, y=_cur_zero, name="Current zero",
-                                  line=dict(color="#4C72B0", width=1.5, dash="dash")))
-    if _sel_shape != "current":
-        _fig_hyp.add_trace(go.Scatter(x=_sc_yrs, y=_hyp_fwd_pct, name=f"{_hyp_label} fwd",
-                                      line=dict(color="#DD8452", width=2.5)))
-        _fig_hyp.add_trace(go.Scatter(x=_sc_yrs, y=_hyp_zero, name=f"{_hyp_label} zero",
-                                      line=dict(color="#DD8452", width=1.5, dash="dash")))
-    _fig_hyp.update_layout(
-        title=f"Forward & Zero Rates — {_hyp_label} vs Current",
-        height=380, xaxis=dict(title="Tenor (years)"),
-        yaxis=dict(title="Rate (%)", ticksuffix="%"),
-        legend=dict(orientation="h", y=1.12, font_size=11),
-        margin=dict(t=60, b=5, l=5, r=5),
-    )
-    st.plotly_chart(_fig_hyp, use_container_width=True)
-
-    # ── all-shapes overview + all-levels overview (side by side) ──────────────
-    _ov_c1, _ov_c2 = st.columns(2)
-    _lvl_ov = _sel_level if not _level_disabled else "medium"
-
-    _ov_fig = go.Figure()
-    _ov_fig.add_trace(go.Scatter(x=_sc_yrs, y=_cur_fwd_pct, name="Current",
-                                 line=dict(color="black", width=2)))
-    for _ct in _sc_data["curve_types"]:
-        _ix = _sc_data["scenario_ids"].index(f"{_ct}_{_lvl_ov}")
-        _ov_fig.add_trace(go.Scatter(
-            x=_sc_yrs, y=_sc_data["fwd_rates"][_ix] * 100.0,
-            name=_CURVE_LABELS.get(_ct, _ct),
-            line=dict(color=_SHAPE_COLORS.get(_ct, "grey"), width=2,
-                      dash="solid" if _ct == _sel_shape else "dot"),
-            opacity=1.0 if _ct == _sel_shape else 0.55,
+        fig_hyp_compare = go.Figure()
+        fig_hyp_compare.add_trace(go.Scatter(
+            x=_yrs, y=_zero_pct(0),
+            name=f"Base ({_base_scen})",
+            line=dict(color=_clrs[0], width=2),
         ))
-    _ov_fig.update_layout(
-        title=f"All shapes — {_LEVEL_LABELS.get(_lvl_ov, _lvl_ov)}",
-        height=320, xaxis=dict(title="Tenor (years)"),
-        yaxis=dict(title="Rate (%)", ticksuffix="%"),
-        legend=dict(orientation="h", y=1.18, font_size=10),
-        margin=dict(t=55, b=5, l=5, r=5),
-    )
-    _ov_c1.plotly_chart(_ov_fig, use_container_width=True)
-
-    if _sel_shape != "current":
-        _lv_fig = go.Figure()
-        _lv_fig.add_trace(go.Scatter(x=_sc_yrs, y=_cur_fwd_pct, name="Current",
-                                     line=dict(color="black", width=2)))
-        for _lv in _sc_data["levels"]:
-            _ix = _sc_data["scenario_ids"].index(f"{_sel_shape}_{_lv}")
-            _lv_fig.add_trace(go.Scatter(
-                x=_sc_yrs, y=_sc_data["fwd_rates"][_ix] * 100.0,
-                name=_LEVEL_LABELS.get(_lv, _lv),
-                line=dict(color=_LVL_COLORS.get(_lv, "grey"), width=2,
-                          dash="solid" if _lv == _sel_level else "dot"),
-                opacity=1.0 if _lv == _sel_level else 0.55,
-            ))
-        _lv_fig.update_layout(
-            title=f"{_CURVE_LABELS.get(_sel_shape, '')} — all levels",
-            height=320, xaxis=dict(title="Tenor (years)"),
+        fig_hyp_compare.add_trace(go.Scatter(
+            x=_hyp_yrs, y=_hyp_zero_pct,
+            name=st.session_state["hyp_label"],
+            line=dict(color=_clrs[1], width=2, dash="dash"),
+        ))
+        fig_hyp_compare.update_layout(
+            title="Zero (Spot) Rate — base vs hypothetical",
+            height=400,
+            xaxis=dict(title="Tenor (years)"),
             yaxis=dict(title="Rate (%)", ticksuffix="%"),
-            legend=dict(orientation="h", y=1.18, font_size=10),
-            margin=dict(t=55, b=5, l=5, r=5),
+            legend=dict(orientation="h", y=1.12, font_size=11),
+            margin=dict(t=60, b=5, l=5, r=5),
         )
-        _ov_c2.plotly_chart(_lv_fig, use_container_width=True)
-
-    # ── IRRBB metrics — compute only when not "current" ───────────────────────
-    st.divider()
-    if _sel_shape == "current":
-        st.info("Select a hypothetical curve shape above to compute IRRBB metrics "
-                "for that rate environment.", icon="ℹ️")
-    else:
-        st.markdown(f"**IRRBB Metrics — {_hyp_label}**")
-        st.caption(
-            "NII base: floating-product rates repriced to hypothetical curve level; "
-            "fixed products unchanged.  "
-            "delta_NII: calibrated shock sensitivities (level-independent).  "
-            "EVE base + delta_EVE: CF re-discounting with hypothetical curves."
-        )
-
-        # balance from current BS state
-        _ta       = st.session_state.total_assets
-        _base_w   = params.balance_arr / float(params.total_assets)
-        _balance  = _base_w * _ta
-
-        with st.spinner("Computing hypothetical IRRBB metrics..."):
-            _hyp_m = compute_hyp_metrics(
-                balance     = _balance,
-                params      = params,
-                cr          = cohort_rates,
-                curves      = curves,
-                fwd_hyp_pln = _hyp_fwd_dec,
-            )
-        # base metrics (current environment, for comparison)
-        _cur_m  = run_metrics(_base_w, params, curves, _ta)
-        _t1_cap = st.session_state.get("t1_capital", 1_000_000_000.0)
-
-        # ── KPI row ───────────────────────────────────────────────────────────
-        _km = st.columns(4)
-        _km[0].metric("NII base (current)",      f"{_cur_m.nii_base/1e6:,.0f} M")
-        _km[1].metric("NII base (hyp)",          f"{_hyp_m['nii_base']/1e6:,.0f} M",
-                      delta=f"{(_hyp_m['nii_base']-_cur_m.nii_base)/1e6:+,.1f} M")
-        _km[2].metric("EVE base (current)",      f"{_cur_m.eve_base/1e6:,.0f} M")
-        _km[3].metric("EVE base (hyp)",          f"{_hyp_m['eve_base']/1e6:,.0f} M",
-                      delta=f"{(_hyp_m['eve_base']-_cur_m.eve_base)/1e6:+,.1f} M")
-
-        # ── scenario charts ───────────────────────────────────────────────────
-        _shared_scens = sorted(
-            set(_hyp_m["delta_nii"]) & set(_cur_m.delta_nii)
-        )
-
-        def _hyp_bar(title, cur_vals, hyp_vals, scens, unit="M PLN"):
-            fig = go.Figure([
-                go.Bar(name="Current", x=scens, y=cur_vals,
-                       marker_color="#4C72B0", opacity=0.8,
-                       text=[f"{v:.1f}" for v in cur_vals], textposition="outside"),
-                go.Bar(name=_hyp_label, x=scens, y=hyp_vals,
-                       marker_color="#DD8452",
-                       text=[f"{v:.1f}" for v in hyp_vals], textposition="outside"),
-            ])
-            fig.add_hline(y=0, line_dash="dash", line_color="grey", line_width=1)
-            fig.update_layout(title=title, barmode="group", height=340,
-                              yaxis_title=unit,
-                              legend=dict(orientation="h", y=1.08),
-                              margin=dict(t=50, b=5, l=5, r=5))
-            return fig
-
-        _gc1, _gc2 = st.columns(2)
-        _gc1.plotly_chart(_hyp_bar(
-            "delta NII by Scenario (M PLN)",
-            [_cur_m.delta_nii.get(s, 0)/1e6 for s in _shared_scens],
-            [_hyp_m["delta_nii"].get(s, 0)/1e6 for s in _shared_scens],
-            _shared_scens,
-        ), use_container_width=True)
-        _gc2.plotly_chart(_hyp_bar(
-            "delta EVE by Scenario (M PLN)",
-            [_cur_m.delta_eve.get(s, 0)/1e6 for s in _shared_scens],
-            [_hyp_m["delta_eve"].get(s, 0)/1e6 for s in _shared_scens],
-            _shared_scens,
-        ), use_container_width=True)
-
-        # ── SOT comparison table ───────────────────────────────────────────────
-        st.markdown("**EBA Supervisory Outlier Test (SOT)**")
-        _sot_rows = []
-        for _s in _shared_scens:
-            _c_eve = _cur_m.delta_eve.get(_s, 0) / _t1_cap * 100
-            _h_eve = _hyp_m["delta_eve"].get(_s, 0) / _t1_cap * 100
-            _c_nii = _cur_m.delta_nii.get(_s, 0) / _t1_cap * 100
-            _h_nii = _hyp_m["delta_nii"].get(_s, 0) / _t1_cap * 100
-            _sot_rows.append({
-                "Scenario":            _s,
-                "dEVE/T1 current (%)": f"{_c_eve:.1f}",
-                "dEVE/T1 hyp (%)":     f"{_h_eve:.1f} {'OK' if _h_eve>=-15 else 'FAIL'}",
-                "dNII/T1 current (%)": f"{_c_nii:.1f}",
-                "dNII/T1 hyp (%)":     f"{_h_nii:.1f} {'OK' if _h_nii>=-5 else 'FAIL'}",
-            })
-        st.dataframe(pd.DataFrame(_sot_rows), hide_index=True, use_container_width=True)
-
-        _worst_eve_h = min(_hyp_m["delta_eve"].values()) / _t1_cap * 100
-        _worst_nii_h = min(_hyp_m["delta_nii"].values()) / _t1_cap * 100
-        _c1, _c2 = st.columns(2)
-        (_c1.success if _worst_eve_h >= -15 else _c1.error)(
-            f"EVE SOT: {'PASS' if _worst_eve_h>=-15 else 'FAIL'} "
-            f"(worst {_worst_eve_h:.1f}%  threshold −15%)"
-        )
-        (_c2.success if _worst_nii_h >= -5 else _c2.error)(
-            f"NII SOT: {'PASS' if _worst_nii_h>=-5 else 'FAIL'} "
-            f"(worst {_worst_nii_h:.1f}%  threshold −5%)"
-        )
-
-    st.caption(
-        f"Hypothetical scenarios: **{len(_sc_data['scenario_ids'])}** "
-        f"({len(_sc_data['curve_types'])} shapes × {len(_sc_data['levels'])} levels) | "
-        f"Stored in sandbox/scenario_curves.npz"
-    )
+        st.plotly_chart(fig_hyp_compare, use_container_width=True)
 
 # ═════════════════════════════════════════════════════════════════════════════
 # TAB 1 — BALANCE SHEET
@@ -655,16 +446,26 @@ with tab_bs:
     def _comp_chart(edit_df: pd.DataFrame, base_df: pd.DataFrame, title: str) -> go.Figure:
         fig  = go.Figure()
         clrs = px.colors.qualitative.Plotly
+        # Segments narrower than this (in pct-points) can't fit a horizontal
+        # "X.X%" label -- Plotly rotates it vertical instead, which reads as
+        # clipped/overlapping digits at the edge of the bar. Blank those out;
+        # the value is still on hover and in the legend. (2026-08-18)
+        MIN_LABEL_PCT = 5.0
         for i, (_, row) in enumerate(base_df.iterrows()):
             c = clrs[i % len(clrs)]
             new_pct_val = float(edit_df.loc[edit_df["own_name"] == row["own_name"], "new_pct"].values[0])
+            cur_pct_val = float(row["current_pct"])
             fig.add_trace(go.Bar(
                 name=row["own_name"],
                 y=["Baseline", "Modified"],
-                x=[row["current_pct"], new_pct_val],
+                x=[cur_pct_val, new_pct_val],
                 orientation="h", marker_color=c,
-                text=[f"{row['current_pct']:.1f}%", f"{new_pct_val:.1f}%"],
+                text=[
+                    f"{cur_pct_val:.1f}%" if cur_pct_val >= MIN_LABEL_PCT else "",
+                    f"{new_pct_val:.1f}%" if new_pct_val >= MIN_LABEL_PCT else "",
+                ],
                 textposition="inside", insidetextanchor="middle",
+                hovertemplate=f"{row['own_name']}: " + "%{x:.1f}%<extra></extra>",
             ))
         fig.update_layout(
             barmode="stack", title=title, height=160,
@@ -1159,126 +960,6 @@ with tab_metrics:
                 pd.DataFrame(hqla_rows)[["own_name", "current_pct", "new_pct"]],
                 hide_index=True, use_container_width=True,
             )
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# TAB 4b — FINANCE METRICS (Economic Profit)
-# ═════════════════════════════════════════════════════════════════════════════
-with tab_profit:
-
-    # ── Economic Profit ────────────────────────────────────────────────────────
-    st.subheader("Economic Profit")
-    st.caption(
-        "EP = Margin (over FTP) + Fee − Expected Loss − Cost of Capital − OpEx "
-        "− AcqCost — the same objective the balance-sheet optimizer "
-        "(`bs_optimization/`) maximises, computed here instantly for whatever "
-        "mix is on the Balance Sheet tab right now, baseline vs. modified, "
-        "including the IRS Book tab's swap edits."
-    )
-
-    _mod_new_pcts_ep = {(r["product_code"], r["bs_side"]): r["new_pct"]
-                        for _, r in combined_bs.iterrows()}
-    _mod_amounts_ep  = compute_weights(params, _mod_new_pcts_ep) * ta_val
-
-    # ── Hypothetical curve overlay: Margin/FTP move with the curve too, not
-    # just NII/EVE (ALM Metrics tab) -- floating-rate FTP refixes to the
-    # hypothetical curve exactly like floating client rates do; fixed-rate
-    # FTP stays locked at origination (unchanged, by design -- see
-    # ftp_store.py). Same precomputed-cache convention as the ALM Metrics
-    # tab: only activates when scenario_curves.npz has this exact hyp
-    # scenario AND its cohort set still matches product_params.npz; falls
-    # back to the real curve (today's behavior) otherwise. (2026-08-15)
-    _hyp_fwd_ep = st.session_state.get("hyp_fwd_pln")
-    _ep_margin_override, _ep_nii_override = None, None
-    if _hyp_fwd_ep is not None:
-        _sc_ld_ep  = load_scenario_curves()
-        _hyp_key_ep = f"{st.session_state.get('hyp_shape_sel', 'current')}_{st.session_state.get('hyp_level_sel', '')}"
-        _has_hyp_ep = (
-            "hyp_nii_unit_rate" in _sc_ld_ep
-            and "cohort_id" in _sc_ld_ep
-            and len(_sc_ld_ep["cohort_id"]) == len(params.cohort_id)
-            and np.array_equal(_sc_ld_ep["cohort_id"], params.cohort_id)
-            and _hyp_key_ep in _sc_ld_ep["scenario_ids"]
-        )
-        if _has_hyp_ep:
-            _pc_idx_ep = _sc_ld_ep["scenario_ids"].index(_hyp_key_ep)
-            _ep_nii_override    = _sc_ld_ep["hyp_nii_unit_rate"][_pc_idx_ep]
-            _hyp_curves_ep       = build_hyp_curve_tensors(curves, _hyp_fwd_ep)
-            _ep_margin_override  = hyp_margin_rate(params, _hyp_curves_ep)
-            st.info(f"Margin/FTP/NII below reflect the **{st.session_state.get('hyp_label', '')}** "
-                    "curve selected on the Market Curves tab.", icon="ℹ️")
-        else:
-            st.caption("ℹ️ A hypothetical curve is selected on the Market Curves tab, but this "
-                       "book/cache doesn't support it here yet — showing the real curve. "
-                       "Run `python sandbox/build_scenario_curves.py` if this persists.")
-
-    ep_base = compute_ep(params.balance_arr.copy(), cohort_rates,
-                         margin_rate_override=_ep_margin_override, nii_unit_override=_ep_nii_override)
-    ep_mod  = compute_ep(_mod_amounts_ep, cohort_rates,
-                         margin_rate_override=_ep_margin_override, nii_unit_override=_ep_nii_override)
-
-    # ── Explicit real-vs-hypothetical comparison, same pattern as the ALM
-    # Metrics tab's "NII base (current)" / "NII base (hyp)" KPIs. The
-    # waterfalls below apply the SAME curve to both Baseline and Modified
-    # (they only differ by balance-sheet mix), so on an unedited sheet both
-    # panels move TOGETHER and look identical to each other -- correct, but
-    # easy to misread as "nothing happened" with no on-screen reference to
-    # what the real curve would have given. This row is that reference,
-    # computed on the baseline mix so it isolates the curve's effect from
-    # any balance-sheet edit. (2026-08-15)
-    if _ep_margin_override is not None:
-        _ep_real_for_cmp = compute_ep(params.balance_arr.copy(), cohort_rates)
-        _kc1, _kc2 = st.columns(2)
-        _kc1.metric("EP on baseline mix — real curve", f"{_ep_real_for_cmp['ep']/1e6:+,.0f} M")
-        _kc2.metric(f"EP on baseline mix — {st.session_state.get('hyp_label', '')}",
-                    f"{ep_base['ep']/1e6:+,.0f} M",
-                    delta=f"{(ep_base['ep'] - _ep_real_for_cmp['ep'])/1e6:+,.1f} M vs. real curve")
-
-    # ── IRS overlay: compute_weights() always leaves product '0000' (IRS) at
-    # its static npz baseline (see baseline.compute_weights), same as every
-    # other metric in this tab -- the user's IRS Book edits are layered on
-    # top analytically, same convention as _compute_adj()/apply_irs_delta()
-    # above. FTP=0 for the swap book (verified: margin_rate == nii_unit_rate
-    # for product '0000'), so its margin moves exactly with its NII -- add
-    # the same delta to both. Fee/EL/CoC/OpEx/AcqCost have no live formula
-    # for the swap book here (same limitation the NII/EVE overlay accepts).
-    _ana_irs_new_ep = compute_irs_metrics(st.session_state["_cur_irs"], curves)
-    _irs_nii_delta  = _ana_irs_new_ep["nii_base"] - ana_irs_baseline["nii_base"]
-    ep_mod["nii"]    += _irs_nii_delta
-    ep_mod["margin"] += _irs_nii_delta
-    ep_mod["ep"]     += _irs_nii_delta
-
-    def _ep_waterfall(title, comp, total_color):
-        cats = ["NII", "± FTP", "Margin", "+ Fee", "− EL", "− CoC", "− OpEx", "− AcqCost", "EP"]
-        vals = [comp["nii"], comp["ftp"], comp["margin"], comp["fee"],
-                -comp["el"], -comp["coc"], -comp["opex"], -comp["acq_cost"], comp["ep"]]
-        meas = ["relative", "relative", "total", "relative", "relative",
-                "relative", "relative", "relative", "total"]
-        fig = go.Figure(go.Waterfall(
-            x=cats, y=[v / 1e6 for v in vals], measure=meas,
-            text=[f"{v/1e6:+,.0f}M" for v in vals], textposition="outside",
-            increasing=dict(marker_color="#2E7D32"), decreasing=dict(marker_color="crimson"),
-            totals=dict(marker_color=total_color),
-            connector=dict(line=dict(color="lightgrey")),
-        ))
-        fig.update_layout(title=title, height=380, showlegend=False,
-                          margin=dict(t=50, b=5, l=5, r=5), yaxis_title="M PLN")
-        return fig
-
-    ep1, ep2 = st.columns(2)
-    ep1.plotly_chart(_ep_waterfall(f"Baseline — EP {ep_base['ep']/1e6:+,.0f}M", ep_base, "#4C72B0"),
-                     use_container_width=True)
-    ep2.plotly_chart(_ep_waterfall(f"Modified — EP {ep_mod['ep']/1e6:+,.0f}M", ep_mod, "#DD8452"),
-                     use_container_width=True)
-
-    st.metric("Δ Economic Profit (Modified − Baseline)",
-             f"{(ep_mod['ep'] - ep_base['ep'])/1e6:+,.1f} M PLN")
-    st.caption(
-        "AcqCost is charged only on balance growth above the baseline weight "
-        "per product (zero if Modified matches Baseline) — moving weight "
-        "*into* a product shows up here even though the app's other metrics "
-        "don't have an acquisition-cost concept."
-    )
 
 
 # ═════════════════════════════════════════════════════════════════════════════

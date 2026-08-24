@@ -64,31 +64,37 @@ def load_cohort_rates() -> CohortRates:
 
 @st.cache_resource
 def load_ep_context() -> tuple:
-    """Product<->cohort map + margin-over-FTP rate per cohort, needed for the
-    Economic Profit waterfall (Metrics tab). Ironically, these are exactly the
-    "optimizer-only fields... irrelevant here" load_params() warns about above
-    (vol_elasticity, acq_cost_rate, coc_rate, cet1_target, fee_unit_rate) --
-    the EP feature is what finally puts them to use."""
+    """Product<->cohort map + margin-over-FTP rate + equity-benefit rate per
+    cohort, needed for the Economic Profit waterfall (Metrics tab). Ironically,
+    these are exactly the "optimizer-only fields... irrelevant here"
+    load_params() warns about above (vol_elasticity, acq_cost_rate, coc_rate,
+    cet1_target, fee_unit_rate) -- the EP feature is what finally puts them
+    to use."""
     return build_ep_context(load_params())
 
 
 def compute_ep(amounts: np.ndarray, cr: CohortRates, mask_irs: bool = False,
                 margin_rate_override: np.ndarray | None = None,
+                equity_benefit_rate_override: np.ndarray | None = None,
                 nii_unit_override: np.ndarray | None = None) -> dict:
     """EP decomposition at per-cohort `amounts` (PLN) -- thin wrapper around
-    ep_fast.compute_ep_components binding params/pm/margin_rate from the
-    cached loaders so callers only pass what actually varies (the weights).
+    ep_fast.compute_ep_components binding params/pm/margin_rate/
+    equity_benefit_rate from the cached loaders so callers only pass what
+    actually varies (the weights).
 
-    margin_rate_override / nii_unit_override: pass both together (e.g. from
-    ep_fast.hyp_margin_rate() + scenario_curves.npz's hyp_nii_unit_rate) to
-    get an EP waterfall consistent with a hypothetical curve instead of the
-    real one -- see sandbox/app.py's Finance Metrics tab."""
+    margin_rate_override / equity_benefit_rate_override / nii_unit_override:
+    pass all three together (e.g. from ep_fast.hyp_margin_rate() +
+    ep_fast.hyp_equity_benefit_rate() + scenario_curves.npz's
+    hyp_nii_unit_rate) to get an EP waterfall consistent with a hypothetical
+    curve instead of the real one -- see sandbox/app.py's Finance Metrics tab."""
     params = load_params()
-    pm, margin_rate = load_ep_context()
+    pm, margin_rate, equity_benefit_rate = load_ep_context()
     if margin_rate_override is not None:
         margin_rate = margin_rate_override
-    return compute_ep_components(amounts, pm, params, cr, margin_rate, mask_irs=mask_irs,
-                                  nii_unit_override=nii_unit_override)
+    if equity_benefit_rate_override is not None:
+        equity_benefit_rate = equity_benefit_rate_override
+    return compute_ep_components(amounts, pm, params, cr, margin_rate, equity_benefit_rate,
+                                  mask_irs=mask_irs, nii_unit_override=nii_unit_override)
 
 
 @st.cache_data
