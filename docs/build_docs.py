@@ -15,6 +15,7 @@ Usage:
 from __future__ import annotations
 
 import os
+import re
 import markdown
 
 DOCS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -66,6 +67,13 @@ hr { border: none; border-top: 1px solid #ddd; margin: 2.5rem 0; }
 """
 
 
+# Cross-links between these three docs are written as plain "0N_name.md"
+# in the Markdown source (so they render correctly on GitHub) -- rewrite
+# them to "0N_name.html" in the built HTML so links between the standalone
+# HTML pages don't dead-end on a raw, unstyled .md file.
+_MD_CROSS_LINK_RE = re.compile(r'href="(0[1-3]_[a-z_]+)\.md(#[^"]*)?"')
+
+
 def build(md_filename: str, title: str) -> None:
     md_path = os.path.join(DOCS_DIR, md_filename)
     html_path = os.path.join(DOCS_DIR, md_filename.replace(".md", ".html"))
@@ -74,6 +82,7 @@ def build(md_filename: str, title: str) -> None:
         text = f.read()
 
     body = markdown.markdown(text, extensions=["tables", "fenced_code", "toc"])
+    body = _MD_CROSS_LINK_RE.sub(r'href="\1.html\2"', body)
 
     html = f"""<!DOCTYPE html>
 <html lang="en">

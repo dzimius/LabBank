@@ -117,4 +117,4 @@ Behavioural models and the balance sheet itself are synthetic/illustrative by de
 
 **Adding an EBA scenario:** extend `SHOCK_PARAMS_BPS` in `irrbb_calc/python_code/eba_shock_curves.py` (§2) with the new scenario's tenor-shape parameters — the shock application, NII/EVE recompute, and SOT logic are all scenario-agnostic and pick it up automatically.
 
-**Running just one stage after a change:** use the narrower Dagster jobs (`irrbb_recalc_job`, `liq_only_job`, …) rather than `full_run_job` — see the [README's job table](../README.md#dagster-orchestration) for which one matches your change.
+**Running just one stage after a change:** use the narrower Dagster jobs (`irrbb_recalc_job`, `liq_only_job`, …) rather than `full_run_job` — see the [README's job table](https://github.com/dzimius/LabBank#dagster-orchestration) for which one matches your change.
