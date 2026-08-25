@@ -25,6 +25,7 @@ sys.path.insert(0, BASE_DIR)
 
 from bs_vector import BalanceSheetParams, CurveTensors
 from nii_fast import _cohort_delta_nii_sched
+from extract_params import COHORT_PRODUCT_CODES, SINGLE_ROW_PRODUCT_CODES
 
 engine = create_engine(
     "mssql+pyodbc://maciek_d/bank_gen"
@@ -34,15 +35,15 @@ engine = create_engine(
     future=True,
 )
 
-REPORT_DATE  = pd.to_datetime("2024-12-31")
+REPORT_DATE  = pd.to_datetime("2026-06-30")
 OUT_PATH     = os.path.join(BASE_DIR, "..", "output", "accuracy_by_product.xlsx")
 NPZ_PARAMS   = os.path.join(BASE_DIR, "..", "output", "product_params.npz")
 NPZ_CURVES   = os.path.join(BASE_DIR, "..", "output", "curve_tensors.npz")
 
 SHOCKED_SCENARIOS = ["par_up", "par_dn", "steep", "flat", "sr_up", "sr_dn"]
 
-_COHORT_CODES = frozenset({"1000","1100","2000","2100","4100","3000","3100","7060","7900","5000"})
-_SINGLE_CODES = frozenset({"3500","6000","8000","6300","5300","5100","5400"})
+_COHORT_CODES = COHORT_PRODUCT_CODES
+_SINGLE_CODES = SINGLE_ROW_PRODUCT_CODES
 _C_IN = ", ".join(f"'{c}'" for c in sorted(_COHORT_CODES))
 
 

@@ -44,15 +44,15 @@ sys.path.insert(0, BASE_DIR)
 
 import sql_setup as opt_sql
 from bs_vector import BalanceSheetParams, CurveTensors, CohortRates
+from extract_params import COHORT_PRODUCT_CODES
 
 engine    = opt_sql.engine
-REPORT_DATE  = pd.to_datetime("2024-12-31")
+REPORT_DATE  = pd.to_datetime("2026-06-30")
 HORIZON_END  = REPORT_DATE + pd.Timedelta(days=365)
 NPZ_PARAMS   = os.path.join(BASE_DIR, "..", "output", "product_params.npz")
 NPZ_CURVES   = os.path.join(BASE_DIR, "..", "output", "curve_tensors.npz")
 
-_COHORT_CODES = frozenset({"1000","1100","2000","2100","4100",
-                            "3000","3100","7060","7900","5000"})
+_COHORT_CODES = COHORT_PRODUCT_CODES
 
 _ALL_SCENARIOS = ["base", "par_up", "par_dn", "steep", "flat", "sr_up", "sr_dn"]
 

@@ -20,10 +20,10 @@ import config
 import sql_setup
 import irs_objects as irs_obj
 
-BASE_DIR = "C:/Users/dzimi/Documents/data_engineering/data_projects/git_hub_projects/bank_project/ir_derivatives"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(BASE_DIR)
 
-config.report_date = pd.to_datetime("2024-12-31")
+config.report_date = pd.to_datetime("2026-06-30")
 print(datetime.datetime.now(), "Starting IRS workflow...")
 
 # ── 1. Load input Excel ────────────────────────────────────────────────────────
@@ -54,7 +54,7 @@ sql_setup.reset_data(mode=0)
 
 # Expands each swap to two leg rows, writes schemat.ir_swaps + sched.ir_swaps
 legs_df = sql_setup.load_and_insert_ir_swaps(df_swaps)
-print(f"  Loaded {len(legs_df)} legs ({len(df_swaps)} swap(s)) → schemat/sched.ir_swaps")
+print(f"  Loaded {len(legs_df)} legs ({len(df_swaps)} swap(s)) -> schemat/sched.ir_swaps")
 
 # ── 3. Load market data ────────────────────────────────────────────────────────
 sched_df = legs_df   # alias: sched_df used in CF generation and gap computation

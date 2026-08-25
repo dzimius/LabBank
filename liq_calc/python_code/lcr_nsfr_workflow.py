@@ -18,10 +18,10 @@ import pandas as pd
 import sql_setup
 import lcr_nsfr_objects as liq_obj
 
-BASE_DIR = "C:/Users/dzimi/Documents/data_engineering/data_projects/git_hub_projects/bank_project/liq_calc"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(BASE_DIR)
 
-REPORT_DATE    = pd.to_datetime("2024-12-31")
+REPORT_DATE    = pd.to_datetime("2026-06-30")
 TOTAL_ASSETS   = 10_000_000_000
 
 BS_STRUCT_PATH = "../balance_generate/input_data/bank_data.xlsx"

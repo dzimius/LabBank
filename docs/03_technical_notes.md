@@ -1,12 +1,8 @@
 # LabBank — Technical Notes
 
-Written for the maintainer, not as a public-facing pitch — candid, file:line-specific, ranked by how much it matters rather than how easy it is to fix. Findings below were verified against the code (spot-checked file:line references), not guessed.
+A code-level companion to the [Methodology](02_methodology.md) doc. That doc covers *what* LabBank calculates and the formulas behind it; this one covers *how the codebase is put together* — module responsibilities, the key classes and functions in each, the design patterns behind them, and the tradeoffs made along the way. Written for engineers reading the source, not just the results.
 
-A handful of the file:line references below point into `bs_optimization/`, which is now a private git submodule (see §1) — those are only resolvable for someone with submodule access.
-
-## 1. Architecture and data flow, quick reference
-
-See [Methodology](02_methodology.md) for the full explanation. For maintenance purposes, the short version:
+## 1. Architecture and data flow
 
 ```
 Excel inputs → Python workflow scripts (orchestrated by Dagster) → SQL Server (9 schemas) → Reports
@@ -23,109 +19,102 @@ Excel inputs → Python workflow scripts (orchestrated by Dagster) → SQL Serve
 | `optimize_prep/` | `optimize_prep/output/*.npz` | everything above (reads via SQL) |
 | `sandbox/` (LabBank) | nothing (read-only) | `optimize_prep/output/*.npz`, `bank_data.xlsx` |
 | `bs_optimization/` (private submodule — `LabBank-Optimization`) | `bs_optimization/output/*` | `optimize_prep/output/*.npz` |
-| `dagster_pipeline/` | orchestration only | wraps all workflow scripts as subprocess calls (see §4, finding 16) |
+| `dagster_pipeline/` | orchestration only | wraps all workflow scripts as subprocess calls (see §3) |
 
-Nine SQL schemas in total: `dbo`, `schemat`, `mkt`, `bs`, `cf`, `irrbb`, `results`, `opt_prep`, plus whatever `liq_calc` uses for its own tables.
+Every module can be run two ways: as a standalone `python <module>/python_code/<x>_workflow.py` script, or as a Dagster asset that wraps the same script. Both paths execute identical code — Dagster adds scheduling, dependency order, and run history on top, nothing more (see §3).
 
----
+## 2. Code walkthrough, module by module
 
-## 2. Portability blockers (fix before anyone else clones this)
+### `balance_generate/` — synthetic balance sheet generation
 
-These aren't "weak assumptions" — they're the difference between the pipeline running for a second person at all.
+Built around an **Abstract Factory + Template Method** pair in `b_s_gen_objects.py`:
 
-1. **Hardcoded absolute Windows path + `os.chdir()` in every workflow script.** All of these literally hardcode `"C:/Users/dzimi/Documents/data_engineering/data_projects/git_hub_projects/bank_project/<module>"` and `os.chdir()` into it before running:
-   - `balance_generate/python_code/b_s_gen_workflow.py:9`
-   - `balance_gen_add_data/python_code/b_s_add_data_workflow.py:8`
-   - `cash_flow_calc/python_code/cf_calc_workflow.py:10`
-   - `irrbb_calc/python_code/{nii_calc_workflow.py:30, eve_calc_workflow.py:31, eba_sot_workflow.py:34}`
-   - `ir_derivatives/python_code/irs_workflow.py:23`
-   - `liq_calc/python_code/lcr_nsfr_workflow.py:21`
+- `ProductGen` (abstract base, `:305`) — the template method `build_result_df()` (`:333`) calls `gen_set_of_transactions()` then `add_parameters()`, both left abstract for subclasses to fill in.
+- One concrete subclass per product family — `LoansFixedGen`, `LoansFloatGen`, `BondsFixedGen`, `BondsFloatGen`, `SavingAccountsGen`, `CurrentAccountsGen`, `TermDepositsGen` (`:505, :645, :787, :862, :344, :393, :445`).
+- `ProductFactory` (`:1416`) — a `class_registry` dict maps each product name (`"mortgage_fixed"`, `"t_bill"`, …) to its generator class, and a `table_registry` maps the class to its destination SQL table. Adding a new product type means adding one dict entry plus a new `ProductGen` subclass, not touching the workflow script.
 
-   Even with SQL Server pointed correctly, none of these scripts run after `git clone` to a different path, for a second contributor, or in CI. Fix: derive `BASE_DIR` from `os.path.dirname(os.path.abspath(__file__))` like `optimize_prep/python_code/extract_params.py:27-28` already does correctly — that file is the template to copy from.
+Transaction sizing uses `generate_truncated_normal()` (`:80`), built on `scipy.stats.truncnorm`, for both balances *and* margins/rates — `generate_balances()` (`:98`) samples individual transaction sizes, then `cumsum` + `searchsorted` snaps the running total to a target book size with a leftover "plug" transaction absorbing the remainder.
 
-2. **`sql_setup.py` duplicated 7 times** with an identical hardcoded connection string (`mssql+pyodbc://maciek_d/bank_gen...`) — `balance_generate`, `balance_gen_add_data`, `cash_flow_calc`, `ir_derivatives`, `irrbb_calc`, `liq_calc`, `optimize_prep`. Beyond the connection string itself, the CRUD helpers (`write_df`/`reset_data`/engine creation) are hand-copied with subtly different defaults (e.g. default schema varies between `'dbo'` and `'cf'` across copies — `cash_flow_calc/python_code/sql_setup.py:149` vs `ir_derivatives/python_code/sql_setup.py:215`). Fix: one shared `db_config.py` at repo root with the connection string as an environment variable, imported by all 7 modules.
+One detail worth calling out: origination dates aren't sampled uniformly. `generate_random_dates()`/`generate_random_bond_dates()` (`:148, :175`) weight business days by `(1 + annual_growth)^years_since_start`, so a book grown synthetically over N years skews toward more recent originations — closer to how a real growing bank's vintage distribution looks than a flat random draw would.
 
-3. **The same hardcoded constants are duplicated independently across many files**, with nothing enforcing they stay in sync:
-   - `TOTAL_ASSETS = 10_000_000_000` in `balance_generate/python_code/b_s_gen_workflow.py:15` (as `total_assets`, lowercase), `liq_calc/python_code/lcr_nsfr_workflow.py:25`, `optimize_prep/python_code/extract_params.py:37`, `optimize_prep/python_code/accuracy_check.py:49`.
-   - `REPORT_DATE = 2026-06-30` in at least 10 files across `balance_generate`, `cash_flow_calc`, `irrbb_calc` (×3), `ir_derivatives` (×2), `balance_gen_add_data`, `optimize_prep/extract_params.py`, `bs_optimization/swap_ladder.py`.
+### `cash_flow_calc/` — the cash-flow engine
 
-   Moving the report date or scaling total assets means editing every copy in lockstep by hand. `swap_ladder.py`'s comment "matches extract_params.REPORT_DATE" is a comment, not an assertion — nothing actually checks it. Worth centralizing into one `config.py` imported everywhere, or at minimum adding a startup assertion that cross-checks a couple of the copies.
+Deliberately functional rather than class-based — `cf_calc_objects.py` is a set of pure(ish) functions operating on DataFrames:
 
----
+- `gen_orgin_sched_loan_fin_inst()` (`:310`) — builds the QuantLib `ql.Schedule` for loans/bonds from the product's `disc_curve`/`fwd_curve`, day-count convention (via `get_dc_conv_from_str`, `:126`), and business-day convention.
+- `gen_deposit_sched()` (`:423`) — single-row schedule for deposits/NMDs; infers the forward rate directly from the discount factor (`fwd_rt = (1/d_f − 1) / year_fraction`) rather than a separate curve lookup, since these products have no amortization schedule to project.
+- `compute_amort_schedule_vectorized()` (`:698`) — the amortization engine, with an `exact` flag: `exact=True` runs a per-schedule recursive cumulative product (`groupby.apply`) for true annuity behaviour; `exact=False` swaps in a closed-form numpy approximation when scenario-count speed matters more than exactness.
+- `exact_annuity_loop()` (`:1034`) computes the annuity payment from the *actual* per-period forward curve rather than a flat-rate assumption: `g_k = 1 + fwd_rate_k · year_fraction_k`, `payment = balance / Σ (1/g_k accumulated)`.
 
-## 3. Weak or simplified quantitative assumptions
+Contractual vs. behavioural cash flows aren't a class split — `merge_cf_orig_beh()` (`:54`) stitches the QuantLib-driven "origin" (contractual) schedule together with behavioural overlays (prepayment, NMD decay) into one unified `cf.products` row set, tagged so downstream consumers can select either view.
 
-Ranked by how much a practitioner reviewing this project's rigor would care.
+### `irrbb_calc/` — NII, EVE, and the EBA shock scenarios
 
-4. **Prepayment is a static product×tenor lookup, not rate-dependent — no convexity in EVE/NII shocks.** `cash_flow_calc/python_code/cf_calc_workflow.py:132-136` joins a static `prep_rate` per product/tenor once at base cash-flow build time; the resulting cash flows are then reused **unchanged** by every EBA shock scenario in `irrbb_calc/python_code/{nii_calc_objects.py, eve_calc_objects.py}`. A par_dn scenario gets identical prepayment cash flows to par_up. This is the single biggest thing a real IRRBB reviewer would flag: negative convexity from rate-dependent prepayment is absent, understating EVE sensitivity for fixed-rate mortgages in down-shock scenarios and overstating it in up-shock. At minimum this deserves an explicit caveat in the methodology doc; a real fix would be a `CPR(Δr)` function.
+Also functional. `compute_nii()` (`nii_calc_objects.py:71`) derives NII sensitivity from the repricing gap (`ir_gap_beh`), with and without the IRS overlay, with and without the administrative-rate floor on current accounts. `compute_eve_base()`/`compute_eve_shocked()` (`eve_calc_objects.py:149, :198`) present-value the behavioural cash flows against base vs. shocked discount factors, sign-adjusted by `bs_side`.
 
-5. **No FX conversion layer despite multi-currency scaffolding.** Per-currency curves and calendars exist throughout (`cash_flow_calc/python_code/cf_calc_objects.py:118-124`, `irrbb_calc/python_code/eba_shock_curves.py`, `optimize_prep/python_code/extract_params.py:580`), but there is no `exchange_rate`/`fx_spot` table or conversion step anywhere in the repo. Currently a no-op because the synthetic balance sheet is 100% PLN — but it's one Excel edit away from silently summing raw USD/EUR balances into PLN totals in LCR/NSFR/EVE/NII aggregation, with no guard rail.
+The shock mechanics live in `eba_shock_curves.py`:
 
-6. **`vol_elasticity` exists in the schema but is only consumed by the optimizer, never by the core IRRBB engine.** `optimize_prep/python_code/extract_params.py:132` carries this column, but `irrbb_calc/python_code/{nii_calc_objects.py, eve_calc_objects.py}` only re-price existing balances under a shock — there's no deposit-volume or current-account-migration response modeled in NII/EVE itself. Standard constant-balance-sheet assumption for SOT purposes, but worth stating explicitly since the elasticity machinery living elsewhere could be mistaken for being wired into the core engine.
+- `shock_bps_at_tenors()` (`:128`) implements the EBA/RTS 2022/10 Article 3 shock shapes — parallel, steepener/flattener use `exp(−t)` / `(1 − exp(−t))` tenor-decay functions of the currency-specific basis-point parameters in `SHOCK_PARAMS_BPS` (`:45`).
+- `apply_shock_to_disc_curve()` (`:241`) converts a discount curve to continuous zero rates, applies the tenor-shaped Δr(t), floors at 0%, and re-discounts — this shocked curve then flows straight into `compute_nii_shocked`/`compute_eve_shocked`.
 
-7. **The fast optimizer's bias correction is calibrated once at the base point and held constant across all shocked scenarios.** `optimize_prep/python_code/nii_eve_cf_fast.py:15-27,42-43,539-569` — self-documented in the docstring ("in shocked scenarios the bias is assumed constant"), so lower priority since the author already flagged it. Means the fast engine's shocked deltas are exact-adjacent only near the base point.
+One implementation detail worth knowing about if you're extending the Monte Carlo layer: an optional `base_floor_bps_fn` pre-shock floor (`:216`, `default_realistic_base_floor_bps`) exists purely to stop randomly-simulated curves from pinning at an implausible flat long end — it's explicitly *not* an EBA-defined figure, just a numerical guard for synthetic curve paths.
 
-8. **`bs_optimization/python_code/swap_ladder.py:73-85`'s 25bps `IRS_MARGIN_BPS` is an admitted placeholder**, already self-documented as "a starting assumption, not a fitted value — retune once real swap-desk quotes are available." Flagging for completeness; the author has already done the diligence here.
+### `optimize_prep/` — the fast-approximation tensor layer
 
-9. **Silent exception-swallowing is a repeated (three separate, inconsistent) idiom across the optimizer stack:**
-   - `optimize_prep/python_code/extract_params.py:109-114` (`_try_query`) catches `Exception` around every SQL load (used in 8+ places) and returns an empty DataFrame with just a `print` — a typo'd column name or schema change silently zeroes cohort data in `product_params.npz`, no error raised.
-   - `nii_eve_cf_fast.py`'s calibration fallbacks (`_apply_fixed_rate_calibration`/`_apply_calibrated_delta_fallback`, lines 98-188) patch known mismatches row-by-row rather than structurally.
-   - `bs_optimization/python_code/swap_ladder.py:380-412` (`_detect_hedge_direction`) defaults to `+1.0` on any DB failure, print-only, no exception surfaced.
+This is the part of the codebase most worth understanding well, because it's what lets the Streamlit sandbox run interactively with no database: every balance-sheet edit re-prices NII/EVE/LCR/NSFR in milliseconds against precomputed tensors instead of re-running the full SQL + QuantLib pipeline.
 
-   None of these share a logging convention — a maintainer debugging "why is this number wrong" has three different silent-failure code paths to rule out before finding the real cause.
+- `BalanceSheetParams` (`bs_vector.py:35`, a frozen dataclass) — one row per cohort, holding parallel numpy arrays: unit rates, `d_mod` (modified duration), `delta_nii_unit`/`delta_eve_unit` per EBA scenario, and the LCR/NSFR/RWA/expected-loss factors needed for optimisation.
+- `CurveTensors` / `CohortRates` (`bs_vector.py:299, :357`) — precomputed discount/forward curve grids and a per-cohort `rate_matrix[n_cohorts, 12, n_scenarios]`.
+- `build_product_params()` (`extract_params.py:1882`) — the SQL → tensor ETL. Loads `bs_structure`, per-cohort cash-flow statistics, the substitution matrix, and rate coefficients, then asserts every `product_code` present in the balance sheet is covered by one of three hand-maintained registries (`COHORT_PRODUCT_CODES`, `SINGLE_ROW_PRODUCT_CODES`, `IRS_PRODUCT_CODES`) — a new product that's missing from all three fails the build loudly instead of silently vanishing from the tensors. `diagnose_accuracy.py` and `cohort_cf_drill.py` import these same three sets rather than keeping their own copies, so there's one place to update when a product is added.
 
----
+The approximation itself, in `nii_eve_cf_fast.py`:
 
-## 4. Redundant / duplicated code
+- **NII** is a single `einsum` (`_nii_cohort_matrix`, `:55`): `NII[cohort, scenario] = balance · sign · Σ_month (outstanding[cohort, month] · rate_matrix[cohort, month, scenario]) / 12` — O(cohorts × 12 × scenarios), microseconds for a book with under ~2,000 cohorts.
+- **EVE** offers two modes: a duration-based shortcut (`−sign · modified_duration · Δforward_rate`) for speed, or a full cash-flow-discounting mode for accuracy.
+- Both are corrected with a precalibrated additive bias term (`bias_nii`/`bias_eve`) — the gap between the fast approximation and the exact engine at the *base* scenario, assumed constant under shocked scenarios. That's a deliberate speed/accuracy tradeoff, not an oversight: `optimize_prep/output/approx_accuracy_report.xlsx` quantifies exactly how close the approximation stays across the full 7-scenario set, and `bias_store.py` degrades gracefully (recomputes if the cached bias's cohort count doesn't match the current tensors — see the cache-staleness note in §4).
 
-10. **`liq_calc/python_code/lcr_nsfr_objects.py:194-295` (`build_irrbb_report`) is dead code** — confirmed via repo-wide grep, it's never called anywhere. It independently re-implements the same delta/Tier-1-capital% SOT calculation that already exists in `irrbb_calc/python_code/{eba_sot_workflow.py:184-190, eve_calc_workflow.py:197-202, nii_calc_workflow.py:304-305}`. It also has a suspicious `tier1_capital: float = 1.0` default (should be hundreds of millions of PLN) which would silently produce nonsense if this function were ever revived without noticing. Delete it, or wire it in — not both existing.
+In short: this layer trades a one-time calibration cost for O(1) scenario evaluation — a precomputed linear-operator cache standing in for SQL + QuantLib repricing.
 
-11. **`COHORT_PRODUCT_CODES`/`SINGLE_ROW_PRODUCT_CODES` frozensets are hand-copied in 3+ files** with no shared source of truth: `optimize_prep/python_code/extract_params.py:52-56` (canonical), renamed local copies `_COHORT_CODES`/`_SINGLE_CODES` in `diagnose_accuracy.py:~44-45` and `cohort_cf_drill.py:54-55`, plus a smaller diagnostic-only subset in `accuracy_check.py:409`. See fragile-coupling finding below for the drift risk this creates — **this has already happened**: `extract_params.py`'s canonical set includes `"3200"` (t_bill, added since), but `cohort_cf_drill.py`'s hand-copied `_COHORT_CODES` does not.
+### `sandbox/` — the LabBank Streamlit app
 
----
+`app.py` (~1,400 lines) renders six tabs via `st.tabs()`: Balance Sheet, IRS Book, NMD Stress, ALM Metrics, Gap Analysis, Market Curves. Every edit re-runs the fast-approximation math from `optimize_prep/` (previous section) in-process against `BalanceSheetParams`/`CurveTensors` loaded once from `.npz` files — no SQL round-trip, which is what makes the interaction feel instant.
 
-## 5. Dead code / orphaned files
+One quirk worth knowing if you're reading the source top-to-bottom: the Market Curves tab's *body* executes early in script order — before ALM Metrics — even though it renders last on the page, because its "hypothetical scenario" selectors need to resolve before the Metrics tab's NII/EVE recompute can use them. Streamlit re-runs the whole script top-to-bottom on every interaction, so this is a documented ordering workaround, not a bug.
 
-12. **Six files in `optimize_prep/python_code/` are not called by `opt_prep_workflow.py`, any Dagster asset, or tests**: `nii_formula_example.py`, `diagnose_accuracy.py`, `patch_npz_rwa.py`, `inspect_npz.py`, `cohort_cf_drill.py`, `nii_monthly_drill.py`. They sit in the same directory as production modules with no separation (no `scripts/`/`debug/` subfolder), so they silently rot as the real pipeline evolves — `diagnose_accuracy.py`'s hand-copied product-code sets (finding 11) are already stale relative to `extract_params.py` with nothing to catch the drift. Recommend moving these to a `optimize_prep/scratch/` or `debug/` folder, or deleting the ones that are truly superseded.
+### `dagster_pipeline/` — orchestration
 
-13. **`patch_npz_rwa.py` is an explicitly one-off migration** ("Run once after adding rwa_weight to bank_data.xlsx"). Since `rwa_weight` is already a standard column consumed in `extract_params.py:127`'s fillna list, this migration has almost certainly already been applied — the script is dead weight that will confuse a future reader into thinking `rwa_factor` still needs patching in. Safe to delete.
+Six asset files under `dagster_pipeline/assets/` (`balance_sheet.py`, `cash_flows.py`, `ir_derivatives.py`, `irrbb.py`, `liquidity.py`, `optimize_prep.py`). Each `@asset`-decorated function is a thin wrapper — e.g. `balance_transactions` (`assets/balance_sheet.py:14`) — calling `run_workflow(context, script_path)` (`runner.py:12`), which `subprocess.Popen`'s the *same standalone workflow script* used outside Dagster and streams its stdout into Dagster's logger. `deps=[...]` declarations sequence *when* assets run relative to each other; the actual data handoff between stages happens through SQL Server, not through Dagster's own type system. `jobs.py` composes these assets into the business-case jobs listed in the README (`balance_sheet_job`, `full_run_job`, `labbank_data_job`, …) via `AssetSelection`.
 
-14. **Stale, never-resolved TODO in `cash_flow_calc/python_code/cf_calc_workflow.py:16-19`**: a Polish comment says mode=1 should only append schedules not already in existing tables, but `mode` is hardcoded to `0` and `sql_setup.reset_data`'s actual mode=1 branch does a full `DELETE FROM ... WHERE report_date = :rd` — not the incremental behavior the comment describes. `mode=1` is never exercised in production, so this is effectively untested, half-described functionality. Either implement it properly or delete the comment and the unused branch.
+This is a deliberate tradeoff, not a gap: keeping every workflow script independently runnable (`python <script>.py`, no Dagster required) was a higher priority than a tighter Dagster-native `IOManager` contract between stages. The cost is that a stage silently writing a differently-shaped table only surfaces as a downstream error, not a Dagster-visible schema violation — worth knowing if you're debugging an unexpected `KeyError` two stages downstream of where the actual change happened.
 
----
+### `bs_optimization/` — balance sheet optimiser (private submodule)
 
-## 6. Fragile coupling
+Briefly, since the code itself isn't public: `bs_optimizer.py` formulates balance-sheet reweighting as a genuine Linear Program — the economic-profit objective and every EVE/NII-delta/LCR/NSFR constraint are linear in the product weights, because they're built from the precomputed unit-deltas in `BalanceSheetParams` (§2, `optimize_prep/`). It's solved via `scipy.optimize.linprog(method="highs")`, with a `scipy.optimize.minimize(method="SLSQP")` fallback for the rarer nonlinear case (price-volume elasticity). Regulatory floors (EVE/NII/NSFR/Tier-1-RWA) are hard inequality constraints by default, or move into a weighted-slack objective in "soft breach" mode — see the [project report](https://github.com/dzimius/LabBank/releases/download/v1/LabBank.pdf) for the full methodology and results.
 
-15. **No validation that `bs_structure`'s actual product codes are covered by `COHORT_PRODUCT_CODES ∪ SINGLE_ROW_PRODUCT_CODES ∪ IRS_PRODUCT_CODES`.** `bank_data.xlsx`'s `bs_structure` sheet is the real source of truth for which products exist, but the three sets in `extract_params.py:52-58` are a manually maintained partition with no assertion that `set(bs['product_code']) - (COHORT | SINGLE_ROW | IRS)` is empty. This is no longer hypothetical: the T-bill product (3200) was added since this finding was first written, was correctly added to `extract_params.py`'s canonical `COHORT_PRODUCT_CODES`, but **was missed in `cohort_cf_drill.py`'s hand-copied `_COHORT_CODES`** (see finding 11) — exactly the silent-drift failure this assertion would have caught. **Fix the `cohort_cf_drill.py` gap and add the assertion before the next new product** (credit cards, corporate loan split, central bank cash).
+## 3. Design decisions and rationale
 
-16. **Dagster provides zero schema/lineage validation between pipeline stages.** `dagster_pipeline/runner.py:12-35` (`run_workflow`) just `subprocess.Popen`s the target script and streams stdout. The `deps=[...]` declarations in `dagster_pipeline/assets/*.py` only sequence *when* scripts run, not *what* they exchange — the actual interface between stages is "whatever rows happen to be in SQL Server tables at the time," with no `IOManager`, no asset check, no dtype/shape contract. An upstream script silently writing a differently-shaped table only surfaces as a downstream `KeyError` or one of the silent `_try_query` catches (finding 9), never as a Dagster-visible contract violation.
+**SQL Server as the integration bus, not an implementation detail.** Every module writes its output to SQL rather than passing objects in memory between stages. This was a deliberate choice, not a performance-neutral default: it means any stage can be re-run independently, and the entire pipeline state at any point is inspectable with a plain `SELECT` — see [Setup guide, Path B](01_setup_guide.md#path-b--full-etl-pipeline-with-sql-server-generate-your-own-balance-sheet) for querying it directly. The cost is the subprocess/SQL round-trip latency that made the fast-approximation tensor layer (§2, `optimize_prep/`) necessary for anything interactive.
 
-17. **`extract_params.py:2466-2468`: IRS notional weighting is derived as `notional / (2 × TOTAL_ASSETS)`,** so the swap book's implicit weight in the optimizer silently depends on this file's specific copy of `TOTAL_ASSETS` (finding 3) being correct. If `balance_generate`'s copy and this one ever diverge, IRS notional weighting goes wrong with no error — just a quietly-mis-scaled swap exposure in the optimizer.
+**Dagster wraps scripts, it doesn't replace them.** See §2's `dagster_pipeline/` note — every workflow stays runnable standalone. Orchestration is additive, never a hard dependency.
 
----
+**Two representations of the same math.** The exact engine (SQL + QuantLib, `cash_flow_calc/`/`irrbb_calc/`) and the fast approximation (`optimize_prep/`) aren't redundant — they serve different jobs. The exact engine is the source of truth and what every report is built from; the fast layer exists purely so the sandbox and the optimiser can explore thousands of what-if balance sheets per second, calibrated against the exact engine rather than replacing it.
 
-## 7. Already fixed (context only, no action needed)
+## 4. Known limitations and scope
 
-These were bugs caught and resolved earlier in development — listed here so they aren't rediscovered and "fixed" twice, and so the fix rationale isn't lost:
+Honest caveats about where this project simplifies, so they're not mistaken for oversights:
 
-- **NII renewal rate bug** — `fwd_rt` for fixed-rate products is the coupon rate, not the market rate; renewal now correctly uses a disc-curve lookup for past-start cash flows.
-- **SLSQP infeasible-accept bug** (`bs_optimization/python_code/bs_optimizer.py`) — polish/restore steps were accepting failed SLSQP iterates that violated hard floors; now gated on `_is_feasible()`.
-- **IRS fixed-rate margin + seasoning** (`bs_optimization/python_code/swap_ladder.py`) — was pricing at raw curve mid with no spread, and seasoned buckets carried a historical rate-drift windfall; fixed with `IRS_MARGIN_BPS` and a seasoned-notional cap.
+- **Prepayment is a static product×tenor lookup, not rate-dependent.** The CPR assigned to a cohort at cash-flow build time is reused unchanged across every EBA shock scenario — a par-down shock gets the same prepayment cash flows as a par-up shock. This means negative convexity (prepayment speeding up as rates fall) isn't modelled, which understates EVE sensitivity for fixed-rate mortgages in down-shock scenarios. A real fix would be a `CPR(Δr)` function; worth knowing if you're evaluating this project's rigor for a mortgage-heavy book specifically.
+- **No FX conversion layer**, despite per-currency curve/calendar scaffolding throughout the codebase. Currently a no-op because the synthetic balance sheet is 100% PLN — a multi-currency book would need an `exchange_rate` table and a conversion step before aggregation.
+- **Risk parameters (RWA weights, PD/LGD, LCR/ASF/RSF factors) are illustrative**, loosely shaped like real Basel/CRR and LCR/NSFR categories but not a precise regulatory calibration — see the product tables in the [Methodology doc](02_methodology.md#products-on-the-balance-sheet). They're plain Excel columns, meant to be replaced with your own institution's numbers.
+- **The fast-approximation layer's bias correction is calibrated once at the base scenario and held constant across shocks** (§2) — a documented speed/accuracy tradeoff, quantified in `optimize_prep/output/approx_accuracy_report.xlsx` rather than left unmeasured.
+- **Global constants (`TOTAL_ASSETS`, `REPORT_DATE`, the SQL connection string) are duplicated per module** rather than imported from one shared config — a straightforward centralization that just hasn't been prioritized yet, since every module needs to stay independently runnable (§3).
 
-## 8. Already documented tech debt (not new findings, just cross-referenced)
+Behavioural models and the balance sheet itself are synthetic/illustrative by design — this project demonstrates *how* an ALM pipeline should be built and how its metrics relate to each other, not a validated, governed production risk system.
 
-- `sandbox/baseline.py:46-49` — LabBank shares `BalanceSheetParams`/the optimizer's npz, pulling in irrelevant optimizer-only fields (`vol_elasticity`, `subst_matrix`, PD/LGD, CoC). Author-flagged fix: give LabBank its own lightweight ETL reading directly from `bank_data.xlsx`, no optimizer columns.
-- `sandbox/app.py` (~line 71) — product 6300 (`current_account_sme`) reuses product 6000's NMD decay curve as a proxy approximation rather than having its own calibrated behavioural model.
-- Behavioural models and the balance sheet itself are synthetic/illustrative — already stated in `README.md`'s Repository status section, restated in the methodology doc for the public audience.
+## 5. Extending the project
 
----
+**Adding a new product** (e.g. credit cards, a corporate working-capital/investment-loan split, central bank cash): add a row to `bank_data.xlsx`'s `bs_structure` sheet, add a matching `ProductGen` subclass + `ProductFactory` registry entry in `balance_generate/python_code/b_s_gen_objects.py` (§2), and add the new product code to whichever of `COHORT_PRODUCT_CODES` / `SINGLE_ROW_PRODUCT_CODES` / `IRS_PRODUCT_CODES` it belongs to in `optimize_prep/python_code/extract_params.py`. The coverage assertion in `build_product_params()` (§2) will fail loudly if that last step is missed, instead of the product silently disappearing from the fast-approximation tensors.
 
-## Suggested order of operations
+**Adding an EBA scenario:** extend `SHOCK_PARAMS_BPS` in `irrbb_calc/python_code/eba_shock_curves.py` (§2) with the new scenario's tenor-shape parameters — the shock application, NII/EVE recompute, and SOT logic are all scenario-agnostic and pick it up automatically.
 
-If/when there's time to work through this list, roughly in priority order:
-
-1. Fix the hardcoded absolute paths (§2.1) — blocks anyone else from running this at all, and it's a mechanical fix (copy the `__file__`-relative pattern already used correctly in `extract_params.py`).
-2. Fix the `cohort_cf_drill.py` drift the T-bill addition already caused, and add the product-code coverage assertion (§6.15) **before** adding the next new product (credit cards, corporate loan split, central bank cash) — otherwise it silently vanishes from the optimizer/LabBank tensors with no error, same as T-bill just did.
-3. Centralize `TOTAL_ASSETS`/`REPORT_DATE`/the SQL connection string into one config module (§2.2, §2.3) — mechanical, but removes an entire category of "forgot to update the other 7 copies" bugs.
-4. Delete or relocate the dead files (§5) — low risk, immediate clarity improvement.
-5. Everything in §3 (quantitative assumptions) is a "know about it, decide if it matters for your audience" list rather than a to-do list — the prepayment convexity gap (§3.4) is the one most worth a caveat in the methodology doc if not fixed outright.
+**Running just one stage after a change:** use the narrower Dagster jobs (`irrbb_recalc_job`, `liq_only_job`, …) rather than `full_run_job` — see the [README's job table](../README.md#dagster-orchestration) for which one matches your change.

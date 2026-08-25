@@ -12,6 +12,21 @@ Most systems hide this complexity behind aggregated dashboards. LabBank makes it
 
 That means NII, EVE, LCR, and NSFR are not four separate models — they're four different aggregations of the *same* underlying cash-flow schedule.
 
+## Measures at a glance
+
+| Measure | Formula (one line) | Full derivation |
+| --- | --- | --- |
+| NII | Σ locked-interest + renewal cash flows over 1Y, per scenario | [IRRBB — NII](#irrbb--nii) |
+| EVE | Σ behavioural cash flows × discount factor, run-off to maturity | [IRRBB — EVE](#irrbb--eve) |
+| SOT | min(ΔEVE, 0) + 0.5 × max(ΔEVE, 0), same for NII, vs. Tier 1 | [Supervisory Outlier Test](#supervisory-outlier-test-eba-sot) |
+| RWA / Tier 1 | Σ balance × rwa_weight ; Tier 1 capital / RWA | [Capital — RWA and the Tier 1 ratio](#capital--rwa-and-the-tier-1-ratio) |
+| LCR | Σ HQLA × (1 − haircut) / Σ liability × outflow rate | [Liquidity — LCR and NSFR](#liquidity--lcr-and-nsfr) |
+| NSFR | Σ liability × ASF / Σ asset × RSF | [Liquidity — LCR and NSFR](#liquidity--lcr-and-nsfr) |
+| Repricing gap | Σ assets repricing in bucket − Σ liabilities repricing in bucket | [Repricing gap and interest rate swaps](#repricing-gap-and-interest-rate-swaps) |
+| Behavioural liquidity gap | cumulative Σ (behavioural inflows − outflows) | [Behavioural liquidity gap](#behavioural-liquidity-gap) |
+
+Every row below is derived from the same underlying cash-flow table (`cf.products`) — see [Data model](#data-model--sql-schema-reference).
+
 ## Architecture, in four layers
 
 ```
@@ -159,7 +174,13 @@ The key output table, `cf.products`, has one row per (transaction, payment date)
 
 ## Repricing gap and interest rate swaps
 
-The **repricing gap** is the net volume of assets minus liabilities repricing in each tenor bucket. A positive gap means more assets reprice in that bucket — the bank benefits from rising rates there; a negative gap signals liability-sensitive exposure.
+The **repricing gap** is the net volume of assets minus liabilities repricing in each tenor bucket:
+
+```
+Gap_bucket = Σ (asset balances repricing in that bucket) − Σ (liability balances repricing in that bucket)
+```
+
+A positive gap means more assets reprice in that bucket — the bank benefits from rising rates there; a negative gap signals liability-sensitive exposure.
 
 Interest rate swaps overlay this gap **without changing the underlying balance sheet**: the swap gap is computed separately and merged into the balance-sheet repricing gap before IRRBB is calculated. This is what lets LabBank show "balance sheet only" vs. "balance sheet + IRS" gap views side by side.
 
@@ -238,21 +259,43 @@ Thresholds:
 - **EVE SOT**: ΔEVE_regulatory / Tier 1 capital < −15% → breach.
 - **NII SOT**: ΔNII_regulatory / Tier 1 capital < −5% → breach.
 
+## Capital — RWA and the Tier 1 ratio
+
+```
+RWA             = Σᵢ balanceᵢ × rwa_weightᵢ                (assets only)
+Tier 1 / RWA    = Tier 1 capital / RWA                       ≥ configurable minimum
+```
+
+Tier 1 capital is read directly off the equity side of the balance sheet (`schemat.equity` / `dbo.equity`). `rwa_weight` is a per-product column in `bs_structure` (illustrative Basel/CRR-inspired risk-weight bands — see the product tables above; ~0% for sovereigns/cash, ~35% for mortgages, ~75% for unsecured/SME lending). LabBank's Metrics tab shows this ratio next to the EVE/NII SOT results, against a configurable minimum threshold.
+
 ## Liquidity — LCR and NSFR
 
 ```
-LCR  = HQLA / stressed net outflows (30 days)   ≥ 100%
-NSFR = Available Stable Funding / Required Stable Funding   ≥ 100%
+LCR  = HQLA / stressed net outflows (30 days)                          ≥ 100%
+     = Σᵢ balanceᵢ × (1 − haircutᵢ)              [HQLA-eligible assets]
+       ─────────────────────────────────────
+       Σⱼ balanceⱼ × lcr_outflow_rateⱼ            [liabilities, 30-day stress]
+
+NSFR = Available Stable Funding / Required Stable Funding              ≥ 100%
+     = Σⱼ balanceⱼ × ASFⱼ                          [liabilities & equity]
+       ────────────────────
+       Σᵢ balanceᵢ × RSFᵢ                          [assets]
 ```
 
-- **HQLA** — Level 1 liquid assets (cash, central bank reserves, sovereign bonds) at their respective haircuts.
-- **Net outflows** — stressed deposit run-off and interbank maturities within 30 days.
-- **ASF** — stable funding weighted by tenor and type (equity and long-term debt score highest).
-- **RSF** — assets weighted by illiquidity (loans and illiquid instruments score highest).
+- **HQLA** — Level 1 liquid assets (cash, central bank reserves, sovereign bonds, T-bills) at their respective haircuts (`haircut`/`hqla_class` columns in `bs_structure` — 0% haircut for all Level 1 assets in the shipped demo data).
+- **Net outflows** — each liability's balance weighted by its `LCR` outflow rate (e.g. ~5% for sticky retail current accounts vs. ~100% for wholesale interbank funding) — stressed deposit run-off and interbank maturities within 30 days.
+- **ASF** — each liability/equity balance weighted by its `ASF` factor — tenor- and type-dependent, equity and long-term debt score highest (100%).
+- **RSF** — each asset balance weighted by its `RSF` factor — illiquidity-dependent, loans score highest, HQLA scores lowest (e.g. ~5%).
 
 ## Behavioural liquidity gap
 
-Beyond the regulatory ratios, the liquidity gap shows the net cash position across the full tenor ladder (up to 60 months), using behavioural cash flows — loan prepayments included, NMD decay applied. A sustained negative cumulative gap identifies the point at which the bank would need additional funding — the primary input for contingency funding planning, distinct from the point-in-time LCR/NSFR ratios.
+Beyond the regulatory ratios, the liquidity gap shows the net cash position across the full tenor ladder (up to 60 months), using behavioural cash flows — loan prepayments included, NMD decay applied:
+
+```
+Cumulative gap_t = Σ_{k ≤ t} (behavioural inflows_k − behavioural outflows_k)
+```
+
+A sustained negative cumulative gap identifies the point at which the bank would need additional funding — the primary input for contingency funding planning, distinct from the point-in-time LCR/NSFR ratios.
 
 ## Exploring this interactively — LabBank
 

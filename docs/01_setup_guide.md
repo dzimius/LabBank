@@ -157,4 +157,4 @@ Dagster is recommended over this because it enforces dependency order and keeps 
 ## Where to go next
 
 - **[Methodology](02_methodology.md)** — what NII, EVE, EBA SOT, LCR, and NSFR mean and how this project calculates them.
-- **[Technical notes](03_technical_notes.md)** — for maintainers: architecture, data flow, and known weak spots (useful if you're extending the pipeline, not required reading to just use LabBank).
+- **[Technical notes](03_technical_notes.md)** — a code-level tour: key classes/functions per module, design decisions, and known limitations (useful if you're extending the pipeline, not required reading to just use LabBank).

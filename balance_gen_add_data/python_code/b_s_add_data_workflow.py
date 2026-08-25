@@ -4,8 +4,8 @@ import b_s_add_data_objects as bs_objs
 import sql_setup
 
 if __name__ == "__main__":
-    report_date = pd.to_datetime('2024-12-31')
-    BASE_DIR = "C:/Users/dzimi/Documents/data_engineering/data_projects/git_hub_projects/bank_project/balance_gen_add_data"
+    report_date = pd.to_datetime('2026-06-30')
+    BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     os.chdir(BASE_DIR)
     curve_file_name    = 'input/curve_input.xlsx'
     fixing_file_name   = 'input/fixing_input.xlsx'
@@ -22,7 +22,7 @@ if __name__ == "__main__":
 
 ###curve generation
 ###################
-    df_curves = bs_objs.curve_generation_job(curve_file_name, report_date, mode, min_date='2024-01-01')
+    df_curves = bs_objs.curve_generation_job(curve_file_name, report_date, mode, min_date='2026-01-01')
     sql_setup.append_df_to_table(df_curves, 'curves')
 
 #####

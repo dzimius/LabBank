@@ -6,11 +6,11 @@ import config
 import sql_setup
 from sqlalchemy import text
 
-BASE_DIR = "C:/Users/dzimi/Documents/data_engineering/data_projects/git_hub_projects/bank_project/balance_generate"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(BASE_DIR)
 
 
-config.report_date = pd.to_datetime('2024-12-31')  # Set the report date
+config.report_date = pd.to_datetime('2026-06-30')  # Set the report date
 config.balance_start_date = pd.to_datetime('2015-01-01')
 total_assets = 10_000_000_000
 full_balance_amt = total_assets * 2 #assets + liabilities+equity = 2*assets
@@ -26,7 +26,7 @@ df_bs_struct['amort_type'] = df_bs_struct['amort_type'].astype('Int64')
 df_result = df_bs_struct.merge(df_client_t, on='client_type_id', how='left')
 
 # Load interest rate formula file and historical fixings
-# interest_rt.xlsx columns: product_code, a, b (% points), delay, index_floor, client_floor
+# interest_rt.xlsx columns: product_code, a, b (% points), index_floor, client_floor
 # rate_index per product is taken from bank_data_only_dep.xlsx (already loaded as df_bs_struct)
 interest_rt = pd.read_excel('input_data/interest_rt.xlsx')
 fixing_file = '../balance_gen_add_data/input/fixing_input.xlsx'

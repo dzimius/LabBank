@@ -33,7 +33,7 @@ import sql_setup as opt_sql
 engine = opt_sql.engine
 
 # ── configuration ──────────────────────────────────────────────────────────────
-REPORT_DATE     = pd.to_datetime("2024-12-31")
+REPORT_DATE     = pd.to_datetime("2026-06-30")
 TOTAL_ASSETS    = 10_000_000_000
 HORIZON_DAYS    = 365
 HORIZON_30D     = 30
@@ -82,6 +82,11 @@ def _freq_to_months(freq) -> float:
     if freq is None or (isinstance(freq, float) and np.isnan(freq)):
         return 12.0
     s = str(freq).strip().upper()
+    if s.endswith("D"):
+        try:
+            return float(s[:-1]) / 30.44
+        except ValueError:
+            return 12.0
     if s.endswith("M"):
         try:
             return float(s[:-1])
@@ -348,6 +353,7 @@ def _load_cohort_cf_monthly() -> pd.DataFrame:
         GROUP BY s.product_code, s.bs_side, s.currency,
                  YEAR(s.start_date), MONTH(s.start_date),
                  mb.month_bucket_idx
+        OPTION (MAXDOP 1)
     """)
     df = _try_query(q, {"rd": REPORT_DATE})
     if not df.empty:
@@ -531,6 +537,7 @@ def _load_cohort_float_margins() -> dict:
         GROUP BY
             s.product_code, s.bs_side, s.currency,
             YEAR(s.start_date), MONTH(s.start_date)
+        OPTION (MAXDOP 1)
     """)
     df = _try_query(q, {"rd": REPORT_DATE})
     result: dict = {}
@@ -686,6 +693,18 @@ def _load_cohort_repricing() -> pd.DataFrame:
 
     def _row_tenor(row) -> float:
         if str(row.get("rate_type", "V")) == "F":
+            # F = "fixed today", not "fixed to maturity" -- a fixed mortgage
+            # (1000) or fixed bond (3000) still REFIXES on fixing_freq (e.g.
+            # "5Y", "7Y") per sched.loans/fin_inst; using maturity_date there
+            # overstated repricing tenor by 4-6x (e.g. 1000: ~231m observed
+            # vs the 60m its own fixing_freq says). Only fall back to
+            # maturity_date when fixing_freq is genuinely absent -- true
+            # bullet instruments like term_deposit_ind (7060), which really
+            # don't reprice before they mature. (2026-08-17)
+            freq = row.get("fixing_freq")
+            has_freq = freq is not None and not (isinstance(freq, float) and np.isnan(freq))
+            if has_freq:
+                return _freq_to_months(freq)
             if pd.notna(row.get("maturity_date")):
                 return max(1.0, (row["maturity_date"] - REPORT_DATE).days / 30.44)
             return 12.0
@@ -891,6 +910,7 @@ def _load_cohort_monthly_schedule() -> tuple[dict, dict, dict, dict, dict, dict,
         GROUP BY
             product_code, bs_side, currency, start_year, start_month,
             m_start, m_end
+        OPTION (MAXDOP 1)
     """)
 
     # Q2 — locked rate + t_first, one row per cohort.
@@ -924,6 +944,7 @@ def _load_cohort_monthly_schedule() -> tuple[dict, dict, dict, dict, dict, dict,
         GROUP BY
             s.product_code, s.bs_side, s.currency,
             YEAR(s.start_date), MONTH(s.start_date)
+        OPTION (MAXDOP 1)
     """)
 
     params = {"rd": REPORT_DATE}
@@ -1135,6 +1156,7 @@ def _load_cohort_effective_nii_tables(
           AND p.cf_end_dt > :rd
           AND p.cf_end_dt <= :he
           AND COALESCE(p.beh_total_pmt, 0) <> 0
+        OPTION (MAXDOP 1)
     """)
     horizon_end = REPORT_DATE + pd.Timedelta(days=round(365.25))
     df = _try_query(q, {"rd": REPORT_DATE, "he": horizon_end})
@@ -1172,6 +1194,10 @@ def _load_cohort_effective_nii_tables(
         ir_coeff["client_cap"].dropna().to_dict()
         if "client_cap" in ir_coeff.columns else {}
     ).fillna(float("inf")).to_numpy(dtype=float)
+    idx_floor_v = pcs.map(
+        ir_coeff["index_floor"].dropna().to_dict()
+        if "index_floor" in ir_coeff.columns else {}
+    ).fillna(0.0).to_numpy(dtype=float)
 
     def _lookup_df(scenario: str, dates: pd.Series) -> np.ndarray:
         out = np.ones(len(dates), dtype=float)
@@ -1193,7 +1219,7 @@ def _load_cohort_effective_nii_tables(
         df_e = _lookup_df(scenario, end)
         with np.errstate(divide="ignore", invalid="ignore"):
             fwd = np.where((df_e > 0.0) & (yf > 0.0), (df_s / df_e - 1.0) / yf, 0.0)
-        return np.maximum(0.0, np.nan_to_num(fwd, nan=0.0, posinf=0.0, neginf=0.0))
+        return np.maximum(idx_floor_v, np.nan_to_num(fwd, nan=0.0, posinf=0.0, neginf=0.0))
 
     cf_yf = df["cf_yf"].to_numpy(dtype=float)
     yf_from_report = ((df["cf_end_dt"] - REPORT_DATE).dt.days / 365.0).clip(lower=0.0).to_numpy(dtype=float)
@@ -1239,7 +1265,7 @@ def _load_cohort_effective_nii_tables(
                         (1.0 / dfe - 1.0) / yf_from_report,
                         0.0,
                     )
-                fwd_ren[before_arr] = np.maximum(0.0, np.nan_to_num(fwd_report_end[before_arr], nan=0.0))
+                fwd_ren[before_arr] = np.maximum(idx_floor_v[before_arr], np.nan_to_num(fwd_report_end[before_arr], nan=0.0))
         else:
             fwd_sh = _fwd_between(scen, df["cf_start_dt"], df["cf_end_dt"], cf_yf)
             fwd_interest = np.where(locked_arr, base_fwd, fwd_sh)
@@ -1254,7 +1280,7 @@ def _load_cohort_effective_nii_tables(
                         (1.0 / dfe - 1.0) / yf_from_report,
                         0.0,
                     )
-                fwd_ren[before_arr] = np.maximum(0.0, np.nan_to_num(fwd_report_end[before_arr], nan=0.0))
+                fwd_ren[before_arr] = np.maximum(idx_floor_v[before_arr], np.nan_to_num(fwd_report_end[before_arr], nan=0.0))
 
         eff_interest = np.minimum(cap_v, np.maximum(floor_v, eff_interest))
         ren_rate = np.minimum(cap_v, np.maximum(floor_v, a_v * fwd_ren + b_v))
@@ -1341,6 +1367,7 @@ def _query_cohort_cf_schedule() -> pd.DataFrame:
         WHERE CAST(p.product_code AS VARCHAR(4)) IN ({_C_IN})
           AND p.cf_end_dt > :rd
           AND COALESCE(p.beh_total_pmt, 0) <> 0
+        OPTION (MAXDOP 1)
     """)
     df = _try_query(q, {"rd": REPORT_DATE})
     if df.empty:
@@ -1394,6 +1421,10 @@ def _compute_cohort_eve_pv(
         ir_coeff["client_cap"].dropna().to_dict()
         if "client_cap" in ir_coeff.columns else {}
     ).fillna(float("inf")).to_numpy(dtype=float)
+    idx_floor_v = pcs.map(
+        ir_coeff["index_floor"].dropna().to_dict()
+        if "index_floor" in ir_coeff.columns else {}
+    ).fillna(0.0).to_numpy(dtype=float)
 
     cf_yf = df["cf_yf"].to_numpy(dtype=float)
     base_fwd = df["base_fwd"].to_numpy(dtype=float)
@@ -1436,7 +1467,7 @@ def _compute_cohort_eve_pv(
         df_e = _lookup_df(scenario, end, nan_before=False)
         with np.errstate(divide="ignore", invalid="ignore"):
             fwd = np.where((df_e > 0.0) & (yf > 0.0), (df_s / df_e - 1.0) / yf, 0.0)
-        return np.maximum(0.0, np.nan_to_num(fwd, nan=0.0, posinf=0.0, neginf=0.0))
+        return np.maximum(idx_floor_v, np.nan_to_num(fwd, nan=0.0, posinf=0.0, neginf=0.0))
 
     period_end = df["cf_end_dt"].copy()
     var_fix_mask = is_var & has_fixing
@@ -1497,7 +1528,7 @@ def _compute_cohort_eve_pv(
                         (pstart_df / pend_df - 1.0) / period_yf,
                         0.0,
                     )
-                fwd_period = np.maximum(0.0, np.nan_to_num(fwd_period, nan=0.0))
+                fwd_period = np.maximum(idx_floor_v, np.nan_to_num(fwd_period, nan=0.0))
                 fwd_sh[var_fix_mask] = np.where(
                     valid[var_fix_mask],
                     fwd_period[var_fix_mask],
@@ -1852,6 +1883,16 @@ def build_product_params() -> None:
     print("Loading bs_structure...")
     bs = _load_bs_structure()
     print(f"  {len(bs)} rows in bs_structure")
+
+    _known_codes = COHORT_PRODUCT_CODES | SINGLE_ROW_PRODUCT_CODES | IRS_PRODUCT_CODES
+    _uncovered = set(bs["product_code"]) - _known_codes
+    assert not _uncovered, (
+        f"bs_structure has product_code(s) {sorted(_uncovered)} not covered by "
+        "COHORT_PRODUCT_CODES / SINGLE_ROW_PRODUCT_CODES / IRS_PRODUCT_CODES — "
+        "add the new product to the right set (here, and in every hand-copied "
+        "mirror: diagnose_accuracy.py, cohort_cf_drill.py) before it silently "
+        "vanishes from product_params.npz."
+    )
 
     print("Loading fin_data (CoC, CET1)...")
     fin_params  = _load_fin_data()

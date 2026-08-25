@@ -31,10 +31,10 @@ import sql_setup
 import eba_shock_curves as esc
 import eba_sot_objects as sot
 
-BASE_DIR = "C:/Users/dzimi/Documents/data_engineering/data_projects/git_hub_projects/bank_project/irrbb_calc"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(BASE_DIR)
 
-config.report_date = pd.to_datetime("2024-12-31")
+config.report_date = pd.to_datetime("2026-06-30")
 
 HORIZON_YF    = 1.0
 CURRENCY      = "PLN"
@@ -87,7 +87,7 @@ print(f"Loaded {len(all_beh):,} CF rows ({all_beh['schedule_id'].nunique()} sche
 
 # ── 1. Run SOT for all 7 stressed scenarios ────────────────────────────────────
 print("\nComputing EBA SOT (bucket-level 50% haircut)...")
-print(f"{'Scenario':<10} {'ΔEVE':>14} {'ΔEVE_reg':>14} {'ΔNII':>14} {'ΔNII_reg':>14}")
+print(f"{'Scenario':<10} {'dEVE':>14} {'dEVE_reg':>14} {'dNII':>14} {'dNII_reg':>14}")
 print("-" * 60)
 
 eve_detail_parts  = []
@@ -291,14 +291,14 @@ with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
 print(f"\nEBA SOT results written to {output_path}")
 
 # ── 6. Print SOT breach summary ────────────────────────────────────────────────
-print("\n── EVE SOT summary (threshold: −15% of Tier 1) ──")
+print("\n-- EVE SOT summary (threshold: -15% of Tier 1) --")
 if not eve_summary.empty:
     print(eve_summary[["scenario_id", "currency", "eve_base", "eve_shocked",
                         "delta_eve", "delta_eve_reg",
                         "sot_eve_pct", "sot_eve_pct_reg", "sot_breach"]]
           .to_string(index=False))
 
-print("\n── NII SOT summary (threshold: −5% of Tier 1) ──")
+print("\n-- NII SOT summary (threshold: -5% of Tier 1) --")
 if not nii_summary.empty:
     print(nii_summary[["scenario_id", "currency", "nii_base", "nii_shocked",
                         "delta_nii", "delta_nii_reg",

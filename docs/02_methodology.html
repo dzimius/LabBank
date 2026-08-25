@@ -54,6 +54,59 @@ hr { border: none; border-top: 1px solid #ddd; margin: 2.5rem 0; }
 <p>Every number in every report traces back to a single row in a single cash-flow table. No aggregation happens before it is recorded.</p>
 </blockquote>
 <p>That means NII, EVE, LCR, and NSFR are not four separate models — they're four different aggregations of the <em>same</em> underlying cash-flow schedule.</p>
+<h2 id="measures-at-a-glance">Measures at a glance</h2>
+<table>
+<thead>
+<tr>
+<th>Measure</th>
+<th>Formula (one line)</th>
+<th>Full derivation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>NII</td>
+<td>Σ locked-interest + renewal cash flows over 1Y, per scenario</td>
+<td><a href="#irrbb--nii">IRRBB — NII</a></td>
+</tr>
+<tr>
+<td>EVE</td>
+<td>Σ behavioural cash flows × discount factor, run-off to maturity</td>
+<td><a href="#irrbb--eve">IRRBB — EVE</a></td>
+</tr>
+<tr>
+<td>SOT</td>
+<td>min(ΔEVE, 0) + 0.5 × max(ΔEVE, 0), same for NII, vs. Tier 1</td>
+<td><a href="#supervisory-outlier-test-eba-sot">Supervisory Outlier Test</a></td>
+</tr>
+<tr>
+<td>RWA / Tier 1</td>
+<td>Σ balance × rwa_weight ; Tier 1 capital / RWA</td>
+<td><a href="#capital--rwa-and-the-tier-1-ratio">Capital — RWA and the Tier 1 ratio</a></td>
+</tr>
+<tr>
+<td>LCR</td>
+<td>Σ HQLA × (1 − haircut) / Σ liability × outflow rate</td>
+<td><a href="#liquidity--lcr-and-nsfr">Liquidity — LCR and NSFR</a></td>
+</tr>
+<tr>
+<td>NSFR</td>
+<td>Σ liability × ASF / Σ asset × RSF</td>
+<td><a href="#liquidity--lcr-and-nsfr">Liquidity — LCR and NSFR</a></td>
+</tr>
+<tr>
+<td>Repricing gap</td>
+<td>Σ assets repricing in bucket − Σ liabilities repricing in bucket</td>
+<td><a href="#repricing-gap-and-interest-rate-swaps">Repricing gap and interest rate swaps</a></td>
+</tr>
+<tr>
+<td>Behavioural liquidity gap</td>
+<td>cumulative Σ (behavioural inflows − outflows)</td>
+<td><a href="#behavioural-liquidity-gap">Behavioural liquidity gap</a></td>
+</tr>
+</tbody>
+</table>
+<p>Every row below is derived from the same underlying cash-flow table (<code>cf.products</code>) — see <a href="#data-model--sql-schema-reference">Data model</a>.</p>
 <h2 id="architecture-in-four-layers">Architecture, in four layers</h2>
 <pre><code>Excel inputs  →  Python modules (orchestrated by Dagster)  →  SQL Server (9 schemas)  →  Reports
 </code></pre>
@@ -612,7 +665,10 @@ hr { border: none; border-top: 1px solid #ddd; margin: 2.5rem 0; }
 </ul>
 <p>The key output table, <code>cf.products</code>, has one row per (transaction, payment date), including both the contractual and behavioural outstanding balance and cash flow, the market forward rate, and the all-in client rate. NII is computed from the interest cash flows within the 1-year horizon; EVE uses the full behavioural run-off schedule to maturity.</p>
 <h2 id="repricing-gap-and-interest-rate-swaps">Repricing gap and interest rate swaps</h2>
-<p>The <strong>repricing gap</strong> is the net volume of assets minus liabilities repricing in each tenor bucket. A positive gap means more assets reprice in that bucket — the bank benefits from rising rates there; a negative gap signals liability-sensitive exposure.</p>
+<p>The <strong>repricing gap</strong> is the net volume of assets minus liabilities repricing in each tenor bucket:</p>
+<pre><code>Gap_bucket = Σ (asset balances repricing in that bucket) − Σ (liability balances repricing in that bucket)
+</code></pre>
+<p>A positive gap means more assets reprice in that bucket — the bank benefits from rising rates there; a negative gap signals liability-sensitive exposure.</p>
 <p>Interest rate swaps overlay this gap <strong>without changing the underlying balance sheet</strong>: the swap gap is computed separately and merged into the balance-sheet repricing gap before IRRBB is calculated. This is what lets LabBank show "balance sheet only" vs. "balance sheet + IRS" gap views side by side.</p>
 <h3 id="how-a-swap-is-set-up">How a swap is set up</h3>
 <p>Swaps are defined in <code>ir_derivatives/input/irs_input.xlsx</code>, one row per trade:</p>
@@ -694,18 +750,33 @@ sign = +1 for assets, −1 for liabilities
 <li><strong>EVE SOT</strong>: ΔEVE_regulatory / Tier 1 capital &lt; −15% → breach.</li>
 <li><strong>NII SOT</strong>: ΔNII_regulatory / Tier 1 capital &lt; −5% → breach.</li>
 </ul>
+<h2 id="capital-rwa-and-the-tier-1-ratio">Capital — RWA and the Tier 1 ratio</h2>
+<pre><code>RWA             = Σᵢ balanceᵢ × rwa_weightᵢ                (assets only)
+Tier 1 / RWA    = Tier 1 capital / RWA                       ≥ configurable minimum
+</code></pre>
+<p>Tier 1 capital is read directly off the equity side of the balance sheet (<code>schemat.equity</code> / <code>dbo.equity</code>). <code>rwa_weight</code> is a per-product column in <code>bs_structure</code> (illustrative Basel/CRR-inspired risk-weight bands — see the product tables above; ~0% for sovereigns/cash, ~35% for mortgages, ~75% for unsecured/SME lending). LabBank's Metrics tab shows this ratio next to the EVE/NII SOT results, against a configurable minimum threshold.</p>
 <h2 id="liquidity-lcr-and-nsfr">Liquidity — LCR and NSFR</h2>
-<pre><code>LCR  = HQLA / stressed net outflows (30 days)   ≥ 100%
-NSFR = Available Stable Funding / Required Stable Funding   ≥ 100%
+<pre><code>LCR  = HQLA / stressed net outflows (30 days)                          ≥ 100%
+     = Σᵢ balanceᵢ × (1 − haircutᵢ)              [HQLA-eligible assets]
+       ─────────────────────────────────────
+       Σⱼ balanceⱼ × lcr_outflow_rateⱼ            [liabilities, 30-day stress]
+
+NSFR = Available Stable Funding / Required Stable Funding              ≥ 100%
+     = Σⱼ balanceⱼ × ASFⱼ                          [liabilities &amp; equity]
+       ────────────────────
+       Σᵢ balanceᵢ × RSFᵢ                          [assets]
 </code></pre>
 <ul>
-<li><strong>HQLA</strong> — Level 1 liquid assets (cash, central bank reserves, sovereign bonds) at their respective haircuts.</li>
-<li><strong>Net outflows</strong> — stressed deposit run-off and interbank maturities within 30 days.</li>
-<li><strong>ASF</strong> — stable funding weighted by tenor and type (equity and long-term debt score highest).</li>
-<li><strong>RSF</strong> — assets weighted by illiquidity (loans and illiquid instruments score highest).</li>
+<li><strong>HQLA</strong> — Level 1 liquid assets (cash, central bank reserves, sovereign bonds, T-bills) at their respective haircuts (<code>haircut</code>/<code>hqla_class</code> columns in <code>bs_structure</code> — 0% haircut for all Level 1 assets in the shipped demo data).</li>
+<li><strong>Net outflows</strong> — each liability's balance weighted by its <code>LCR</code> outflow rate (e.g. ~5% for sticky retail current accounts vs. ~100% for wholesale interbank funding) — stressed deposit run-off and interbank maturities within 30 days.</li>
+<li><strong>ASF</strong> — each liability/equity balance weighted by its <code>ASF</code> factor — tenor- and type-dependent, equity and long-term debt score highest (100%).</li>
+<li><strong>RSF</strong> — each asset balance weighted by its <code>RSF</code> factor — illiquidity-dependent, loans score highest, HQLA scores lowest (e.g. ~5%).</li>
 </ul>
 <h2 id="behavioural-liquidity-gap">Behavioural liquidity gap</h2>
-<p>Beyond the regulatory ratios, the liquidity gap shows the net cash position across the full tenor ladder (up to 60 months), using behavioural cash flows — loan prepayments included, NMD decay applied. A sustained negative cumulative gap identifies the point at which the bank would need additional funding — the primary input for contingency funding planning, distinct from the point-in-time LCR/NSFR ratios.</p>
+<p>Beyond the regulatory ratios, the liquidity gap shows the net cash position across the full tenor ladder (up to 60 months), using behavioural cash flows — loan prepayments included, NMD decay applied:</p>
+<pre><code>Cumulative gap_t = Σ_{k ≤ t} (behavioural inflows_k − behavioural outflows_k)
+</code></pre>
+<p>A sustained negative cumulative gap identifies the point at which the bank would need additional funding — the primary input for contingency funding planning, distinct from the point-in-time LCR/NSFR ratios.</p>
 <h2 id="exploring-this-interactively-labbank">Exploring this interactively — LabBank</h2>
 <p>The Streamlit app (<code>sandbox/app.py</code>) lets you stress every piece described above without touching SQL. See the <a href="01_setup_guide.md">setup guide</a> to run it — this section is a tour of what each tab does.</p>
 <h3 id="balance-sheet">⚖️ Balance Sheet</h3>

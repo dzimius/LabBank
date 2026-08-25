@@ -65,7 +65,7 @@ Recommended additional README visuals:
 
 - [`docs/01_setup_guide.md`](docs/01_setup_guide.md) — installing and running both quick-start paths.
 - [`docs/02_methodology.md`](docs/02_methodology.md) — the ALM/IRRBB/liquidity methodology behind the calculations.
-- [`docs/03_technical_notes.md`](docs/03_technical_notes.md) — candid, file:line-specific maintainer notes on architecture, known weak spots, and technical debt.
+- [`docs/03_technical_notes.md`](docs/03_technical_notes.md) — a code-level companion covering key classes/functions per module, design decisions, and known limitations.
 
 ## Functional modules
 

@@ -7,14 +7,13 @@ import QuantLib as ql
 import cf_calc_objects as cf_obj
 import datetime
 
-BASE_DIR = "C:/Users/dzimi/Documents/data_engineering/data_projects/git_hub_projects/bank_project/cash_flow_calc"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(BASE_DIR)
 
 print(datetime.datetime.now(), "Starting cash flow calculation workflow...")
-config.report_date = pd.to_datetime('2024-12-31')
+config.report_date = pd.to_datetime('2026-06-30')
 
 mode = 0
-## musi byc zaimplementowany mode aby przy jedynce dorzucac tylko harmonogramy ktore nie sa w juz isntiejacych tabelach
 
 sql_setup.reset_data(mode)
 
@@ -48,7 +47,6 @@ for _, _r in _ir_df.iterrows():
     ir_params[pc] = {
         'index_floor': float(_r['index_floor']) if 'index_floor' in _ir_df.columns and not pd.isna(_r['index_floor']) else None,
         'client_floor': float(_r['client_floor']) if 'client_floor' in _ir_df.columns and not pd.isna(_r['client_floor']) else None,
-        'delay': int(_r['delay']) if 'delay' in _ir_df.columns and not pd.isna(_r['delay']) else 0,
     }
 
 disc_df = (
@@ -114,7 +112,7 @@ for table_name in cf_obj.dict_cols_loan_fin_inst.keys():
         if is_loans:
             # ── contractual (orig) side ──────────────────────────────────────
             orig_df = batch_df[['schedule_id', 'bs_side', 'rate_index', 'fixing_dt',
-                                 'cf_start_dt', 'cf_start_dt_delay', 'cf_end_dt', 'cf_yf', 'd_f', 'fwd_rt',
+                                 'cf_start_dt', 'cf_end_dt', 'cf_yf', 'd_f', 'fwd_rt',
                                  'margin', 'client_rt', 'outstanding_bal',
                                  'capital_pmt', 'int_pmt', 'total_pmt']].copy()
 
@@ -138,7 +136,7 @@ for table_name in cf_obj.dict_cols_loan_fin_inst.keys():
 
             beh_df = (
                 batch_df[['schedule_id', 'bs_side', 'rate_index', 'fixing_dt',
-                           'cf_start_dt', 'cf_start_dt_delay', 'cf_end_dt', 'cf_yf', 'd_f', 'fwd_rt',
+                           'cf_start_dt', 'cf_end_dt', 'cf_yf', 'd_f', 'fwd_rt',
                            'margin', 'client_rt', 'outstanding_adj', 'capital_adj',
                            'prepayment_pmt', 'int_adj']]
                 .copy()

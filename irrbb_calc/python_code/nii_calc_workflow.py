@@ -27,10 +27,10 @@ import eve_calc_objects as eve_obj
 import eba_shock_curves as esc
 import eba_sot_objects as sot
 
-BASE_DIR = "C:/Users/dzimi/Documents/data_engineering/data_projects/git_hub_projects/bank_project/irrbb_calc"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(BASE_DIR)
 
-config.report_date = pd.to_datetime("2024-12-31")
+config.report_date = pd.to_datetime("2026-06-30")
 
 HORIZON_YF    = 1.0
 CURRENCY      = "PLN"           # primary currency for EBA shock calibration
