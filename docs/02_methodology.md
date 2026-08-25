@@ -89,7 +89,7 @@ Every table the pipeline writes, one row each, grouped by schema and pipeline st
 
 ### Available product types
 
-Every product on the balance sheet is a row of parameters (`balance_generate/input_data/bank_data.xlsx`, sheet `bs_structure`) — the same template used for the products shipped today is what you'd copy to add a new one (credit cards, a working-capital/investment-loan split for corporates, T-bills, central bank cash, etc.).
+Every product on the balance sheet is a row of parameters (`balance_generate/input_data/bank_data.xlsx`, sheet `bs_structure`) — the same template used for the products shipped today is what you'd copy to add a new one (credit cards, a working-capital/investment-loan split for corporates, central bank cash, etc.).
 
 Each product type carries risk parameters — RWA weight and PD/LGD for assets; LCR outflow rate and ASF/RSF weight for liabilities and other assets. **These are illustrative values loosely inspired by the shape of real regulatory categories (Basel/CRR risk-weight bands, LCR/NSFR factor tables), not a precise regulatory calibration.** They're plain columns in an Excel file — change them for your own scenario, and there's no code to touch.
 
@@ -101,6 +101,7 @@ Each product type carries risk parameters — RWA weight and PD/LGD for assets; 
 | Consumer / cash loan | Unsecured personal loan to individuals, shorter tenor, amortising | Fixed or floating | ~75% | ~2.0–2.5% / ~45% |
 | SME investment / working-capital loan | Loan to a small/medium enterprise for capex or working capital | Floating | ~75% | ~1.5% / ~35% |
 | Government bond | Sovereign debt held as a liquidity buffer / investment | Fixed or floating | 0% | ~0.5% / ~45% (HQLA Level 1, 0% haircut) |
+| Treasury bill | Very short-dated (7-day) sovereign paper, the HQLA short end | Fixed | 0% | ~0.5% / ~45% (HQLA Level 1, 0% haircut) |
 | Cash / central bank reserves | Overnight liquid balance at the central bank | — | 0% | — (HQLA Level 1, 0% haircut) |
 | Interbank placement | Short-term money-market lending to other banks | Floating | ~20% | ~0.2% / ~45% |
 
@@ -128,6 +129,7 @@ Here's exactly how those types are configured in the demo `bank_data.xlsx` today
 | 4100 | Investment loan (SME), floating | Asset | Variable | 5Y | No (bullet) | 1M | 3M |
 | 3000 | Government bond, fixed | Asset | Fixed | 5Y | No (bullet) | 1Y | 5Y |
 | 3100 | Government bond, floating | Asset | Variable | 5Y | No (bullet) | 6M | 6M |
+| 3200 | Treasury bill | Asset | Fixed | 7D | No (bullet) | 7D | — |
 | 3500 | Cash / central bank reserves | Asset | Fixed | 25Y* | Yes | 1M | 5Y |
 | 7900 | Interbank placement / deposit | Both | Variable | 1M | No (bullet) | 1M | 1M |
 | 6000 | Current account (retail) | Liability | Administrative | Non-maturing | — | 1M | — |
@@ -284,7 +286,7 @@ The base forward/zero curve per currency, the full set of EBA shock scenario cur
 
 ## What's next — balance sheet optimisation
 
-Balance sheet optimisation (constrained economic-profit vs. ΔEVE/ΔNII breach trade-off) is the next phase, implemented in `bs_optimization/` as four solvers (deterministic, joint balance-sheet + swap overlay, stochastic Monte Carlo, and a natural-hedge minimiser). It's functional but not yet part of the guided LabBank path — treat it as a preview of where this project is heading rather than a finished, documented feature.
+Balance sheet optimisation (constrained economic-profit vs. ΔEVE/ΔNII breach trade-off) is the next phase, implemented as four solvers (deterministic, joint balance-sheet + swap overlay, stochastic Monte Carlo, and a natural-hedge minimiser). It's functional and fairly mature, but it lives in `bs_optimization/`, which is a **private git submodule** (`LabBank-Optimization`) — not part of this public repository. It's also not yet part of the guided LabBank path; treat it as a preview of where this project is heading rather than a finished, documented feature.
 
 ## A note on scope
 

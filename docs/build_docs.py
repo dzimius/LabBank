@@ -22,7 +22,7 @@ DOCS_DIR = os.path.dirname(os.path.abspath(__file__))
 DOC_FILES = [
     ("01_setup_guide.md", "LabBank — Setup Guide"),
     ("02_methodology.md", "LabBank — Methodology"),
-    ("03_technical_notes.md", "LabBank — Technical Notes (Internal)"),
+    ("03_technical_notes.md", "LabBank — Technical Notes"),
 ]
 
 CSS = """

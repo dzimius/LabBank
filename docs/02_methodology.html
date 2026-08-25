@@ -300,7 +300,7 @@ hr { border: none; border-top: 1px solid #ddd; margin: 2.5rem 0; }
 </table>
 <h2 id="products-on-the-balance-sheet">Products on the balance sheet</h2>
 <h3 id="available-product-types">Available product types</h3>
-<p>Every product on the balance sheet is a row of parameters (<code>balance_generate/input_data/bank_data.xlsx</code>, sheet <code>bs_structure</code>) — the same template used for the products shipped today is what you'd copy to add a new one (credit cards, a working-capital/investment-loan split for corporates, T-bills, central bank cash, etc.).</p>
+<p>Every product on the balance sheet is a row of parameters (<code>balance_generate/input_data/bank_data.xlsx</code>, sheet <code>bs_structure</code>) — the same template used for the products shipped today is what you'd copy to add a new one (credit cards, a working-capital/investment-loan split for corporates, central bank cash, etc.).</p>
 <p>Each product type carries risk parameters — RWA weight and PD/LGD for assets; LCR outflow rate and ASF/RSF weight for liabilities and other assets. <strong>These are illustrative values loosely inspired by the shape of real regulatory categories (Basel/CRR risk-weight bands, LCR/NSFR factor tables), not a precise regulatory calibration.</strong> They're plain columns in an Excel file — change them for your own scenario, and there's no code to touch.</p>
 <p><strong>Asset types:</strong></p>
 <table>
@@ -339,6 +339,13 @@ hr { border: none; border-top: 1px solid #ddd; margin: 2.5rem 0; }
 <td>Government bond</td>
 <td>Sovereign debt held as a liquidity buffer / investment</td>
 <td>Fixed or floating</td>
+<td>0%</td>
+<td>~0.5% / ~45% (HQLA Level 1, 0% haircut)</td>
+</tr>
+<tr>
+<td>Treasury bill</td>
+<td>Very short-dated (7-day) sovereign paper, the HQLA short end</td>
+<td>Fixed</td>
 <td>0%</td>
 <td>~0.5% / ~45% (HQLA Level 1, 0% haircut)</td>
 </tr>
@@ -499,6 +506,16 @@ hr { border: none; border-top: 1px solid #ddd; margin: 2.5rem 0; }
 <td>No (bullet)</td>
 <td>6M</td>
 <td>6M</td>
+</tr>
+<tr>
+<td>3200</td>
+<td>Treasury bill</td>
+<td>Asset</td>
+<td>Fixed</td>
+<td>7D</td>
+<td>No (bullet)</td>
+<td>7D</td>
+<td>—</td>
 </tr>
 <tr>
 <td>3500</td>
@@ -705,7 +722,7 @@ NSFR = Available Stable Funding / Required Stable Funding   ≥ 100%
 <h3 id="market-curves">📉 Market Curves</h3>
 <p>The base forward/zero curve per currency, the full set of EBA shock scenario curves overlaid, and a "hypothetical scenarios" panel where you can pick a stylised curve shape (normal, steep, humped, flat, inverted) and rate level (low/medium/high) to see NII/EVE under a rate environment that isn't one of the 7 EBA scenarios.</p>
 <h2 id="whats-next-balance-sheet-optimisation">What's next — balance sheet optimisation</h2>
-<p>Balance sheet optimisation (constrained economic-profit vs. ΔEVE/ΔNII breach trade-off) is the next phase, implemented in <code>bs_optimization/</code> as four solvers (deterministic, joint balance-sheet + swap overlay, stochastic Monte Carlo, and a natural-hedge minimiser). It's functional but not yet part of the guided LabBank path — treat it as a preview of where this project is heading rather than a finished, documented feature.</p>
+<p>Balance sheet optimisation (constrained economic-profit vs. ΔEVE/ΔNII breach trade-off) is the next phase, implemented as four solvers (deterministic, joint balance-sheet + swap overlay, stochastic Monte Carlo, and a natural-hedge minimiser). It's functional and fairly mature, but it lives in <code>bs_optimization/</code>, which is a <strong>private git submodule</strong> (<code>LabBank-Optimization</code>) — not part of this public repository. It's also not yet part of the guided LabBank path; treat it as a preview of where this project is heading rather than a finished, documented feature.</p>
 <h2 id="a-note-on-scope">A note on scope</h2>
 <p>Behavioural models (prepayment, NMD decay) are illustrative rather than calibrated to a real portfolio, and the balance sheet itself is synthetic. This project demonstrates <em>how</em> an ALM pipeline should be built and how its metrics relate to each other — it is not a substitute for a validated, governed production risk system.</p>
 </body>

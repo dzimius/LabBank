@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>LabBank — Technical Notes (Internal)</title>
+<title>LabBank — Technical Notes</title>
 <style>
 :root {
   color-scheme: light dark;
@@ -45,8 +45,9 @@ hr { border: none; border-top: 1px solid #ddd; margin: 2.5rem 0; }
 </head>
 <body>
 <div class="doc-header">LabBank &mdash; bank_project</div>
-<h1 id="labbank-technical-notes-internal">LabBank — Technical Notes (Internal)</h1>
-<p>For the maintainer, not written for a public audience. Candid, file:line-specific, ranked by how much it matters rather than how easy it is to fix. Findings below were verified against the code (spot-checked file:line references), not guessed.</p>
+<h1 id="labbank-technical-notes">LabBank — Technical Notes</h1>
+<p>Written for the maintainer, not as a public-facing pitch — candid, file:line-specific, ranked by how much it matters rather than how easy it is to fix. Findings below were verified against the code (spot-checked file:line references), not guessed.</p>
+<p>A handful of the file:line references below point into <code>bs_optimization/</code>, which is now a private git submodule (see §1) — those are only resolvable for someone with submodule access.</p>
 <h2 id="1-architecture-and-data-flow-quick-reference">1. Architecture and data flow, quick reference</h2>
 <p>See <a href="02_methodology.md">Methodology</a> for the full explanation. For maintenance purposes, the short version:</p>
 <pre><code>Excel inputs → Python workflow scripts (orchestrated by Dagster) → SQL Server (9 schemas) → Reports
@@ -101,7 +102,7 @@ hr { border: none; border-top: 1px solid #ddd; margin: 2.5rem 0; }
 <td><code>optimize_prep/output/*.npz</code>, <code>bank_data.xlsx</code></td>
 </tr>
 <tr>
-<td><code>bs_optimization/</code></td>
+<td><code>bs_optimization/</code> (private submodule — <code>LabBank-Optimization</code>)</td>
 <td><code>bs_optimization/output/*</code></td>
 <td><code>optimize_prep/output/*.npz</code></td>
 </tr>
@@ -128,13 +129,13 @@ hr { border: none; border-top: 1px solid #ddd; margin: 2.5rem 0; }
 <p>Even with SQL Server pointed correctly, none of these scripts run after <code>git clone</code> to a different path, for a second contributor, or in CI. Fix: derive <code>BASE_DIR</code> from <code>os.path.dirname(os.path.abspath(__file__))</code> like <code>optimize_prep/python_code/extract_params.py:27-28</code> already does correctly — that file is the template to copy from.</p>
 <ol>
 <li>
-<p><strong><code>sql_setup.py</code> duplicated 7 times</strong> with an identical hardcoded connection string (<code>mssql+pyodbc://maciek_d/bank_gen...</code>) — <code>balance_generate</code>, <code>balance_gen_add_data</code>, <code>cash_flow_calc</code>, <code>ir_derivatives</code>, <code>irrbb_calc</code>, <code>liq_calc</code>, <code>optimize_prep</code>. Beyond the connection string itself, the CRUD helpers (<code>write_df</code>/<code>reset_data</code>/engine creation) are hand-copied with subtly different defaults (e.g. default schema varies between <code>'dbo'</code> and <code>'cf'</code> across copies — <code>cash_flow_calc/python_code/sql_setup.py:97-120</code> vs <code>ir_derivatives/python_code/sql_setup.py:104,215</code>). Fix: one shared <code>db_config.py</code> at repo root with the connection string as an environment variable, imported by all 7 modules.</p>
+<p><strong><code>sql_setup.py</code> duplicated 7 times</strong> with an identical hardcoded connection string (<code>mssql+pyodbc://maciek_d/bank_gen...</code>) — <code>balance_generate</code>, <code>balance_gen_add_data</code>, <code>cash_flow_calc</code>, <code>ir_derivatives</code>, <code>irrbb_calc</code>, <code>liq_calc</code>, <code>optimize_prep</code>. Beyond the connection string itself, the CRUD helpers (<code>write_df</code>/<code>reset_data</code>/engine creation) are hand-copied with subtly different defaults (e.g. default schema varies between <code>'dbo'</code> and <code>'cf'</code> across copies — <code>cash_flow_calc/python_code/sql_setup.py:149</code> vs <code>ir_derivatives/python_code/sql_setup.py:215</code>). Fix: one shared <code>db_config.py</code> at repo root with the connection string as an environment variable, imported by all 7 modules.</p>
 </li>
 <li>
 <p><strong>The same hardcoded constants are duplicated independently across many files</strong>, with nothing enforcing they stay in sync:</p>
 </li>
 <li><code>TOTAL_ASSETS = 10_000_000_000</code> in <code>balance_generate/python_code/b_s_gen_workflow.py:15</code> (as <code>total_assets</code>, lowercase), <code>liq_calc/python_code/lcr_nsfr_workflow.py:25</code>, <code>optimize_prep/python_code/extract_params.py:37</code>, <code>optimize_prep/python_code/accuracy_check.py:49</code>.</li>
-<li><code>REPORT_DATE = 2024-12-31</code> in at least 10 files across <code>balance_generate</code>, <code>cash_flow_calc</code>, <code>irrbb_calc</code> (×3), <code>ir_derivatives</code> (×2), <code>balance_gen_add_data</code>, <code>optimize_prep/extract_params.py</code>, <code>bs_optimization/swap_ladder.py</code>.</li>
+<li><code>REPORT_DATE = 2026-06-30</code> in at least 10 files across <code>balance_generate</code>, <code>cash_flow_calc</code>, <code>irrbb_calc</code> (×3), <code>ir_derivatives</code> (×2), <code>balance_gen_add_data</code>, <code>optimize_prep/extract_params.py</code>, <code>bs_optimization/swap_ladder.py</code>.</li>
 </ol>
 <p>Moving the report date or scaling total assets means editing every copy in lockstep by hand. <code>swap_ladder.py</code>'s comment "matches extract_params.REPORT_DATE" is a comment, not an assertion — nothing actually checks it. Worth centralizing into one <code>config.py</code> imported everywhere, or at minimum adding a startup assertion that cross-checks a couple of the copies.</p>
 <hr />
@@ -148,7 +149,7 @@ hr { border: none; border-top: 1px solid #ddd; margin: 2.5rem 0; }
 <p><strong>No FX conversion layer despite multi-currency scaffolding.</strong> Per-currency curves and calendars exist throughout (<code>cash_flow_calc/python_code/cf_calc_objects.py:118-124</code>, <code>irrbb_calc/python_code/eba_shock_curves.py</code>, <code>optimize_prep/python_code/extract_params.py:580</code>), but there is no <code>exchange_rate</code>/<code>fx_spot</code> table or conversion step anywhere in the repo. Currently a no-op because the synthetic balance sheet is 100% PLN — but it's one Excel edit away from silently summing raw USD/EUR balances into PLN totals in LCR/NSFR/EVE/NII aggregation, with no guard rail.</p>
 </li>
 <li>
-<p><strong><code>vol_elasticity</code> exists in the schema but is only consumed by the optimizer, never by the core IRRBB engine.</strong> <code>optimize_prep/python_code/extract_params.py:127</code> carries this column, but <code>irrbb_calc/python_code/{nii_calc_objects.py, eve_calc_objects.py}</code> only re-price existing balances under a shock — there's no deposit-volume or current-account-migration response modeled in NII/EVE itself. Standard constant-balance-sheet assumption for SOT purposes, but worth stating explicitly since the elasticity machinery living elsewhere could be mistaken for being wired into the core engine.</p>
+<p><strong><code>vol_elasticity</code> exists in the schema but is only consumed by the optimizer, never by the core IRRBB engine.</strong> <code>optimize_prep/python_code/extract_params.py:132</code> carries this column, but <code>irrbb_calc/python_code/{nii_calc_objects.py, eve_calc_objects.py}</code> only re-price existing balances under a shock — there's no deposit-volume or current-account-migration response modeled in NII/EVE itself. Standard constant-balance-sheet assumption for SOT purposes, but worth stating explicitly since the elasticity machinery living elsewhere could be mistaken for being wired into the core engine.</p>
 </li>
 <li>
 <p><strong>The fast optimizer's bias correction is calibrated once at the base point and held constant across all shocked scenarios.</strong> <code>optimize_prep/python_code/nii_eve_cf_fast.py:15-27,42-43,539-569</code> — self-documented in the docstring ("in shocked scenarios the bias is assumed constant"), so lower priority since the author already flagged it. Means the fast engine's shocked deltas are exact-adjacent only near the base point.</p>
@@ -171,7 +172,7 @@ hr { border: none; border-top: 1px solid #ddd; margin: 2.5rem 0; }
 <p><strong><code>liq_calc/python_code/lcr_nsfr_objects.py:194-295</code> (<code>build_irrbb_report</code>) is dead code</strong> — confirmed via repo-wide grep, it's never called anywhere. It independently re-implements the same delta/Tier-1-capital% SOT calculation that already exists in <code>irrbb_calc/python_code/{eba_sot_workflow.py:184-190, eve_calc_workflow.py:197-202, nii_calc_workflow.py:304-305}</code>. It also has a suspicious <code>tier1_capital: float = 1.0</code> default (should be hundreds of millions of PLN) which would silently produce nonsense if this function were ever revived without noticing. Delete it, or wire it in — not both existing.</p>
 </li>
 <li>
-<p><strong><code>COHORT_PRODUCT_CODES</code>/<code>SINGLE_ROW_PRODUCT_CODES</code> frozensets are hand-copied in 3+ files</strong> with no shared source of truth: <code>optimize_prep/python_code/extract_params.py:52-56</code>, <code>diagnose_accuracy.py:44-45</code>, <code>cohort_cf_drill.py:55</code>, plus a partial copy in <code>accuracy_check.py:409</code>. See fragile-coupling finding below for the drift risk this creates.</p>
+<p><strong><code>COHORT_PRODUCT_CODES</code>/<code>SINGLE_ROW_PRODUCT_CODES</code> frozensets are hand-copied in 3+ files</strong> with no shared source of truth: <code>optimize_prep/python_code/extract_params.py:52-56</code> (canonical), renamed local copies <code>_COHORT_CODES</code>/<code>_SINGLE_CODES</code> in <code>diagnose_accuracy.py:~44-45</code> and <code>cohort_cf_drill.py:54-55</code>, plus a smaller diagnostic-only subset in <code>accuracy_check.py:409</code>. See fragile-coupling finding below for the drift risk this creates — <strong>this has already happened</strong>: <code>extract_params.py</code>'s canonical set includes <code>"3200"</code> (t_bill, added since), but <code>cohort_cf_drill.py</code>'s hand-copied <code>_COHORT_CODES</code> does not.</p>
 </li>
 </ol>
 <hr />
@@ -191,13 +192,13 @@ hr { border: none; border-top: 1px solid #ddd; margin: 2.5rem 0; }
 <h2 id="6-fragile-coupling">6. Fragile coupling</h2>
 <ol>
 <li>
-<p><strong>No validation that <code>bs_structure</code>'s actual product codes are covered by <code>COHORT_PRODUCT_CODES ∪ SINGLE_ROW_PRODUCT_CODES ∪ IRS_PRODUCT_CODES</code>.</strong> <code>bank_data.xlsx</code>'s <code>bs_structure</code> sheet is the real source of truth for which products exist, but the three sets in <code>extract_params.py:52-58</code> are a manually maintained partition with no assertion that <code>set(bs['product_code']) - (COHORT | SINGLE_ROW | IRS)</code> is empty. Add a new product to <code>bank_data.xlsx</code> — including the credit card / working-capital-vs-investment-loan / T-bill / central-bank-cash products on the roadmap — and it silently vanishes from <code>product_params.npz</code> with no error, only quietly-wrong (missing) totals downstream in the optimizer and LabBank. <strong>Add this assertion before adding new products, not after.</strong></p>
+<p><strong>No validation that <code>bs_structure</code>'s actual product codes are covered by <code>COHORT_PRODUCT_CODES ∪ SINGLE_ROW_PRODUCT_CODES ∪ IRS_PRODUCT_CODES</code>.</strong> <code>bank_data.xlsx</code>'s <code>bs_structure</code> sheet is the real source of truth for which products exist, but the three sets in <code>extract_params.py:52-58</code> are a manually maintained partition with no assertion that <code>set(bs['product_code']) - (COHORT | SINGLE_ROW | IRS)</code> is empty. This is no longer hypothetical: the T-bill product (3200) was added since this finding was first written, was correctly added to <code>extract_params.py</code>'s canonical <code>COHORT_PRODUCT_CODES</code>, but <strong>was missed in <code>cohort_cf_drill.py</code>'s hand-copied <code>_COHORT_CODES</code></strong> (see finding 11) — exactly the silent-drift failure this assertion would have caught. <strong>Fix the <code>cohort_cf_drill.py</code> gap and add the assertion before the next new product</strong> (credit cards, corporate loan split, central bank cash).</p>
 </li>
 <li>
 <p><strong>Dagster provides zero schema/lineage validation between pipeline stages.</strong> <code>dagster_pipeline/runner.py:12-35</code> (<code>run_workflow</code>) just <code>subprocess.Popen</code>s the target script and streams stdout. The <code>deps=[...]</code> declarations in <code>dagster_pipeline/assets/*.py</code> only sequence <em>when</em> scripts run, not <em>what</em> they exchange — the actual interface between stages is "whatever rows happen to be in SQL Server tables at the time," with no <code>IOManager</code>, no asset check, no dtype/shape contract. An upstream script silently writing a differently-shaped table only surfaces as a downstream <code>KeyError</code> or one of the silent <code>_try_query</code> catches (finding 9), never as a Dagster-visible contract violation.</p>
 </li>
 <li>
-<p><strong><code>extract_params.py:2436</code>: IRS notional weighting is derived as <code>notional / (2 × TOTAL_ASSETS)</code>,</strong> so the swap book's implicit weight in the optimizer silently depends on this file's specific copy of <code>TOTAL_ASSETS</code> (finding 3) being correct. If <code>balance_generate</code>'s copy and this one ever diverge, IRS notional weighting goes wrong with no error — just a quietly-mis-scaled swap exposure in the optimizer.</p>
+<p><strong><code>extract_params.py:2466-2468</code>: IRS notional weighting is derived as <code>notional / (2 × TOTAL_ASSETS)</code>,</strong> so the swap book's implicit weight in the optimizer silently depends on this file's specific copy of <code>TOTAL_ASSETS</code> (finding 3) being correct. If <code>balance_generate</code>'s copy and this one ever diverge, IRS notional weighting goes wrong with no error — just a quietly-mis-scaled swap exposure in the optimizer.</p>
 </li>
 </ol>
 <hr />
@@ -210,7 +211,7 @@ hr { border: none; border-top: 1px solid #ddd; margin: 2.5rem 0; }
 </ul>
 <h2 id="8-already-documented-tech-debt-not-new-findings-just-cross-referenced">8. Already documented tech debt (not new findings, just cross-referenced)</h2>
 <ul>
-<li><code>sandbox/baseline.py:42-46</code> — LabBank shares <code>BalanceSheetParams</code>/the optimizer's npz, pulling in irrelevant optimizer-only fields (<code>vol_elasticity</code>, <code>subst_matrix</code>, PD/LGD, CoC). Author-flagged fix: give LabBank its own lightweight ETL reading directly from <code>bank_data.xlsx</code>, no optimizer columns.</li>
+<li><code>sandbox/baseline.py:46-49</code> — LabBank shares <code>BalanceSheetParams</code>/the optimizer's npz, pulling in irrelevant optimizer-only fields (<code>vol_elasticity</code>, <code>subst_matrix</code>, PD/LGD, CoC). Author-flagged fix: give LabBank its own lightweight ETL reading directly from <code>bank_data.xlsx</code>, no optimizer columns.</li>
 <li><code>sandbox/app.py</code> (~line 71) — product 6300 (<code>current_account_sme</code>) reuses product 6000's NMD decay curve as a proxy approximation rather than having its own calibrated behavioural model.</li>
 <li>Behavioural models and the balance sheet itself are synthetic/illustrative — already stated in <code>README.md</code>'s Repository status section, restated in the methodology doc for the public audience.</li>
 </ul>
@@ -219,7 +220,7 @@ hr { border: none; border-top: 1px solid #ddd; margin: 2.5rem 0; }
 <p>If/when there's time to work through this list, roughly in priority order:</p>
 <ol>
 <li>Fix the hardcoded absolute paths (§2.1) — blocks anyone else from running this at all, and it's a mechanical fix (copy the <code>__file__</code>-relative pattern already used correctly in <code>extract_params.py</code>).</li>
-<li>Add the product-code coverage assertion (§6.15) <strong>before</strong> adding the new products (credit cards, corporate loan split, T-bills, central bank cash) from the roadmap — otherwise a new product can silently vanish from the optimizer/LabBank tensors with no error.</li>
+<li>Fix the <code>cohort_cf_drill.py</code> drift the T-bill addition already caused, and add the product-code coverage assertion (§6.15) <strong>before</strong> adding the next new product (credit cards, corporate loan split, central bank cash) — otherwise it silently vanishes from the optimizer/LabBank tensors with no error, same as T-bill just did.</li>
 <li>Centralize <code>TOTAL_ASSETS</code>/<code>REPORT_DATE</code>/the SQL connection string into one config module (§2.2, §2.3) — mechanical, but removes an entire category of "forgot to update the other 7 copies" bugs.</li>
 <li>Delete or relocate the dead files (§5) — low risk, immediate clarity improvement.</li>
 <li>Everything in §3 (quantitative assumptions) is a "know about it, decide if it matters for your audience" list rather than a to-do list — the prepayment convexity gap (§3.4) is the one most worth a caveat in the methodology doc if not fixed outright.</li>

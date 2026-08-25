@@ -27,7 +27,7 @@ Path A and B share the same LabBank app; B just changes what data it's pointed a
 
 ## What the project demonstrates
 
-- End-to-end balance sheet generation for loans, deposits, financial instruments, equity, cash accounts, and interest rate swaps.
+- End-to-end balance sheet generation for loans, deposits, financial instruments (including a T-bill product covering the HQLA short end), equity, cash accounts, and interest rate swaps.
 - Cash-flow engine with contractual schedules and behavioural assumptions such as loan prepayment and non-maturity deposit decay.
 - IRRBB calculations for NII, EVE, and EBA Supervisory Outlier Test scenarios.
 - Liquidity risk calculations for LCR and NSFR.
@@ -61,6 +61,12 @@ Recommended additional README visuals:
 - Keep `visual_rep/beamer_assets/nii_bridge.png`, `eve_results.png`, and `lcr_nsfr.png` as compact result examples.
 - Use `visual_rep/beamer_assets/liq_gap.png` if you want to show behavioural liquidity risk visually.
 
+## Documentation
+
+- [`docs/01_setup_guide.md`](docs/01_setup_guide.md) — installing and running both quick-start paths.
+- [`docs/02_methodology.md`](docs/02_methodology.md) — the ALM/IRRBB/liquidity methodology behind the calculations.
+- [`docs/03_technical_notes.md`](docs/03_technical_notes.md) — candid, file:line-specific maintainer notes on architecture, known weak spots, and technical debt.
+
 ## Functional modules
 
 | Area | Folder | Main responsibility |
@@ -75,7 +81,8 @@ Recommended additional README visuals:
 | Interactive exploration (LabBank) | `sandbox/` | Streamlit app — stress the balance sheet, IRS book, and NMD assumptions and see NII/EVE/SOT/LCR/NSFR update live. No SQL Server required. |
 | Orchestration | `dagster_pipeline/` | Defines Dagster assets and jobs over the workflow scripts. |
 | Reporting | `visual_rep/` | Contains notebooks, HTML reports, Beamer presentation, and chart assets. |
-| 🚧 Balance sheet optimisation (roadmap) | `bs_optimization/` | Four solvers (deterministic, joint BS+swap, stochastic, natural-hedge) that optimise the balance sheet under EVE/NII/LCR/NSFR constraints. Functional and fairly mature, but not yet part of the guided LabBank path — treat as a preview of Phase 3. |
+| Documentation | `docs/` | Setup guide and ALM/architecture methodology write-ups — see [Documentation](#documentation) below. |
+| 🔒 Balance sheet optimisation (private) | `bs_optimization/` | Four solvers (deterministic, joint BS+swap, stochastic, natural-hedge) that optimise the balance sheet under EVE/NII/LCR/NSFR constraints. Functional and fairly mature, but lives in a **private git submodule** — see "Optimisation preparation and balance sheet optimisation" further down this README. |
 
 ## Pipeline flow
 
@@ -127,19 +134,19 @@ SQL Server is used as the central integration layer. The modules write to dedica
 
 The important design choice is that downstream modules read from upstream SQL tables instead of passing hidden in-memory state. This makes runs easier to audit, rerun, and inspect.
 
-Typical output tables include:
+The pipeline writes across nine schemas:
 
-- `dbo.transactions`
-- `schemat.loans`
-- `schemat.deposits`
-- `schemat.financial_instruments`
-- `cf.products`
-- `cf.products_liq`
-- `irrbb.ir_gap_*`
-- `irrbb.nii_results`
-- `irrbb.eve_results`
-- `results.irrbb_report`
-- `results.lcr_nsfr`
+| Schema | Purpose | Example tables |
+| --- | --- | --- |
+| `dbo` | Landing zone for generated transactions | `transactions` |
+| `schemat` | Product-level balance sheet | `loans`, `deposits`, `financial_instruments`, `equity`, `ir_swaps` |
+| `mkt` | Market data | `curves`, `fixings` |
+| `bs` | Behavioural model parameters | `models_loan`, `models_deposit_ir`, `models_deposit_liq` |
+| `sched` | Schedule/leg-level detail | `ir_swaps` (swap leg schedules) |
+| `cf` | Cash-flow engine output | `products`, `products_liq`, `ir_swap_orig`, `ir_swap_beh`, plus one dynamically-named `products_<scenario>` table per EBA shock scenario |
+| `irrbb` | IRRBB calculation results | `ir_gap_orig`, `ir_gap_beh`, `ir_gap_beh_a`, `liq_gap_orig`, `liq_gap_beh`, `ir_swap_gap_beh`, `nii_results`, `eve_results`, `irrbb_report` |
+| `results` | Final reporting tables | `irrbb_report`, `lcr_nsfr` |
+| `opt_prep` | Fast-approximation tensors backing LabBank's sandbox | `monthly_curves`, `product_params`, `product_scenario_params` |
 
 ## Dagster orchestration
 
@@ -171,11 +178,13 @@ module_name = "dagster_pipeline.definitions"
 ## Technology stack
 
 - Python
+- Streamlit and Plotly (interactive LabBank sandbox)
 - pandas, NumPy, SciPy
 - SQLAlchemy and pyodbc
 - SQL Server with Windows trusted authentication
 - QuantLib
 - Dagster
+- Dask (optional distributed backend for large stress-test batches)
 - Jupyter
 - matplotlib
 - Excel inputs and outputs
@@ -227,16 +236,16 @@ For normal use, prefer Dagster because it preserves dependency order and gives a
 
 The repository includes several reporting layers:
 
-- `visual_rep/bank_report.ipynb` for ALM and compliance reporting (run `python visual_rep/export_report.py` to generate `bank_report.html`/`.pdf` — the export isn't tracked in git).
+- `visual_rep/ALM_report.ipynb` for ALM and compliance reporting (run `python visual_rep/export_report.py` to generate `ALM_report.html`/`.pdf` — the export isn't tracked in git).
 - `visual_rep/finance_report.ipynb` for finance-oriented reporting (same export pattern).
 - `visual_rep/labbank_presentation.tex` for the Beamer presentation.
 - `irrbb_calc/output/*.xlsx` for IRRBB outputs.
 - `liq_calc/output/lcr_nsfr_report.xlsx` for liquidity outputs.
 - `optimize_prep/output/*.xlsx` and `*.npz` for optimisation preparation and accuracy checking.
 
-## Optimisation preparation and balance sheet optimisation (🚧 roadmap)
+## Optimisation preparation and balance sheet optimisation (🔒 private)
 
-The `optimize_prep/` module prepares vectorised data structures for fast metric approximation. It creates product parameter tensors and curve tensors, then checks approximate calculations against exact workflow outputs. These tensors are also exactly what LabBank (`sandbox/`) reads to run interactively without a database.
+The `optimize_prep/` module prepares vectorised data structures for fast metric approximation. It creates product parameter tensors and curve tensors, then checks approximate calculations against exact workflow outputs. These tensors are also exactly what LabBank (`sandbox/`) reads to run interactively without a database. `optimize_prep/` is fully public, part of this repo.
 
 `bs_optimization/` builds on that layer with four solvers:
 
@@ -245,7 +254,7 @@ The `optimize_prep/` module prepares vectorised data structures for fast metric 
 - A stochastic optimiser (Monte Carlo scenario sampling).
 - A natural-hedge optimiser that minimises EVE/NII breach severity without economic-profit optimisation.
 
-This layer is functional — see `bs_optimization/notebooks/optimization_report.ipynb` for worked results (run `python bs_optimization/notebooks/export_optimization_report.py` for a code-free HTML/PDF export, or `jupyter nbconvert --to html` for the full export with source — neither export is tracked in git) — but it is **not yet part of the guided LabBank path** and is still being refined. Treat it as a preview of where Phase 3 is heading rather than a finished, documented feature.
+This layer is functional and fairly mature, but it now lives in **`LabBank-Optimization`, a private git submodule** — cloning this repository gives you an empty `bs_optimization/` folder, not the code itself, since the submodule is not public. Reach out to the author for access. It is also not yet part of the guided LabBank path (Path A/B above); treat it as a preview of where Phase 3 is heading rather than a finished, documented feature.
 
 ## Repository status
 
@@ -261,10 +270,9 @@ Some assumptions are intentionally simplified or synthetic:
 ## Suggested next improvements
 
 - Add an exported architecture PNG from the Draw.io source file.
-- Add a short `docs/` section explaining each SQL schema and table ownership.
 - Move SQL connection settings to environment variables or a central config file.
-- Add a reproducible sample run guide with a small database dump or seed dataset.
-- Expand tests around the fast approximation layer and core IRRBB calculations.
+- Reconcile the Quick Start section above with `docs/01_setup_guide.md` so the two don't drift out of sync.
+- Expand tests beyond the fast-approximation layer (`optimize_prep/tests/`) to cover core IRRBB calculations.
 - Add GitHub Actions checks for formatting and unit tests where SQL dependencies can be mocked.
 
 ## License and disclaimer
