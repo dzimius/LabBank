@@ -31,7 +31,7 @@ from irs_engine import _maturity_months
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 DEP_BEH_PATH = os.path.join(PROJECT_ROOT, "balance_gen_add_data", "input", "dep_beh_models_ir.xlsx")
 
-REPORT_DATE_DEFAULT = date(2024, 12, 31)
+REPORT_DATE_DEFAULT = date(2026, 6, 30)
 
 # 12 monthly buckets + 4 longer-tenor buckets
 BUCKETS       = ["1M","2M","3M","4M","5M","6M","7M","8M","9M","10M","11M","12M",

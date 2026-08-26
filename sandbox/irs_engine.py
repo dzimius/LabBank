@@ -21,7 +21,7 @@ from datetime import date
 import numpy as np
 import pandas as pd
 
-REPORT_DATE_DEFAULT = date(2024, 12, 31)
+REPORT_DATE_DEFAULT = date(2026, 6, 30)
 EBA_SCENARIOS       = ["par_up", "par_dn", "steep", "flat", "sr_up", "sr_dn", "own"]
 _DAY_FRAC           = 30.4375          # average days per month
 
