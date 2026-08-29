@@ -710,7 +710,7 @@ hr { border: none; border-top: 1px solid #ddd; margin: 2.5rem 0; }
 </tr>
 </tbody>
 </table>
-<p>The shipped demo book is 9 receive-fixed swaps (<code>pay_fixed=0</code>), 4.5% fixed rate, notionals of 40-50M PLN each, against 3M or 6M WIBOR — a textbook hedge for a floating-rate loan book: the bank pays WIBOR on the swap to offset WIBOR received from borrowers, keeping the fixed spread.</p>
+<p>The shipped demo book is 12 receive-fixed swaps (<code>pay_fixed=0</code>), 4.5% fixed rate, notionals of 40-50M PLN each, staggered monthly starts across 2025-2026, against 3M or 6M WIBOR — a textbook hedge for a floating-rate loan book: the bank pays WIBOR on the swap to offset WIBOR received from borrowers, keeping the fixed spread.</p>
 <h3 id="how-a-swap-is-valued">How a swap is valued</h3>
 <p>Both legs are cash-flow-projected on the same monthly curve grid as the rest of the balance sheet:</p>
 <ul>
@@ -779,19 +779,20 @@ NSFR = Available Stable Funding / Required Stable Funding              ≥ 100%
 <p>A sustained negative cumulative gap identifies the point at which the bank would need additional funding — the primary input for contingency funding planning, distinct from the point-in-time LCR/NSFR ratios.</p>
 <h2 id="exploring-this-interactively-labbank">Exploring this interactively — LabBank</h2>
 <p>The Streamlit app (<code>sandbox/app.py</code>) lets you stress every piece described above without touching SQL. See the <a href="01_setup_guide.html">setup guide</a> to run it — this section is a tour of what each tab does.</p>
+<p>The six tabs, in the order they appear in the app: <strong>Balance Sheet · ALM Metrics · Gap Analysis · Market Curves · NMD Stress · IRS Book</strong>. You edit the balance sheet (and, optionally, the swap book and the NMD decay profiles), and the results tabs react.</p>
 <h3 id="balance-sheet">⚖️ Balance Sheet</h3>
 <p>The tab you land on. Edit the balance sheet mix and immediately see the composition change; every other tab reacts to whatever you set here.</p>
 <p><img alt="LabBank Balance Sheet tab, annotated" src="images/labbank_balance_sheet_annotated.svg" /></p>
-<h3 id="irs-book">🔄 IRS Book</h3>
-<p>Edit the interest rate swap book: add/remove trades, change notional or fixed rate, toggle <code>pay_fixed</code> per swap (same convention as <code>irs_input.xlsx</code> — see the IRS section above). A leg summary table shows net receive-fixed vs. pay-fixed notional and the weighted-average fixed rate on each side, baseline vs. your edits.</p>
-<h3 id="nmd-stress">🏦 NMD Stress</h3>
-<p>Pick a non-maturity deposit product (current account or savings account) and edit its <strong>outstanding-percentage decay profile</strong> directly — how much of the balance is assumed to still be on the books at each future tenor. A chart compares your stressed profile against the baseline. An "advanced" expander lets you set a renewal rate for capital that runs off within the horizon. Changes here flow into both the Metrics and Gap Analysis tabs as an additive ΔNII/ΔEVE overlay.</p>
-<h3 id="metrics">📈 Metrics</h3>
+<h3 id="alm-metrics">📈 ALM Metrics</h3>
 <p>The results dashboard: NII, EVE, LCR, and NSFR, baseline vs. modified, plus RWA and the Tier 1/RWA ratio against a configurable minimum. Below that: the EBA Supervisory Outlier Test (ΔEVE/T1 and ΔNII/T1 against the −15%/−5% thresholds, pass/fail called out explicitly), then per-scenario ΔNII and ΔEVE bar charts, an IRS contribution breakdown, a full scenario table, and an LCR/NSFR diagnostic that flags if you've zeroed out all HQLA-eligible assets.</p>
 <h3 id="gap-analysis">📊 Gap Analysis</h3>
 <p>Three repricing-gap panels — assets vs. liabilities repricing per bucket with the IRS overlay shown separately, net gap with and without IRS side by side, and the cumulative net gap — followed by the 12-month behavioural liquidity gap (principal inflows vs. outflows per month, and the cumulative net position).</p>
 <h3 id="market-curves">📉 Market Curves</h3>
 <p>The base forward/zero curve per currency, the full set of EBA shock scenario curves overlaid, and a "hypothetical scenarios" panel where you can pick a stylised curve shape (normal, steep, humped, flat, inverted) and rate level (low/medium/high) to see NII/EVE under a rate environment that isn't one of the 7 EBA scenarios.</p>
+<h3 id="nmd-stress">🏦 NMD Stress</h3>
+<p>Pick a non-maturity deposit product (current account or savings account) and edit its <strong>outstanding-percentage decay profile</strong> directly — how much of the balance is assumed to still be on the books at each future tenor. A chart compares your stressed profile against the baseline. An "advanced" expander lets you set a renewal rate for capital that runs off within the horizon. Changes here flow into both the ALM Metrics and Gap Analysis tabs as an additive ΔNII/ΔEVE overlay.</p>
+<h3 id="irs-book">🔄 IRS Book</h3>
+<p>Edit the interest rate swap book: add/remove trades, change notional or fixed rate, toggle <code>pay_fixed</code> per swap (same convention as <code>irs_input.xlsx</code> — see the IRS section above). A leg summary table shows net receive-fixed vs. pay-fixed notional and the weighted-average fixed rate on each side, baseline vs. your edits.</p>
 <h2 id="whats-next-balance-sheet-optimisation">What's next — balance sheet optimisation</h2>
 <p>Balance sheet optimisation (constrained economic-profit vs. ΔEVE/ΔNII breach trade-off) is the next phase, implemented as four solvers (deterministic, joint balance-sheet + swap overlay, stochastic Monte Carlo, and a natural-hedge minimiser). It's functional and fairly mature, but it lives in <code>bs_optimization/</code>, which is a <strong>private git submodule</strong> (<code>LabBank-Optimization</code>) — not part of this public repository. It's also not yet part of the guided LabBank path; treat it as a preview of where this project is heading rather than a finished, documented feature.</p>
 <h2 id="a-note-on-scope">A note on scope</h2>

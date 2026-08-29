@@ -7,11 +7,11 @@
   <!-- Tab bar -->
   <rect x="15" y="65" width="1000" height="34" fill="#ffffff" stroke="#dfe3e8"/>
   <text x="30" y="87" font-size="13" font-weight="700" fill="#c0392b">⚖️ Balance Sheet</text>
-  <text x="170" y="87" font-size="13" fill="#555">🔄 IRS Book</text>
-  <text x="275" y="87" font-size="13" fill="#555">🏦 NMD Stress</text>
-  <text x="395" y="87" font-size="13" fill="#555">📈 Metrics</text>
-  <text x="485" y="87" font-size="13" fill="#555">📊 Gap Analysis</text>
-  <text x="615" y="87" font-size="13" fill="#555">📉 Market Curves</text>
+  <text x="175" y="87" font-size="13" fill="#555">📈 ALM Metrics</text>
+  <text x="290" y="87" font-size="13" fill="#555">📊 Gap Analysis</text>
+  <text x="410" y="87" font-size="13" fill="#555">📉 Market Curves</text>
+  <text x="540" y="87" font-size="13" fill="#555">🏦 NMD Stress</text>
+  <text x="655" y="87" font-size="13" fill="#555">🔄 IRS Book</text>
   <rect x="25" y="94" width="130" height="3" fill="#c0392b"/>
 
   <!-- Callout 1: tab bar -->
@@ -50,13 +50,13 @@
 
   <g font-size="11" fill="#222">
     <rect x="20" y="281" width="470" height="24" fill="#fafbfc" stroke="#eee"/>
-    <text x="30" y="297">mortgage_fixed_ind</text><text x="190" y="297">13.0</text><text x="260" y="297">10.5</text><text x="390" y="297">4.20%</text>
+    <text x="30" y="297">mortgage_float_ind</text><text x="190" y="297">28.0</text><text x="260" y="297">28.0</text><text x="390" y="297">5.75%</text>
     <rect x="20" y="305" width="470" height="24" fill="#ffffff" stroke="#eee"/>
-    <text x="30" y="321">mortgage_float_ind</text><text x="190" y="321">28.0</text><text x="260" y="321">26.0</text><text x="390" y="321">5.10%</text>
+    <text x="30" y="321">bond_fixed_gov</text><text x="190" y="321">15.0</text><text x="260" y="321">15.0</text><text x="390" y="321">4.82%</text>
     <rect x="20" y="329" width="470" height="24" fill="#fafbfc" stroke="#eee"/>
-    <text x="30" y="345">cash_loan_fixed_ind</text><text x="190" y="345">6.0</text><text x="260" y="345">6.0</text><text x="390" y="345">6.80%</text>
+    <text x="30" y="345">cash_loan_float_ind</text><text x="190" y="345">15.0</text><text x="260" y="345">15.0</text><text x="390" y="345">13.76%</text>
     <rect x="20" y="353" width="470" height="24" fill="#ffffff" stroke="#eee"/>
-    <text x="30" y="369">cash_loan_float_ind</text><text x="190" y="369">18.0</text><text x="260" y="369">18.0</text><text x="390" y="369">7.40%</text>
+    <text x="30" y="369">bond_float_gov</text><text x="190" y="369">11.0</text><text x="260" y="369">11.0</text><text x="390" y="369">3.92%</text>
     <rect x="20" y="377" width="470" height="24" fill="#fafbfc" stroke="#eee"/>
     <text x="30" y="393">…</text>
   </g>
@@ -77,11 +77,11 @@
   <text x="895" y="273" font-size="10.5" fill="#fff">Rate %</text>
   <g font-size="11" fill="#222">
     <rect x="525" y="281" width="490" height="24" fill="#fafbfc" stroke="#eee"/>
-    <text x="535" y="297">term_deposit_ind</text><text x="700" y="297">9.0</text><text x="770" y="297">9.0</text><text x="900" y="297">3.10%</text>
+    <text x="535" y="297">current_account_ind</text><text x="700" y="297">31.0</text><text x="770" y="297">31.0</text><text x="900" y="297">0.00%</text>
     <rect x="525" y="305" width="490" height="24" fill="#ffffff" stroke="#eee"/>
-    <text x="535" y="321">current_account_ind</text><text x="700" y="321">17.0</text><text x="770" y="321">17.0</text><text x="900" y="321">0.00%</text>
+    <text x="535" y="321">term_deposit_ind</text><text x="700" y="321">21.0</text><text x="770" y="321">21.0</text><text x="900" y="321">3.33%</text>
     <rect x="525" y="329" width="490" height="24" fill="#fafbfc" stroke="#eee"/>
-    <text x="535" y="345">saving_account_ind</text><text x="700" y="345">8.0</text><text x="770" y="345">8.0</text><text x="900" y="345">1.20%</text>
+    <text x="535" y="345">saving_account_ind</text><text x="700" y="345">16.0</text><text x="770" y="345">16.0</text><text x="900" y="345">2.35%</text>
     <rect x="525" y="353" width="490" height="24" fill="#ffffff" stroke="#eee"/>
     <text x="535" y="369">…</text>
   </g>
@@ -120,7 +120,7 @@
   <rect x="20" y="712" width="1000" height="128" rx="6" fill="#f4f6f8" stroke="#dfe3e8"/>
   <text x="40" y="732" font-size="12.5" font-weight="700" fill="#1a1a2e">What each number does</text>
   <g font-size="11" fill="#333">
-    <text x="40" y="750">① Tab bar — switch between Balance Sheet, IRS Book, NMD Stress, Metrics, Gap Analysis, Market Curves.</text>
+    <text x="40" y="750">① Tab bar — switch between Balance Sheet, ALM Metrics, Gap Analysis, Market Curves, NMD Stress, IRS Book.</text>
     <text x="40" y="766">② Total Assets — rescale the whole balance sheet without changing product mix.</text>
     <text x="40" y="782">③ Reset BS — discard edits, restore the shipped demo.</text>
     <text x="40" y="798">④ New % — type here to change a product's share; both sides must each sum to 100%.</text>

@@ -144,6 +144,25 @@ def _apply_fixed_rate_calibration(
     nii_total[is_fixed, :] = base_nii_fixed + calib_mat
 
 
+def _fallback_mask(params: BalanceSheetParams) -> np.ndarray:
+    """Rows where method B has no real monthly CF schedule to drive off of.
+
+    Single-row behavioural products (non-cohort) and cohort entries using a
+    synthetic constant-balance profile (cf.products has no complete monthly
+    schedule for them) -- for these, the CF einsum is structurally zero
+    regardless of curve/scenario, so any base or delta NII must come from the
+    calibrated per-unit rates instead.
+    """
+    out = params.cohort_outstanding_m
+    cap = params.cohort_capital_m
+    synthetic_constant = (
+        params.is_cohort
+        & (np.abs(cap).sum(axis=1) < 1e-10)
+        & (np.abs(out - 1.0).max(axis=1) < 1e-8)
+    )
+    return (~params.is_cohort) | synthetic_constant
+
+
 def _apply_calibrated_delta_fallback(
     nii_total: np.ndarray,      # (n, n_scen) - modified in place
     balance:   np.ndarray,
@@ -170,14 +189,7 @@ def _apply_calibrated_delta_fallback(
         except ValueError:
             pass
 
-    out = params.cohort_outstanding_m
-    cap = params.cohort_capital_m
-    synthetic_constant = (
-        params.is_cohort
-        & (np.abs(cap).sum(axis=1) < 1e-10)
-        & (np.abs(out - 1.0).max(axis=1) < 1e-8)
-    )
-    fallback = (~params.is_cohort) | synthetic_constant
+    fallback = _fallback_mask(params)
     if not fallback.any():
         return
 

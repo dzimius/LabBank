@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="app.diagrams.net" version="21.0.0">
+  <diagram id="labbank-transaction-erd" name="Transaction ERD">
+    <mxGraphModel dx="1200" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="1120" pageHeight="880" math="0" shadow="1">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- ═══ TITLE ═══ -->
+        <mxCell id="title" value="LabBank  —  Core Entity Relationships  (dbo.transactions hub)"
+          style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=22;fontStyle=1;fontColor=#1A237E;"
+          vertex="1" parent="1">
+          <mxGeometry x="0" y="6" width="1120" height="38" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" value="One row per position in dbo.transactions; each schemat.* table adds product-specific detail for the same transaction_id&lt;br&gt;(1:1 — every position belongs to exactly one product table)."
+          style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=12;fontStyle=2;fontColor=#666666;"
+          vertex="1" parent="1">
+          <mxGeometry x="60" y="46" width="1000" height="34" as="geometry" />
+        </mxCell>
+
+        <!-- ═══ SPOKES ═══ -->
+        <mxCell id="loans" value="&lt;b&gt;schemat.loans&lt;/b&gt;&lt;br&gt;&lt;br&gt;Mortgages · Cash Loans&lt;br&gt;Investment (SME) Loans&lt;br&gt;&lt;br&gt;&lt;font style=&quot;font-size:14px&quot;&gt;&lt;i&gt;Fixed &amp;amp; floating-rate lending&lt;/i&gt;&lt;/font&gt;"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1565C0;strokeColor=#0D47A1;fontColor=#ffffff;fontSize=20;arcSize=8;align=center;"
+          vertex="1" parent="1">
+          <mxGeometry x="40" y="110" width="340" height="200" as="geometry" />
+        </mxCell>
+
+        <mxCell id="deposits" value="&lt;b&gt;schemat.deposits&lt;/b&gt;&lt;br&gt;&lt;br&gt;Current Accounts&lt;br&gt;Savings · Term Deposits&lt;br&gt;&lt;br&gt;&lt;font style=&quot;font-size:14px&quot;&gt;&lt;i&gt;Client &amp;amp; bank funding&lt;/i&gt;&lt;/font&gt;"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#C62828;strokeColor=#7F0000;fontColor=#ffffff;fontSize=20;arcSize=8;align=center;"
+          vertex="1" parent="1">
+          <mxGeometry x="740" y="110" width="340" height="200" as="geometry" />
+        </mxCell>
+
+        <mxCell id="fininst" value="&lt;b&gt;schemat.financial_instruments&lt;/b&gt;&lt;br&gt;&lt;br&gt;Bonds (Fixed/Float) · T-Bills&lt;br&gt;Cash&lt;br&gt;&lt;br&gt;&lt;font style=&quot;font-size:14px&quot;&gt;&lt;i&gt;HQLA &amp;amp; investment book&lt;/i&gt;&lt;/font&gt;"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#2E7D32;strokeColor=#1B5E20;fontColor=#ffffff;fontSize=19;arcSize=8;align=center;"
+          vertex="1" parent="1">
+          <mxGeometry x="40" y="620" width="340" height="200" as="geometry" />
+        </mxCell>
+
+        <mxCell id="equity" value="&lt;b&gt;schemat.equity&lt;/b&gt;&lt;br&gt;&lt;br&gt;Common Shares&lt;br&gt;Retained Earnings · Reserves&lt;br&gt;&lt;br&gt;&lt;font style=&quot;font-size:14px&quot;&gt;&lt;i&gt;Regulatory capital&lt;/i&gt;&lt;/font&gt;"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#6A1B9A;strokeColor=#4A148C;fontColor=#ffffff;fontSize=20;arcSize=8;align=center;"
+          vertex="1" parent="1">
+          <mxGeometry x="740" y="620" width="340" height="200" as="geometry" />
+        </mxCell>
+
+        <!-- ═══ HUB ═══ -->
+        <mxCell id="hub" value="&lt;b&gt;dbo.transactions&lt;/b&gt;&lt;br&gt;&lt;br&gt;FACT/HUB TABLE&lt;br&gt;&lt;br&gt;&lt;font style=&quot;font-size:14px&quot;&gt;&lt;i&gt;One row per position&lt;br&gt;main source table for all reporting&lt;/i&gt;&lt;/font&gt;"
+          style="rounded=1;whiteSpace=wrap;html=1;fillColor=#0D1B3E;strokeColor=#000000;fontColor=#ffffff;fontSize=22;arcSize=8;align=center;"
+          vertex="1" parent="1">
+          <mxGeometry x="390" y="330" width="340" height="200" as="geometry" />
+        </mxCell>
+
+        <!-- ═══ CONNECTORS (plain, no arrowhead — every relationship is 1:1) ═══ -->
+        <mxCell id="c_loans" value="" style="edgeStyle=none;html=1;endArrow=none;startArrow=none;rounded=0;strokeColor=#1565C0;strokeWidth=3;exitX=0;exitY=0;exitDx=0;exitDy=0;entryX=1;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="hub" target="loans">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="c_deposits" value="" style="edgeStyle=none;html=1;endArrow=none;startArrow=none;rounded=0;strokeColor=#C62828;strokeWidth=3;exitX=1;exitY=0;exitDx=0;exitDy=0;entryX=0;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="hub" target="deposits">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="c_fininst" value="" style="edgeStyle=none;html=1;endArrow=none;startArrow=none;rounded=0;strokeColor=#2E7D32;strokeWidth=3;exitX=0;exitY=1;exitDx=0;exitDy=0;entryX=1;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="hub" target="fininst">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="c_equity" value="" style="edgeStyle=none;html=1;endArrow=none;startArrow=none;rounded=0;strokeColor=#6A1B9A;strokeWidth=3;exitX=1;exitY=1;exitDx=0;exitDy=0;entryX=0;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="hub" target="equity">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

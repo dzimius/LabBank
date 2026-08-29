@@ -77,9 +77,9 @@ In short: this layer trades a one-time calibration cost for O(1) scenario evalua
 
 ### `sandbox/` — the LabBank Streamlit app
 
-`app.py` (~1,400 lines) renders six tabs via `st.tabs()`: Balance Sheet, IRS Book, NMD Stress, ALM Metrics, Gap Analysis, Market Curves. Every edit re-runs the fast-approximation math from `optimize_prep/` (previous section) in-process against `BalanceSheetParams`/`CurveTensors` loaded once from `.npz` files — no SQL round-trip, which is what makes the interaction feel instant.
+`app.py` (~1,400 lines) renders six tabs via `st.tabs()`. Tab-bar order: Balance Sheet, ALM Metrics, Gap Analysis, Market Curves, NMD Stress, IRS Book — deliberately *not* the order the `with tab_*:` blocks execute in (see the ordering note below). Every edit re-runs the fast-approximation math from `optimize_prep/` (previous section) in-process against `BalanceSheetParams`/`CurveTensors` loaded once from `.npz` files — no SQL round-trip, which is what makes the interaction feel instant.
 
-One quirk worth knowing if you're reading the source top-to-bottom: the Market Curves tab's *body* executes early in script order — before ALM Metrics — even though it renders last on the page, because its "hypothetical scenario" selectors need to resolve before the Metrics tab's NII/EVE recompute can use them. Streamlit re-runs the whole script top-to-bottom on every interaction, so this is a documented ordering workaround, not a bug.
+One quirk worth knowing if you're reading the source top-to-bottom: the `with tab_*:` blocks are laid out in execution order (Market Curves → Balance Sheet → IRS Book → ALM Metrics → Gap Analysis → NMD Stress), which is not the tab-bar order above. The Market Curves body in particular executes first — before ALM Metrics — even though it renders fourth on the page, because its "hypothetical scenario" selectors need to resolve before the Metrics tab's NII/EVE recompute can use them. Streamlit re-runs the whole script top-to-bottom on every interaction, so this is a documented ordering workaround, not a bug.
 
 ### `dagster_pipeline/` — orchestration
 

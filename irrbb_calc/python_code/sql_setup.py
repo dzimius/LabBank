@@ -176,6 +176,7 @@ def load_beh_schedules(report_date: pd.Timestamp, horizon_end: pd.Timestamp) -> 
         WHERE p.cf_end_dt > :rd
           AND p.cf_end_dt <= :he
           AND COALESCE(p.beh_total_pmt, 0) <> 0
+        OPTION (MAXDOP 1)
     """)
     df = pd.read_sql_query(query, engine, params={"rd": report_date, "he": horizon_end})
     df["cf_start_dt"] = pd.to_datetime(df["cf_start_dt"])
@@ -347,6 +348,7 @@ def load_all_beh_schedules(report_date: pd.Timestamp) -> pd.DataFrame:
            AND r.product_type = p.product_type
         WHERE p.cf_end_dt > :rd
           AND COALESCE(p.beh_total_pmt, 0) <> 0
+        OPTION (MAXDOP 1)
     """)
     df = pd.read_sql_query(query, engine, params={"rd": report_date})
     df["cf_start_dt"] = pd.to_datetime(df["cf_start_dt"])

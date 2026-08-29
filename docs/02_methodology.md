@@ -198,7 +198,7 @@ Swaps are defined in `ir_derivatives/input/irs_input.xlsx`, one row per trade:
 | `float_rate_index`, `float_pay_freq`, `float_fixing_freq`, `float_spread` | Float leg: reference index (e.g. `PLN_ASK_3M`), payment/reset frequency, spread over the index |
 | `disc_curve` / `fwd_curve` | Which curves discount and forward-project this trade |
 
-The shipped demo book is 9 receive-fixed swaps (`pay_fixed=0`), 4.5% fixed rate, notionals of 40-50M PLN each, against 3M or 6M WIBOR — a textbook hedge for a floating-rate loan book: the bank pays WIBOR on the swap to offset WIBOR received from borrowers, keeping the fixed spread.
+The shipped demo book is 12 receive-fixed swaps (`pay_fixed=0`), 4.5% fixed rate, notionals of 40-50M PLN each, staggered monthly starts across 2025-2026, against 3M or 6M WIBOR — a textbook hedge for a floating-rate loan book: the bank pays WIBOR on the swap to offset WIBOR received from borrowers, keeping the fixed spread.
 
 ### How a swap is valued
 
@@ -301,21 +301,15 @@ A sustained negative cumulative gap identifies the point at which the bank would
 
 The Streamlit app (`sandbox/app.py`) lets you stress every piece described above without touching SQL. See the [setup guide](01_setup_guide.md) to run it — this section is a tour of what each tab does.
 
+The six tabs, in the order they appear in the app: **Balance Sheet · ALM Metrics · Gap Analysis · Market Curves · NMD Stress · IRS Book**. You edit the balance sheet (and, optionally, the swap book and the NMD decay profiles), and the results tabs react.
+
 ### ⚖️ Balance Sheet
 
 The tab you land on. Edit the balance sheet mix and immediately see the composition change; every other tab reacts to whatever you set here.
 
 ![LabBank Balance Sheet tab, annotated](images/labbank_balance_sheet_annotated.svg)
 
-### 🔄 IRS Book
-
-Edit the interest rate swap book: add/remove trades, change notional or fixed rate, toggle `pay_fixed` per swap (same convention as `irs_input.xlsx` — see the IRS section above). A leg summary table shows net receive-fixed vs. pay-fixed notional and the weighted-average fixed rate on each side, baseline vs. your edits.
-
-### 🏦 NMD Stress
-
-Pick a non-maturity deposit product (current account or savings account) and edit its **outstanding-percentage decay profile** directly — how much of the balance is assumed to still be on the books at each future tenor. A chart compares your stressed profile against the baseline. An "advanced" expander lets you set a renewal rate for capital that runs off within the horizon. Changes here flow into both the Metrics and Gap Analysis tabs as an additive ΔNII/ΔEVE overlay.
-
-### 📈 Metrics
+### 📈 ALM Metrics
 
 The results dashboard: NII, EVE, LCR, and NSFR, baseline vs. modified, plus RWA and the Tier 1/RWA ratio against a configurable minimum. Below that: the EBA Supervisory Outlier Test (ΔEVE/T1 and ΔNII/T1 against the −15%/−5% thresholds, pass/fail called out explicitly), then per-scenario ΔNII and ΔEVE bar charts, an IRS contribution breakdown, a full scenario table, and an LCR/NSFR diagnostic that flags if you've zeroed out all HQLA-eligible assets.
 
@@ -326,6 +320,14 @@ Three repricing-gap panels — assets vs. liabilities repricing per bucket with 
 ### 📉 Market Curves
 
 The base forward/zero curve per currency, the full set of EBA shock scenario curves overlaid, and a "hypothetical scenarios" panel where you can pick a stylised curve shape (normal, steep, humped, flat, inverted) and rate level (low/medium/high) to see NII/EVE under a rate environment that isn't one of the 7 EBA scenarios.
+
+### 🏦 NMD Stress
+
+Pick a non-maturity deposit product (current account or savings account) and edit its **outstanding-percentage decay profile** directly — how much of the balance is assumed to still be on the books at each future tenor. A chart compares your stressed profile against the baseline. An "advanced" expander lets you set a renewal rate for capital that runs off within the horizon. Changes here flow into both the ALM Metrics and Gap Analysis tabs as an additive ΔNII/ΔEVE overlay.
+
+### 🔄 IRS Book
+
+Edit the interest rate swap book: add/remove trades, change notional or fixed rate, toggle `pay_fixed` per swap (same convention as `irs_input.xlsx` — see the IRS section above). A leg summary table shows net receive-fixed vs. pay-fixed notional and the weighted-average fixed rate on each side, baseline vs. your edits.
 
 ## What's next — balance sheet optimisation
 

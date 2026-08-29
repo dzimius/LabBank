@@ -238,7 +238,8 @@ def update_schedule_id_sql(
        SET a.schedule_id = b.schedule_id
     FROM {source_schema}.{table_name} a
     LEFT JOIN {sched_schema}.{sched_table_name} b
-      ON {on_sql};
+      ON {on_sql}
+    OPTION (MAXDOP 1);
     """
 
     with engine.begin() as conn:

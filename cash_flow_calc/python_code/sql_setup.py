@@ -37,7 +37,6 @@ Products_d = Table(
     Column("rate_index",       String(10),     nullable=True),
     Column("fixing_dt",        Date,           nullable=True),
     Column("cf_start_dt",      Date,           primary_key=True, nullable=False),
-    Column("cf_start_dt_delay", Date,          nullable=True),
     Column("cf_end_dt",        Date,           nullable=False),
     Column("cf_yf",            DECIMAL(18, 6), nullable=False),
     Column("d_f",              DECIMAL(18, 6), nullable=True),

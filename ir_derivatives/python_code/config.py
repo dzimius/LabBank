@@ -1,3 +1,3 @@
 import pandas as pd
 
-report_date = pd.to_datetime("2024-12-31")
+report_date = pd.to_datetime("2026-06-30")

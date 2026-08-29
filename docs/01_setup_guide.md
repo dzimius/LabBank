@@ -40,9 +40,9 @@ pip install -r requirements.txt
 streamlit run sandbox/app.py
 ```
 
-Streamlit opens a browser tab at `http://localhost:8501`. You'll see six tabs: Balance Sheet, IRS Book, NMD Stress, Metrics, Gap Analysis, and Market Curves. Everything is computed from files already checked into the repo (`optimize_prep/output/*.npz`, `balance_generate/input_data/bank_data.xlsx`, and a few supporting Excel files) — no database, no credentials, no orchestration engine involved.
+Streamlit opens a browser tab at `http://localhost:8501`. You'll see six tabs: Balance Sheet, ALM Metrics, Gap Analysis, Market Curves, NMD Stress, and IRS Book. Everything is computed from files already checked into the repo (`optimize_prep/output/*.npz`, `balance_generate/input_data/bank_data.xlsx`, and a few supporting Excel files) — no database, no credentials, no orchestration engine involved.
 
-**What to try first:** open the Balance Sheet tab, change a percentage in the "✏️ New %" column (both Assets and Liabilities+Equity must each sum to 100%), then check the Metrics tab to see how NII, EVE, and the EBA Supervisory Outlier Test respond.
+**What to try first:** open the Balance Sheet tab, change a percentage in the "✏️ New %" column (both Assets and Liabilities+Equity must each sum to 100%), then check the ALM Metrics tab to see how NII, EVE, and the EBA Supervisory Outlier Test respond.
 
 ### Troubleshooting Path A
 
@@ -121,7 +121,7 @@ Since the goal here is getting to LabBank, `labbank_data_job` is the only one yo
 1. Edit `balance_generate/input_data/bank_data.xlsx` with your own product balances, rates, and currencies. For swaps, edit `ir_derivatives/input/irs_input.xlsx`. If you're changing which products exist (not just their weights), also check `balance_generate/input_data/interest_rt.xlsx` — that's where each product's rate coefficients (`a`, `b`) and its `client_floor`/`client_cap` live (see the methodology doc's "Rate floors and caps" section); a new product with no row there gets no floor/cap at all.
 2. Run `labbank_data_job` in Dagster.
 3. Open LabBank (`streamlit run sandbox/app.py`, or if it's already running, just refresh) and click **"🔄 Reload my data"** in the sidebar.
-4. LabBank now shows your balance sheet — Balance Sheet, Metrics, Gap Analysis, etc. all reflect it.
+4. LabBank now shows your balance sheet — Balance Sheet, ALM Metrics, Gap Analysis, etc. all reflect it.
 
 Repeat steps 1–3 as many times as you like; SQL Server stays up the whole time.
 

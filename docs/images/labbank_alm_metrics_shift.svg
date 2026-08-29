@@ -1,0 +1,106 @@
+<svg viewBox="0 0 1040 590" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, Arial, sans-serif">
+  <rect x="0" y="0" width="1040" height="590" fill="#ffffff"/>
+
+  <text x="20" y="36" font-size="23" font-weight="700" fill="#0d1b4b">🏦 LabBank ALM Sandbox</text>
+
+  <!-- Tab bar -->
+  <rect x="15" y="52" width="1010" height="32" fill="#ffffff" stroke="#dfe3e8"/>
+  <text x="28" y="73" font-size="13" fill="#555">⚖️ Balance Sheet</text>
+  <text x="170" y="73" font-size="13" font-weight="700" fill="#c0392b">📈 ALM Metrics</text>
+  <text x="290" y="73" font-size="13" fill="#555">📊 Gap Analysis</text>
+  <text x="410" y="73" font-size="13" fill="#555">📉 Market Curves</text>
+  <text x="540" y="73" font-size="13" fill="#555">🏦 NMD Stress</text>
+  <text x="655" y="73" font-size="13" fill="#555">🔄 IRS Book</text>
+  <rect x="165" y="80" width="112" height="3" fill="#c0392b"/>
+
+  <text x="20" y="112" font-size="17" font-weight="700" fill="#1a1a2e">Summary</text>
+  <text x="20" y="130" font-size="10.5" fill="#888">After shifting 10 pp of asset mix from fixed-rate mortgages into floating-rate mortgages (both sides still 100%).</text>
+
+  <g font-size="11" fill="#666">
+    <text x="24" y="156">Baseline — NII</text>
+    <text x="284" y="156">Baseline — EVE</text>
+    <text x="544" y="156">Baseline — LCR PLN</text>
+    <text x="804" y="156">Baseline — NSFR PLN</text>
+  </g>
+  <g font-size="21" fill="#1a1a2e">
+    <text x="24" y="182">529 M</text>
+    <text x="284" y="182">2,095 M</text>
+    <text x="544" y="182">279.67%</text>
+    <text x="804" y="182">161.47%</text>
+  </g>
+  <g font-size="11" fill="#666">
+    <text x="24" y="214">Modified — NII</text>
+    <text x="284" y="214">Modified — EVE</text>
+    <text x="544" y="214">Modified — LCR PLN</text>
+    <text x="804" y="214">Modified — NSFR PLN</text>
+  </g>
+  <g font-size="21" fill="#1a1a2e">
+    <text x="24" y="240">523 M</text>
+    <text x="284" y="240">2,122 M</text>
+    <text x="544" y="240">279.46%</text>
+    <text x="804" y="240">161.47%</text>
+  </g>
+  <g font-size="11.5">
+    <rect x="24" y="250" width="66" height="19" rx="9" fill="#fdecea"/><text x="31" y="264" fill="#c62828">↓ −5.8 M</text>
+    <rect x="284" y="250" width="66" height="19" rx="9" fill="#e8f5e9"/><text x="291" y="264" fill="#2e7d32">↑ +27.4 M</text>
+    <rect x="544" y="250" width="66" height="19" rx="9" fill="#fdecea"/><text x="551" y="264" fill="#c62828">↓ −0.2 pp</text>
+    <rect x="804" y="250" width="66" height="19" rx="9" fill="#eef0f2"/><text x="811" y="264" fill="#666">±0.0 pp</text>
+  </g>
+
+  <g font-size="11" fill="#666">
+    <text x="24" y="302">Baseline — RWA</text>
+    <text x="284" y="302">Modified — RWA</text>
+    <text x="544" y="302">Baseline — T1/RWA</text>
+    <text x="804" y="302">Modified — T1/RWA</text>
+  </g>
+  <g font-size="21" fill="#1a1a2e">
+    <text x="24" y="328">3,620 M</text>
+    <text x="284" y="328">3,620 M</text>
+    <text x="544" y="328">33.1%</text>
+    <text x="804" y="328">33.1%</text>
+  </g>
+
+  <rect x="20" y="344" width="1000" height="24" rx="4" fill="#e8f5e9"/>
+  <text x="32" y="360" font-size="11" fill="#2e7d32">T1/RWA: PASS  (33.1% vs limit 18.0%)   |   Tier 1 Capital 1,200 M PLN.  Same balance-sheet size, same products — one slider moved.</text>
+
+  <!-- SOT charts: Baseline (blue) vs Modified (orange) -->
+  <text x="20" y="392" font-size="15" font-weight="700" fill="#1a1a2e">EBA Supervisory Outlier Test — Baseline vs Modified</text>
+
+  <!-- EVE SOT -->
+  <text x="24" y="416" font-size="11" font-weight="700" fill="#333">Δ EVE / T1 (%)</text>
+  <rect x="24" y="422" width="10" height="9" fill="#4C72B0"/><text x="38" y="430" font-size="9" fill="#555">Baseline</text>
+  <rect x="90" y="422" width="10" height="9" fill="#DD8452"/><text x="104" y="430" font-size="9" fill="#555">Modified</text>
+  <g font-size="9.5" fill="#333">
+    <line x1="120" y1="440" x2="120" y2="512" stroke="#ccc"/>
+    <text x="24" y="452">par_up</text>
+    <rect x="120" y="445" width="99" height="7" fill="#4C72B0"/><rect x="120" y="453" width="57" height="7" fill="#DD8452"/>
+    <text x="224" y="452" fill="#c62828">−9.9%</text><text x="182" y="460" fill="#c62828">−5.7%</text>
+    <text x="24" y="478">steep</text>
+    <rect x="120" y="471" width="37" height="7" fill="#4C72B0"/><rect x="120" y="479" width="16" height="7" fill="#DD8452"/>
+    <text x="162" y="478">−3.7%</text><text x="141" y="486">−1.6%</text>
+    <text x="24" y="504">par_dn</text>
+    <rect x="120" y="497" width="109" height="7" fill="#4C72B0"/><rect x="120" y="505" width="63" height="7" fill="#DD8452"/>
+    <text x="234" y="504" fill="#2e7d32">+10.9%</text><text x="188" y="512" fill="#2e7d32">+6.3%</text>
+  </g>
+  <rect x="20" y="524" width="340" height="22" rx="4" fill="#e8f5e9"/>
+  <text x="30" y="539" font-size="11" fill="#2e7d32">EVE SOT: PASS   worst −9.9% → −5.7%   (floating assets carry far less duration risk)</text>
+
+  <!-- NII SOT -->
+  <text x="544" y="416" font-size="11" font-weight="700" fill="#333">Δ NII / T1 (%)</text>
+  <g font-size="9.5" fill="#333">
+    <line x1="640" y1="440" x2="640" y2="512" stroke="#ccc"/>
+    <text x="544" y="452">par_dn</text>
+    <rect x="640" y="445" width="82" height="7" fill="#4C72B0"/><rect x="640" y="453" width="115" height="7" fill="#DD8452"/>
+    <text x="727" y="452" fill="#c62828">−3.5%</text><text x="760" y="460" fill="#c62828">−4.9%</text>
+    <text x="544" y="478">flat</text>
+    <rect x="640" y="471" width="46" height="7" fill="#4C72B0"/><rect x="640" y="479" width="44" height="7" fill="#DD8452"/>
+    <text x="691" y="478">−2.0%</text><text x="689" y="486">−1.9%</text>
+    <text x="544" y="504">par_up</text>
+    <rect x="640" y="497" width="75" height="7" fill="#4C72B0"/><rect x="640" y="505" width="112" height="7" fill="#DD8452"/>
+    <text x="720" y="504" fill="#2e7d32">+3.2%</text><text x="757" y="512" fill="#2e7d32">+4.8%</text>
+  </g>
+  <rect x="540" y="524" width="340" height="22" rx="4" fill="#e8f5e9"/>
+  <text x="550" y="539" font-size="11" fill="#2e7d32">NII SOT: PASS   par-up help +3.2% → +4.8%,  par-down hit −3.5% → −4.9%</text>
+
+  <text x="20" y="566" font-size="10" fill="#888">The repricing gap becomes more asset-sensitive: a parallel-up shock helps NII more than before, a parallel-down shock hurts it more, and ΔEVE moves the other way.</text>
+</svg>

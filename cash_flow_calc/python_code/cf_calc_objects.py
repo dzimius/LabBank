@@ -34,7 +34,7 @@ dict_cols_deposits = {
 
 # ── CF wide-table merge helpers ───────────────────────────────────────────────
 # Rate/identity columns carried from the orig side (filled from beh for outer-only rows).
-_CF_RATE_COLS = ['bs_side', 'rate_index', 'fixing_dt', 'cf_start_dt_delay', 'cf_end_dt',
+_CF_RATE_COLS = ['bs_side', 'rate_index', 'fixing_dt', 'cf_end_dt',
                  'cf_yf', 'd_f', 'fwd_rt', 'margin', 'client_rt']
 
 _CON_PAY_RENAME = {
@@ -174,7 +174,15 @@ def _period_to_canonical(tenor: str) -> tuple[int, int]:
     raise ValueError(f"Unsupported tenor: {tenor}")
 
 
-def freeze_fixing_dates(fixing_dates: list[ql.Date], payment_freq: str, fixing_freq: str) -> list[ql.Date]:
+def freeze_fixing_dates(fixing_dates: list[ql.Date], payment_freq: str, fixing_freq: str,
+                         start_idx: int = 0) -> list[ql.Date]:
+    """fixing_dates must be the FULL, un-truncated per-period fixing date array
+    (index 0 = the contract's first period since origination), so the
+    fixing_freq block boundary is anchored to true origination -- not to
+    wherever the caller's date range happens to start (e.g. today's report
+    date). Returns the frozen fixing date for each of the periods starting
+    at global index start_idx through len(fixing_dates)-1.
+    """
     pay_val, pay_unit = _period_to_canonical(payment_freq)
     fix_val, fix_unit = _period_to_canonical(fixing_freq)
 
@@ -193,11 +201,10 @@ def freeze_fixing_dates(fixing_dates: list[ql.Date], payment_freq: str, fixing_f
         )
 
     block = fix_val // pay_val
-    n = len(fixing_dates)
 
     out = []
-    for i in range(n):
-        anchor_i = (i // block) * block
+    for global_i in range(start_idx, len(fixing_dates)):
+        anchor_i = (global_i // block) * block
         out.append(fixing_dates[anchor_i])
     return out
 
@@ -343,24 +350,22 @@ def gen_orgin_sched_loan_fin_inst(
 
     accrual_yf = [dc_conv.yearFraction(d0, d1) for d0, d1 in zip(cf_start_dates, cf_end_dates)]
 
+    # Fixing/reset dates must anchor to true origination (global period index),
+    # not to wherever the report-date truncation happens to start -- otherwise
+    # every contract's reset cycle gets resynced to "today" regardless of its
+    # real history, collapsing a naturally-staggered book onto one date.
+    cf_start_dates_full = [start_dt_ql] + pay_dates[:-1]
+    fixing_dates_full = [cal.advance(dt, fix_shift, bdc) for dt in cf_start_dates_full]
+
     if row.fixing_freq is None:
-        fixing_dates = [fixing_dates[0]] * len(fixing_dates)
+        fixing_dates = [fixing_dates_full[0]] * len(cf_start_dates)
     else:
         fixing_dates = freeze_fixing_dates(
-            fixing_dates,
+            fixing_dates_full,
             payment_freq=row.payment_freq,
             fixing_freq=row.fixing_freq,
+            start_idx=start_idx,
         )
-
-    # delay shift: if product has a delay, shift cf_start_dt back by that many months
-    pc = int(row.product_code) if hasattr(row, 'product_code') else None
-    delay_months = (ir_params or {}).get(pc, {}).get('delay', 0) if pc is not None else 0
-
-    if delay_months:
-        delay_period = ql.Period(-delay_months, ql.Months)
-        cf_start_dates_delay = [cal.advance(dt, delay_period, bdc) for dt in cf_start_dates]
-    else:
-        cf_start_dates_delay = cf_start_dates
 
     result_df = pd.DataFrame(
         {
@@ -368,7 +373,6 @@ def gen_orgin_sched_loan_fin_inst(
             "rate_index": [row.rate_index] * len(cf_end_dates),
             "fixing_dt": fixing_dates,
             "cf_start_dt": cf_start_dates,
-            "cf_start_dt_delay": cf_start_dates_delay,
             "cf_end_dt": cf_end_dates,
             "cf_yf": accrual_yf,
         }
@@ -376,13 +380,12 @@ def gen_orgin_sched_loan_fin_inst(
 
     # QuantLib.Date -> datetime
     result_df["cf_start_dt"] = ql_column_to_datetime(result_df["cf_start_dt"])
-    result_df["cf_start_dt_delay"] = ql_column_to_datetime(result_df["cf_start_dt_delay"])
     result_df["cf_end_dt"] = ql_column_to_datetime(result_df["cf_end_dt"])
     result_df["fixing_dt"] = ql_column_to_datetime(result_df["fixing_dt"])
 
-    # join_dt = min(cf_start_dt_delay) per fixing_dt — uses delay-shifted date for fwd_rt lookup
+    # join_dt = min(cf_start_dt) per fixing_dt — used for fwd_rt lookup (instant repricing)
     result_df["join_dt"] = (
-        result_df.groupby("fixing_dt")["cf_start_dt_delay"]
+        result_df.groupby("fixing_dt")["cf_start_dt"]
         .transform("min")
     )
 
@@ -722,7 +725,8 @@ def compute_amort_schedule_vectorized(
     """
     PARAM_COLS = ['schedule_id', 'balance_amt', 'amort_type', 'bs_side']
     # margin only present for loans; product_code for both loans and fin_inst
-    avail_params = PARAM_COLS + [c for c in ['margin', 'product_code'] if c in sched_params_df.columns]
+    avail_params = PARAM_COLS + [c for c in ['margin', 'product_code']
+                                  if c in sched_params_df.columns]
     df = sched_df.merge(sched_params_df[avail_params], on='schedule_id', how='left')
     if 'margin' not in df.columns:
         df['margin'] = np.nan

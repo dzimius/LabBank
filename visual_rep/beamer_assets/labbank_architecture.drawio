@@ -156,7 +156,7 @@
         </mxCell>
 
         <!-- ═══ OUTPUTS ═══ -->
-        <mxCell id="o1" value="&lt;b&gt;bank_report.html&lt;/b&gt;&lt;br&gt;ALM &amp; Compliance (Jupyter)"
+        <mxCell id="o1" value="&lt;b&gt;ALM_report.html&lt;/b&gt;&lt;br&gt;ALM &amp; Compliance (Jupyter)"
           style="rounded=1;whiteSpace=wrap;html=1;fillColor=#BF360C;strokeColor=#870000;fontColor=#ffffff;fontSize=9;arcSize=5;"
           vertex="1" parent="1">
           <mxGeometry x="866" y="80" width="190" height="46" as="geometry" />

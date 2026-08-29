@@ -106,12 +106,26 @@ def build_curve_ql(valuation_date: ql.Date, quotes: dict[str, float]) -> ql.Yiel
             day_count
         )
 
+    def annual_to_simple(rate_annual_compounded, years):
+        # DepositRateHelper always assumes SIMPLE (linear) interest, which is
+        # right for O/N..1Y money-market quotes but wrong for the IRS swap
+        # points (2Y..10Y), which are annually-compounded fixed-leg yields.
+        # Convert to the mathematically-equivalent simple rate so the same
+        # helper bootstraps the correct discount factor: (1+r)^T == 1 + r_simple*T.
+        return ((1.0 + rate_annual_compounded) ** years - 1.0) / years
+
     helpers = [
         helper(quotes["1D"], ql.Period(1, ql.Days)),
         helper(quotes["1M"], ql.Period(1, ql.Months)),
         helper(quotes["3M"], ql.Period(3, ql.Months)),
         helper(quotes["6M"], ql.Period(6, ql.Months)),
         helper(quotes["1Y"], ql.Period(12, ql.Months)),
+        helper(annual_to_simple(quotes["2Y"], 2), ql.Period(2, ql.Years)),
+        helper(annual_to_simple(quotes["3Y"], 3), ql.Period(3, ql.Years)),
+        helper(annual_to_simple(quotes["4Y"], 4), ql.Period(4, ql.Years)),
+        helper(annual_to_simple(quotes["5Y"], 5), ql.Period(5, ql.Years)),
+        helper(annual_to_simple(quotes["7Y"], 7), ql.Period(7, ql.Years)),
+        helper(annual_to_simple(quotes["10Y"], 10), ql.Period(10, ql.Years)),
     ]
 
     settlement_date = calendar.advance(valuation_date, fixing_days, ql.Days)
@@ -151,7 +165,7 @@ def simulate_hw_curves_quantlib(
     a: float = 0.10,
     sigma: float = 0.01,
     n_paths: int = 100,
-    horizon: ql.Period = ql.Period(1, ql.Years),
+    horizon: ql.Period = ql.Period(10, ql.Years),
     output_tenors: tuple[str, ...] = tuple([f"{i}M" for i in range(0, 12*30+1)]),
     rng_seed: int = 123,
 ) -> pd.DataFrame:
@@ -164,14 +178,19 @@ def simulate_hw_curves_quantlib(
         '1M': subdf.loc[subdf['tenor'] == '1M', 'rate'].values[0] / 100.0,
         '3M': subdf.loc[subdf['tenor'] == '3M', 'rate'].values[0] / 100.0,
         '6M': subdf.loc[subdf['tenor'] == '6M', 'rate'].values[0] / 100.0,
-        '1Y': subdf.loc[subdf['tenor'] == '1Y', 'rate'].values[0] / 100.0
+        '1Y': subdf.loc[subdf['tenor'] == '1Y', 'rate'].values[0] / 100.0,
+        '2Y': subdf.loc[subdf['tenor'] == '2Y', 'rate'].values[0] / 100.0,
+        '3Y': subdf.loc[subdf['tenor'] == '3Y', 'rate'].values[0] / 100.0,
+        '4Y': subdf.loc[subdf['tenor'] == '4Y', 'rate'].values[0] / 100.0,
+        '5Y': subdf.loc[subdf['tenor'] == '5Y', 'rate'].values[0] / 100.0,
+        '7Y': subdf.loc[subdf['tenor'] == '7Y', 'rate'].values[0] / 100.0,
+        '10Y': subdf.loc[subdf['tenor'] == '10Y', 'rate'].values[0] / 100.0,
     }
     ccy = subdf['currency'].values[0]
     cal = get_calendar_from_currency(ccy)
     dc_conv =get_dc_from_currency(ccy)
 
     yts = build_curve_ql(ql_valuation, quotes)
-    model = ql.HullWhite(yts, a, sigma)
 
     horizon_date = cal.advance(ql_valuation, horizon)
     t_h = dc_conv.yearFraction(ql_valuation, horizon_date)
@@ -179,20 +198,6 @@ def simulate_hw_curves_quantlib(
     # 1D data / year_frac (do outputu)
     spot_1d_date = cal.advance(ql_valuation, ql.Period(1, ql.Days))
     spot_1d_year_frac = dc_conv.yearFraction(ql_valuation, spot_1d_date)
-
-    # --- użyj HullWhiteProcess zamiast własnej OU-ki ---
-    time_steps = 1
-    hw_process = ql.HullWhiteProcess(yts, a, sigma)
-    rng = ql.GaussianRandomSequenceGenerator(
-        ql.UniformRandomSequenceGenerator(time_steps, ql.UniformRandomGenerator())
-    )
-    path_generator = ql.GaussianPathGenerator(hw_process, t_h, time_steps, rng, False)
-
-    x_h = np.empty(n_paths)
-    for i in range(n_paths):
-        path = path_generator.next().value()
-        x_h[i] = path.back()
-    # ---------------------------------------------------
 
     targets = [cal.advance(ql_valuation, ten2period(tk)) for tk in output_tenors]
     t_targets = [dc_conv.yearFraction(ql_valuation, dT) for dT in targets]
@@ -206,17 +211,28 @@ def simulate_hw_curves_quantlib(
     # output: zamieniamy nazwę 0M -> 1D
     cols = ["1D" if tk.upper() == "0M" else tk.upper() for tk in output_tenors]
 
+    # Beyond the horizon (no real market quotes past 10Y -- IRS panel stops
+    # there), extrapolate the zero rate as a smooth taper of the last
+    # observed (7Y -> horizon) slope, rather than a Hull-White path-average
+    # -- the HW mean-reversion pulls the average to a flat asymptote almost
+    # immediately, which looks like a data-driven signal but is actually
+    # just a model artifact of averaging many mean-reverting paths. Tapering
+    # the real observed slope with an exponential decay (tau_decay years)
+    # keeps extrapolating in the direction the data actually points, smoothly
+    # flattening out rather than running away or snapping flat.
+    z_anchor_lo = -np.log(yts.discount(7.0)) / 7.0
+    z_h = -np.log(yts.discount(t_h)) / t_h
+    slope_per_year = (z_h - z_anchor_lo) / max(t_h - 7.0, 1e-9)
+    tau_decay = 10.0
+
     avg_rates = np.empty(len(cols))
     for j in range(len(cols)):
         if targets[j] <= horizon_date:
             P0T = yts.discount(t_targets[j])
             avg_rates[j] = -np.log(P0T) / max(taus_today[j], 1e-12)
         else:
-            y_samples = np.empty(n_paths)
-            for i, x in enumerate(x_h):
-                P = model.discountBond(t_h, t_targets[j], float(x))
-                y_samples[i] = -np.log(P) / max(taus_forward[j], 1e-12)
-            avg_rates[j] = y_samples.mean()
+            dt = taus_forward[j]
+            avg_rates[j] = z_h + slope_per_year * tau_decay * (1.0 - np.exp(-dt / tau_decay))
 
     # nadpisz "dawne 0M" stopą z 1D (teraz będzie w output jako tenor=1D)
     if idx0 is not None:

@@ -172,18 +172,20 @@ def _init():
 _init()
 
 # ── tabs ──────────────────────────────────────────────────────────────────────
-tab_bs, tab_irs, tab_nmd, tab_metrics, tab_gap, tab_curves = st.tabs(
-    ["⚖️  Balance Sheet", "🔄  IRS Book", "🏦  NMD Stress", "📈  ALM Metrics", "📊  Gap Analysis", "📉  Market Curves"]
+tab_bs, tab_metrics, tab_gap, tab_curves, tab_nmd, tab_irs = st.tabs(
+    ["⚖️  Balance Sheet", "📈  ALM Metrics", "📊  Gap Analysis", "📉  Market Curves", "🏦  NMD Stress", "🔄  IRS Book"]
 )
 
 # ═════════════════════════════════════════════════════════════════════════════
-# TAB 6 — MARKET CURVES
-# (executes FIRST, right after the tabs are created, even though it's visually
-# the last tab -- its hypothetical-curve selectors need to be resolved before
-# ALM Metrics runs, and rendering them here means their widget state can
-# never be perturbed by anything happening in another tab's code later in
-# this same script pass, e.g. Balance Sheet validation. See the git history
-# for 2026-08-15 if this needs more context.)
+# TAB 4 — MARKET CURVES
+# (executes FIRST, right after the tabs are created, even though it sits 4th in
+# the tab bar -- its hypothetical-curve selectors need to be resolved before
+# ALM Metrics (tab 2) runs, and rendering them here means their widget state
+# can never be perturbed by anything happening in another tab's code later in
+# this same script pass, e.g. Balance Sheet validation. The `with` blocks below
+# stay in execution order (Curves → Balance Sheet → IRS → Metrics → Gap → NMD),
+# which is deliberately NOT the tab-bar order. See the git history for
+# 2026-08-15 if this needs more context.)
 # ═════════════════════════════════════════════════════════════════════════════
 with tab_curves:
     st.subheader("Market Curves")
@@ -345,7 +347,7 @@ with tab_curves:
 # ═════════════════════════════════════════════════════════════════════════════
 # TAB 1 — BALANCE SHEET
 # ═════════════════════════════════════════════════════════════════════════════
-with tab_bs:
+with tab_bs:  # tab-bar position 1
 
     c_ta, c_rst = st.columns([4, 1])
     with c_ta:
@@ -506,9 +508,9 @@ with tab_bs:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# TAB 2 — IRS BOOK
+# TAB 6 — IRS BOOK
 # ═════════════════════════════════════════════════════════════════════════════
-with tab_irs:
+with tab_irs:  # tab-bar position 6
 
     c_hd, c_rst2 = st.columns([5, 1])
     c_hd.subheader("Interest Rate Swap Book")
@@ -621,9 +623,9 @@ with tab_irs:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# TAB 3 — METRICS
+# TAB 2 — ALM METRICS
 # ═════════════════════════════════════════════════════════════════════════════
-with tab_metrics:
+with tab_metrics:  # tab-bar position 2
 
     if not st.session_state.get("bs_valid", False):
         st.warning("⚠️ Fix the balance sheet (both sides = 100%) to compute metrics.")
@@ -963,9 +965,9 @@ with tab_metrics:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# TAB 4 — GAP ANALYSIS
+# TAB 3 — GAP ANALYSIS
 # ═════════════════════════════════════════════════════════════════════════════
-with tab_gap:
+with tab_gap:  # tab-bar position 3
 
     if not st.session_state.get("bs_valid", False):
         st.warning("⚠️ Fix the balance sheet (both sides = 100%) to compute the gap.")
@@ -1183,9 +1185,9 @@ with tab_gap:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# TAB 3 — NMD BEHAVIORAL MODEL STRESS
+# TAB 5 — NMD BEHAVIORAL MODEL STRESS
 # ═════════════════════════════════════════════════════════════════════════════
-with tab_nmd:
+with tab_nmd:  # tab-bar position 5
     st.subheader("Non-Maturity Deposit — Behavioral Model Stress")
     st.caption(
         "Edit the **✏️ Stressed %** column to change the outstanding-percentage profile. "

@@ -45,7 +45,7 @@ engine = create_engine(
     future=True,
 )
 
-REPORT_DATE  = pd.to_datetime("2024-12-31")
+REPORT_DATE  = pd.to_datetime("2026-06-30")
 TOTAL_ASSETS = 10_000_000_000
 OUT_PATH     = os.path.join(BASE_DIR, "..", "output", "approx_accuracy_report.xlsx")
 NPZ_PARAMS   = os.path.join(BASE_DIR, "..", "output", "product_params.npz")

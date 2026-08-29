@@ -1152,10 +1152,10 @@ def compute_deposit_client_rt(
 
     Formula per product: client_rt = a * market_rate + b/100
       - Fixed deposits (rate_type='F'):   market_rate = fixing at start_date
-      - Other deposits (rate_type='A/V'): market_rate = fixing at (report_date - delay months)
+      - Other deposits (rate_type='A/V'): market_rate = fixing at report_date (instant repricing)
       - If a=0: client_rt = b/100 (e.g. 0% for current accounts)
 
-    interest_rt columns : product_code, a, b (in % points), delay (months)
+    interest_rt columns : product_code, a, b (in % points)
     bs_struct columns   : product_code, rate_index (rate_index already encodes the tenor,
                           e.g. 'PLN_BID_6M'); add rate_index for any deposit product with a != 0
     fixings columns     : fixing_date, rate_index, rate (in % points), ...
@@ -1216,7 +1216,6 @@ def compute_deposit_client_rt(
         row_ir = ir.loc[pc]
         a     = float(row_ir['a'])
         b_pct = float(row_ir['b'])   # percentage points, e.g. 0.5 → 0.005 in decimal
-        delay = int(row_ir['delay'])
 
         # Floor parameters — at most one of index_floor / client_floor may be set
         index_floor = (
@@ -1282,8 +1281,8 @@ def compute_deposit_client_rt(
                 .values
             )
         else:
-            # Variable / Admin: index_rt and client_rt from fixing at (report_date - delay)
-            target_date = pd.Timestamp(report_date) - pd.DateOffset(months=delay)
+            # Variable / Admin: index_rt and client_rt from fixing at report_date (instant repricing)
+            target_date = pd.Timestamp(report_date)
             mkt_pct = _get_fixing_rate_pct(rate_index, target_date)
             all_tx.loc[pc_mask, 'index_rt']  = mkt_pct / 100.0
             all_tx.loc[pc_mask, 'client_rt'] = _apply_floor(mkt_pct / 100.0)
@@ -1397,10 +1396,13 @@ def compute_asset_rates(
             unique_starts = all_tx.loc[fixed_mask, 'start_date'].dropna().unique()
             start_to_rt = {}
             for sd in unique_starts:
-                sd_ts = pd.Timestamp(sd)
+                # .normalize() strips any time-of-day component so dict keys built
+                # here match the keys looked up below regardless of whether the
+                # source column carries datetime64 with a nonzero time part.
+                sd_ts = pd.Timestamp(sd).normalize()
                 start_to_rt[sd_ts] = _get_fixing_dec(rate_index, sd_ts)
             index_rt_s = all_tx.loc[fixed_mask, 'start_date'].apply(
-                lambda d: start_to_rt.get(pd.Timestamp(d), np.nan) if pd.notna(d) else np.nan
+                lambda d: start_to_rt.get(pd.Timestamp(d).normalize(), np.nan) if pd.notna(d) else np.nan
             )
             all_tx.loc[fixed_mask, 'index_rt']  = index_rt_s.values
             all_tx.loc[fixed_mask, 'client_rt'] = index_rt_s.apply(

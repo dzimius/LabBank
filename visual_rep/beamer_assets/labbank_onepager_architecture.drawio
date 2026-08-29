@@ -120,7 +120,7 @@
           vertex="1" parent="1">
           <mxGeometry x="890" y="80" width="290" height="20" as="geometry" />
         </mxCell>
-        <mxCell id="s4_1" value="bank_report / finance_report&#10;Jupyter → HTML / PDF"
+        <mxCell id="s4_1" value="ALM_report / finance_report&#10;Jupyter → HTML / PDF"
           style="rounded=1;whiteSpace=wrap;html=1;fillColor=#BF360C;strokeColor=#870000;fontColor=#ffffff;fontSize=10;arcSize=8;"
           vertex="1" parent="1">
           <mxGeometry x="910" y="112" width="250" height="38" as="geometry" />

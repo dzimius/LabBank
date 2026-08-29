@@ -267,3 +267,35 @@ def reset_cohort_cf_compare() -> None:
 def write_cohort_cf_compare(df: pd.DataFrame) -> None:
     """Append rows to opt_prep.cohort_cf_compare."""
     _write(df, CohortCfCompare)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ftp_rates — Funds Transfer Pricing rate per cohort (see ftp_store.py)
+# ─────────────────────────────────────────────────────────────────────────────
+
+FtpRates = Table(
+    "ftp_rates", metadata,
+    Column("report_date",  Date,           nullable=False),
+    Column("cohort_id",    String(30),     nullable=False),
+    # market-rate component: floating = today's curve fwd rate at fixing tenor;
+    # fixed = historical NS zero rate at origination, for the original tenor
+    Column("market_rt",    DECIMAL(18, 8), nullable=True),
+    # liquidity_spread(tenor): 0% at 0M -> 0.5% at 120M, capped beyond
+    Column("liq_spread",   DECIMAL(18, 8), nullable=True),
+    # ftp_rate = market_rt + liq_spread (decimal, e.g. 0.035 = 3.5%)
+    Column("ftp_rate",     DECIMAL(18, 8), nullable=True),
+    schema="opt_prep",
+)
+
+
+def reset_ftp_rates() -> None:
+    ensure_schema()
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS opt_prep.ftp_rates"))
+    with engine.begin() as conn:
+        metadata.create_all(bind=conn, tables=[FtpRates], checkfirst=False)
+
+
+def write_ftp_rates(df: pd.DataFrame) -> None:
+    """Append rows to opt_prep.ftp_rates."""
+    _write(df, FtpRates)

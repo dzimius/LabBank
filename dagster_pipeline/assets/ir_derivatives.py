@@ -2,7 +2,7 @@ import pandas as pd
 from dagster import asset, MaterializeResult, MetadataValue
 from dagster_pipeline.runner import PROJECT_ROOT, run_workflow
 
-_REPORT_DATE = pd.to_datetime("2024-12-31")
+_REPORT_DATE = pd.to_datetime("2026-06-30")
 
 
 @asset(

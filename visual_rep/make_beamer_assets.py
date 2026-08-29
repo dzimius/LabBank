@@ -189,168 +189,18 @@ def make_pipeline():
     save(fig, 'pipeline.png')
 
 
-# ── 2. SQL SCHEMA DIAGRAM ─────────────────────────────────────────────────────
-# ── Shared diagram palette (single navy family -- no per-box rainbow hues) ────
-_DIAG_NAVY       = '#1A3A6E'
-_DIAG_NAVY_DARK  = '#0D1B3E'
-_DIAG_FILL       = '#EEF2F8'
-_DIAG_FILL_END   = '#E4ECF7'   # marginally deeper tint for the pipeline's terminal box
-_DIAG_ARROW      = '#5B7088'
-_DIAG_DESC       = '#8A8A8A'
+# ── 2. SQL SCHEMA DIAGRAM & TRANSACTION ERD ──────────────────────────────────
+# Hand-authored in draw.io (2026-08-20) rather than generated here -- the
+# matplotlib version that used to live in this file (single navy palette,
+# FancyBboxPatch boxes) read as flat and low-contrast next to make_pipeline()
+# above once actually compared side by side. The .drawio source files are
+# visual_rep/beamer_assets/sql_schema.drawio and transaction_erd.drawio;
+# re-export via the draw.io desktop app or its CLI, e.g.:
+#   drawio -x -f png -o sql_schema.png -s 2 -b 20 sql_schema.drawio
+#   drawio -x -f png -o transaction_erd.png -s 2 -b 20 transaction_erd.drawio
+# Deliberately NOT wired into the 'RUN ALL' step list below, so running this
+# script never silently regenerates (and downgrades) these two PNGs.
 
-
-def _rect_edge_point(box, target_center):
-    """Point where the ray from `box`'s center to `target_center` crosses
-    box's own boundary -- so a connector always lands exactly on the
-    rectangle edge (never floating off it or piercing past it), regardless
-    of the angle between the two boxes."""
-    x, y, w, h = box
-    cx, cy = x + w / 2, y + h / 2
-    tx, ty = target_center
-    dx, dy = tx - cx, ty - cy
-    if dx == 0 and dy == 0:
-        return (cx, cy)
-    scales = []
-    if dx != 0:
-        scales.append((w / 2) / abs(dx))
-    if dy != 0:
-        scales.append((h / 2) / abs(dy))
-    s = min(scales)
-    return (cx + dx * s, cy + dy * s)
-
-
-def make_sql_schema():
-    fig, ax = plt.subplots(figsize=(13, 6))
-    ax.set_xlim(0, 13); ax.set_ylim(0, 6.5)
-    ax.axis('off')
-    fig.patch.set_facecolor('white')
-
-    schemas = {
-        'dbo':      (0.3, 4.5, 2.8, 1.8, 'transactions', 'Master balance sheet'),
-        'schemat':  (0.3, 2.0, 2.8, 2.0, 'loans · deposits\nequity · ir_swaps\nsched.ir_swaps',
-                     'Product schedules\n& swap book'),
-        'mkt':      (0.3, 0.2, 2.8, 1.5, 'curves', 'Discount / fwd curves\nPLN · EUR · USD'),
-        'cf':       (4.8, 4.0, 2.8, 2.2, 'products\nnii_base_scenario\nnii_own_scenarios\neve_own_scenarios',
-                     'Cash flow outputs'),
-        'irrbb':    (4.8, 1.0, 2.8, 2.5, 'curves · ir_gap_beh\nnii_results · eve_results\nirrbb_report\nliq_gap_beh',
-                     'IRRBB risk metrics'),
-        'results':  (9.4, 3.5, 2.8, 1.8, 'lcr_nsfr', 'Liquidity ratios\nLCR · NSFR'),
-    }
-    boxes = {name: (x, y, w, h) for name, (x, y, w, h, *_ ) in schemas.items()}
-    centers = {name: (x + w / 2, y + h / 2) for name, (x, y, w, h) in boxes.items()}
-
-    for name, (x, y, w, h, tables, desc) in schemas.items():
-        is_terminal = (name == 'results')
-        rect = FancyBboxPatch((x, y), w, h,
-                              boxstyle='round,pad=0.1',
-                              facecolor=_DIAG_FILL_END if is_terminal else _DIAG_FILL,
-                              edgecolor=_DIAG_NAVY, linewidth=2.4 if is_terminal else 1.6)
-        ax.add_patch(rect)
-        ax.text(x + w/2, y + h - 0.25, f'[{name}]',
-                ha='center', va='center', fontsize=9, fontweight='bold', color=_DIAG_NAVY)
-        ax.text(x + w/2, y + h/2 - 0.1, tables,
-                ha='center', va='center', fontsize=7.5, color='#333333', linespacing=1.5)
-        ax.text(x + w/2, y + 0.2, desc,
-                ha='center', va='center', fontsize=7, color=_DIAG_DESC, style='italic')
-
-    links = [
-        ('dbo',     'cf',      'reads'),
-        ('schemat', 'irrbb',   'reads'),
-        ('dbo',     'schemat', None),
-        ('mkt',     'irrbb',   'reads'),
-        ('cf',      'results', 'feeds'),
-        ('irrbb',   'results', 'feeds'),
-    ]
-    for src, dst, lbl in links:
-        p1 = _rect_edge_point(boxes[src], centers[dst])
-        p2 = _rect_edge_point(boxes[dst], centers[src])
-        ax.annotate('', xy=p2, xytext=p1,
-                    arrowprops=dict(arrowstyle='-|>', color=_DIAG_ARROW, lw=1.4,
-                                    shrinkA=0, shrinkB=0, mutation_scale=14))
-        if lbl:
-            mx, my = (p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2
-            dx, dy = p2[0] - p1[0], p2[1] - p1[1]
-            perp_off = (0.16, 0.0) if abs(dy) > abs(dx) else (0.0, 0.16)
-            ax.text(mx + perp_off[0], my + perp_off[1], f'{lbl} →',
-                    ha='center', va='center', fontsize=7, color=_DIAG_ARROW,
-                    fontweight='bold')
-
-    ax.set_title('LabBank — SQL Schema Overview', fontsize=13, fontweight='bold',
-                 pad=8, color=_DIAG_NAVY_DARK)
-    fig.tight_layout()
-    save(fig, 'sql_schema.png')
-
-
-# ── 2b. TRANSACTION-HUB ENTITY DIAGRAM ────────────────────────────────────────
-def make_transaction_erd():
-    """Conceptual diagram: dbo.transactions as the hub (fact table), with
-    1:1 links out to each schemat.* product-detail table -- each box shows
-    what PRODUCT TYPES live there (from b_s_gen_objects.py's table_registry:
-    every product_name maps to exactly one of loans/deposits/
-    financial_instruments/equity), not raw column names -- this is meant to
-    orient a reader who's never seen the schema, not double as an SSMS
-    screenshot."""
-    fig, ax = plt.subplots(figsize=(11, 8.6))
-    ax.set_xlim(0, 11); ax.set_ylim(0, 9.6)
-    ax.axis('off')
-    fig.patch.set_facecolor('white')
-
-    def content_box(x, y, w, h, header, body, desc, fc=_DIAG_FILL, ec=_DIAG_NAVY,
-                    lw=1.6):
-        rect = FancyBboxPatch((x, y), w, h, boxstyle='square,pad=0',
-                               facecolor=fc, edgecolor=ec, linewidth=lw)
-        ax.add_patch(rect)
-        head_h = 0.5
-        ax.add_patch(mpatches.Rectangle((x, y + h - head_h), w, head_h,
-                                         facecolor=ec, edgecolor=ec))
-        ax.text(x + w/2, y + h - head_h/2, header, ha='center', va='center',
-                fontsize=10, fontweight='bold', color='white')
-        ax.text(x + w/2, y + (h - head_h) * 0.58 + 0.05, body,
-                ha='center', va='center', fontsize=8.3, color='#212121',
-                linespacing=1.9)
-        ax.text(x + w/2, y + 0.28, desc, ha='center', va='center',
-                fontsize=7.3, color=_DIAG_DESC, style='italic')
-
-    # Hub: dbo.transactions -- role, not a column list. This is the fact
-    # table every regulatory/finance report in this project reads from.
-    hub_x, hub_y, hub_w, hub_h = 3.7, 3.65, 3.6, 2.1
-    hub_box = (hub_x, hub_y, hub_w, hub_h)
-    content_box(hub_x, hub_y, hub_w, hub_h, 'dbo.transactions',
-                'FACT TABLE', 'One row per position\nmain source table for all reporting',
-                fc=_DIAG_FILL_END, ec=_DIAG_NAVY, lw=2.2)
-
-    children = {
-        'schemat.loans': ('Mortgages · Cash Loans\nInvestment (SME) Loans',
-                           'Fixed & floating-rate lending', 0.2, 5.9, 3.1, 2.3),
-        'schemat.deposits': ('Current Accounts\nSavings · Term Deposits',
-                              'Client & bank funding', 7.7, 5.9, 3.1, 2.3),
-        'schemat.financial_instruments': ('Bonds (Fixed/Float) · T-Bills\nCash',
-                                           'HQLA & investment book', 0.2, 0.4, 3.4, 2.3),
-        'schemat.equity': ('Common Shares\nRetained Earnings · Reserves',
-                            'Regulatory capital', 7.7, 0.4, 3.1, 2.3),
-    }
-
-    hub_center = (hub_x + hub_w / 2, hub_y + hub_h / 2)
-    for name, (body, desc, cx, cy, cw, ch) in children.items():
-        child_box = (cx, cy, cw, ch)
-        content_box(cx, cy, cw, ch, name, body, desc)
-        child_center = (cx + cw / 2, cy + ch / 2)
-        p1 = _rect_edge_point(hub_box, child_center)
-        p2 = _rect_edge_point(child_box, hub_center)
-        # plain connector, no arrowhead/cardinality marks -- every relationship
-        # here is the same 1:1 pattern, already stated once in the subtitle
-        # below, so repeating "1 ... 1" at each line was pure clutter.
-        ax.plot([p1[0], p2[0]], [p1[1], p2[1]], color=_DIAG_ARROW, lw=1.3,
-                zorder=1, solid_capstyle='round')
-
-    ax.set_title('LabBank — Core Entity Relationships  (dbo.transactions hub)',
-                 fontsize=13, fontweight='bold', y=0.98, color=_DIAG_NAVY_DARK)
-    ax.text(5.5, 9.15,
-            'One row per position in dbo.transactions; each schemat.* table adds product-specific\n'
-            'detail for the same transaction_id (1:1 — every position belongs to exactly one product table).',
-            ha='center', va='center', fontsize=8, color='#666666', style='italic')
-    fig.tight_layout()
-    save(fig, 'transaction_erd.png')
 
 
 # ── 3. BALANCE SHEET STRUCTURE ────────────────────────────────────────────────
@@ -921,8 +771,9 @@ def make_liq_gap():
 if __name__ == '__main__':
     steps = [
         ('pipeline diagram',   make_pipeline),
-        ('SQL schema',         make_sql_schema),
-        ('transaction ERD',    make_transaction_erd),
+        # SQL schema / transaction ERD: hand-authored in draw.io now, not
+        # generated here -- see beamer_assets/sql_schema.drawio and
+        # transaction_erd.drawio.
         ('balance sheet',      make_bs_structure),
         ('rate type exposure', make_rate_type),
         ('NII waterfall',      make_nii_waterfall),

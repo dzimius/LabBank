@@ -13,7 +13,7 @@ def md(s):   return {"cell_type":"markdown","metadata":{},"source":[s]}
 CELL_TITLE = md("""\
 # Bank Finance Report
 
-**Report Date:** 2024-12-31 | **Currency:** PLN | **Audience:** Finance / Treasury
+**Report Date:** 2026-06-30 | **Currency:** PLN | **Audience:** Finance / Treasury
 
 ---
 | # | Section |
@@ -39,6 +39,7 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import matplotlib.patches as mpatches
 from sqlalchemy import create_engine, text
+from IPython.display import HTML, display
 
 ENGINE = create_engine(
     'mssql+pyodbc://maciek_d/bank_gen'
@@ -46,7 +47,7 @@ ENGINE = create_engine(
     '&Trusted_Connection=yes',
     future=True,
 )
-REPORT_DATE = pd.to_datetime('2024-12-31')
+REPORT_DATE = pd.to_datetime('2026-06-30')
 CCY = 'PLN'
 
 plt.rcParams.update({
@@ -98,6 +99,73 @@ PROD_LABELS = {
     '7060': 'Term Deposit',          '7900': 'Interbank Placement',
     '8000': 'Savings Account',
 }
+
+# ── Shared HTML table renderer (used instead of raw print() tables) ──────────
+_TBL_HEAD_BG  = '#37474F'
+_TBL_ROW_ALT  = '#f4f6f7'
+_TBL_BORDER   = '#d5dbde'
+_TBL_FONT     = "font-family:'Segoe UI', Arial, sans-serif;"
+
+def html_table(headers, rows, aligns=None, total_row=None, title=None, note=None):
+    \"\"\"Render a list-of-rows table (already-formatted strings) as styled HTML.
+
+    headers    : list[str]
+    rows       : list[list[str]]   -- pre-formatted cell text, one list per row
+    aligns     : list['left'|'right'|'center'], defaults to left col0 + right rest
+    total_row  : optional list[str] rendered bold with a top border
+    title      : optional bold caption above the table
+    note       : optional small grey footnote below the table
+    \"\"\"
+    n = len(headers)
+    aligns = aligns or (['left'] + ['right'] * (n - 1))
+
+    def _th(i):
+        return (f'<th style="text-align:{aligns[i]};padding:7px 14px;'
+                f'background:{_TBL_HEAD_BG};color:#ffffff;font-weight:600;'
+                f'font-size:12.5px;{_TBL_FONT}white-space:nowrap;">{headers[i]}</th>')
+
+    def _td(i, v, bold=False, top_border=False, color=None):
+        style = (f'text-align:{aligns[i]};padding:5px 14px;font-size:12.5px;'
+                 f'{_TBL_FONT}white-space:nowrap;')
+        if bold: style += 'font-weight:700;'
+        if top_border: style += f'border-top:2px solid {_TBL_HEAD_BG};'
+        if color: style += f'color:{color};'
+        return f'<td style="{style}">{v}</td>'
+
+    parts = ['<div style="overflow-x:auto;margin:6px 0 4px 0;">']
+    if title:
+        parts.append(f'<div style="{_TBL_FONT}font-weight:700;font-size:13.5px;'
+                      f'margin-bottom:4px;">{title}</div>')
+    parts.append(f'<table style="border-collapse:collapse;border:1px solid {_TBL_BORDER};">')
+    parts.append('<thead><tr>' + ''.join(_th(i) for i in range(n)) + '</tr></thead>')
+    parts.append('<tbody>')
+    for ridx, row in enumerate(rows):
+        bg = '#ffffff' if ridx % 2 == 0 else _TBL_ROW_ALT
+        cells = []
+        for i, cell in enumerate(row):
+            if isinstance(cell, tuple):
+                v, color = cell
+            else:
+                v, color = cell, None
+            cells.append(_td(i, v, color=color))
+        parts.append(f'<tr style="background:{bg};">' + ''.join(cells) + '</tr>')
+    if total_row:
+        cells = []
+        for i, cell in enumerate(total_row):
+            v, color = cell if isinstance(cell, tuple) else (cell, None)
+            cells.append(_td(i, v, bold=True, top_border=True, color=color))
+        parts.append(f'<tr style="background:#eceff1;">' + ''.join(cells) + '</tr>')
+    parts.append('</tbody></table>')
+    if note:
+        parts.append(f'<div style="{_TBL_FONT}font-size:11px;color:#607D8B;'
+                      f'margin-top:4px;">{note}</div>')
+    parts.append('</div>')
+    return HTML(''.join(parts))
+
+def pos_neg(v, fmt):
+    \"\"\"Format a signed number and color it green if >=0 else red.\"\"\"
+    s = format(v, fmt)
+    return (s, '#2E7D32' if v >= 0 else '#C62828')
 
 print(f'Setup complete  |  {REPORT_DATE.date()}  |  {CCY}')
 """)
@@ -188,62 +256,71 @@ avg_asset_yld  = total_inc  / total_assets * 100 if total_assets else 0
 avg_cost_funds = total_exp  / total_liabs  * 100 if total_liabs  else 0
 int_spread     = avg_asset_yld - avg_cost_funds
 
-print(f'  Total assets     {total_assets/1e9:>8.2f}  B PLN')
-print(f'  Total liabilities{total_liabs/1e9:>8.2f}  B PLN')
-print(f'  Interest income  {total_inc/1e6:>8.1f}  M PLN')
-print(f'  Interest expense {total_exp/1e6:>8.1f}  M PLN')
-print(f'  NII              {nii_total/1e6:>8.1f}  M PLN')
-print(f'  NIM              {nim_pct:>8.2f}  %')
-print(f'  Avg asset yield  {avg_asset_yld:>8.2f}  %')
-print(f'  Cost of funds    {avg_cost_funds:>8.2f}  %')
-print(f'  Spread           {int_spread:>8.2f}  %')
+print(f'Data loaded  |  {len(prod)} product rows  |  '
+      f'assets {total_assets/1e9:.2f}B / liabs {total_liabs/1e9:.2f}B PLN')
 """)
 
 # ─────────────────────────────────────────────────────────────────────────────
 CELL_EXEC_MD = md("---\n## Executive P&L Summary\n")
 
 CELL_EXEC = code("""\
-SEP  = '=' * 62
-SEP2 = '-' * 62
-
 _base_nii_off = float(nii_scen[nii_scen['scenario_id']=='base']['nii_total'].sum()) \
                 if not nii_scen.empty else nii_total
 
-print(f'\\n{SEP}')
-print(f'  FINANCE P&L SUMMARY  |  {CCY}  |  {REPORT_DATE.date()}')
-print(f'{SEP}')
-print(f'  BALANCE SHEET')
-print(f'    Total assets             {total_assets/1e9:>9.2f}  B PLN')
-print(f'    Total liabilities        {total_liabs/1e9:>9.2f}  B PLN')
-print(f'    Equity                   {equity_amt/1e9:>9.2f}  B PLN')
-print(f'{SEP2}')
-print(f'  INTEREST INCOME & EXPENSE  (1-year horizon, existing book)')
-print(f'    Interest income (assets) {total_inc/1e6:>+9.1f}  M PLN')
-print(f'    Interest expense (liab.) {-total_exp/1e6:>+9.1f}  M PLN')
-print(f'    Net Interest Income      {nii_total/1e6:>+9.1f}  M PLN')
-print(f'{SEP2}')
-print(f'  MARGIN METRICS')
-print(f'    Net Interest Margin      {nim_pct:>9.2f}  %    (NII / total assets)')
-print(f'    Avg asset yield          {avg_asset_yld:>9.2f}  %')
-print(f'    Avg cost of funds        {avg_cost_funds:>9.2f}  %')
-print(f'    Interest spread          {int_spread:>9.2f}  %')
-print(f'{SEP2}')
+display(html_table(
+    ['Balance Sheet', 'Value'],
+    [
+        ['Total assets',      f'{total_assets/1e9:.2f}  B PLN'],
+        ['Total liabilities', f'{total_liabs/1e9:.2f}  B PLN'],
+        ['Equity',            f'{equity_amt/1e9:.2f}  B PLN'],
+    ],
+    title=f'FINANCE P&L SUMMARY  |  {CCY}  |  {REPORT_DATE.date()}',
+))
+
+display(html_table(
+    ['Interest Income & Expense (1-year horizon, existing book)', 'Value'],
+    [
+        ['Interest income (assets)', pos_neg(total_inc/1e6,  '+9.1f')],
+        ['Interest expense (liab.)', pos_neg(-total_exp/1e6, '+9.1f')],
+    ],
+    total_row=['Net Interest Income', pos_neg(nii_total/1e6, '+9.1f')],
+    note='M PLN',
+))
+
+display(html_table(
+    ['Margin Metrics', 'Value'],
+    [
+        ['Net Interest Margin (NII / total assets)', f'{nim_pct:.2f} %'],
+        ['Avg asset yield',                            f'{avg_asset_yld:.2f} %'],
+        ['Avg cost of funds',                          f'{avg_cost_funds:.2f} %'],
+        ['Interest spread',                            f'{int_spread:.2f} %'],
+    ],
+))
+
 _fa = prod[(prod['bs_side']=='A') & (prod['rate_type']=='F')]['balance_amt'].sum()
 _va = prod[(prod['bs_side']=='A') & (prod['rate_type']=='V')]['balance_amt'].sum()
 _fl = prod[(prod['bs_side']=='L') & (prod['rate_type']=='F')]['balance_amt'].sum()
 _vl = prod[(prod['bs_side']=='L') & (prod['rate_type']=='V')]['balance_amt'].sum()
 _al = prod[(prod['bs_side']=='L') & (prod['rate_type']=='A')]['balance_amt'].sum()
-print(f'  RATE TYPE MIX  (by balance)')
-print(f'    Assets     Fixed {_fa/total_assets*100:>5.0f}%   Variable {_va/total_assets*100:>5.0f}%')
-print(f'    Liabilities Fixed {_fl/total_liabs*100:>5.0f}%  Variable {_vl/total_liabs*100:>5.0f}%  Admin {_al/total_liabs*100:>5.0f}%')
-print(f'{SEP2}')
-print(f'  EBA PARALLEL SHOCK SENSITIVITY')
+display(html_table(
+    ['Rate Type Mix (by balance)', 'Fixed', 'Variable', 'Admin'],
+    [
+        ['Assets',      f'{_fa/total_assets*100:.0f}%', f'{_va/total_assets*100:.0f}%', '—'],
+        ['Liabilities', f'{_fl/total_liabs*100:.0f}%',  f'{_vl/total_liabs*100:.0f}%',  f'{_al/total_liabs*100:.0f}%'],
+    ],
+    aligns=['left', 'right', 'right', 'right'],
+))
+
+_eba_rows = []
 for _s, _lbl in [('par_up','+250 bps'),('par_dn','-250 bps')]:
     _r = nii_scen[nii_scen['scenario_id']==_s]
     if _r.empty: continue
     _v = float(_r['nii_total'].sum()); _d = _v - _base_nii_off
-    print(f'    {_lbl:<12}  ΔNII {_d/1e6:>+8.1f} M PLN  ({_d/_base_nii_off*100:>+.1f}%)')
-print(f'{SEP}')
+    _eba_rows.append([_lbl, pos_neg(_d/1e6, '+8.1f'), pos_neg(_d/_base_nii_off*100, '+.1f')])
+display(html_table(
+    ['EBA Parallel Shock Sensitivity', 'ΔNII (M PLN)', 'ΔNII (%)'],
+    _eba_rows,
+))
 """)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -339,19 +416,20 @@ for _, r in prod.sort_values(['bs_side','nii_interest'], ascending=[True,False])
     })
 tbl = pd.DataFrame(rows)
 
-hdr = '{:<25} {:>2} {:>8} {:>10} {:>11} {:>7} {:>7} {:>11}'.format(
-    'Product', 'S', 'Type', 'Bal(M)', 'NII Int(M)', 'Rate%', 'Bench%', 'Spread bps')
-print('\\n  Benchmark: Assets vs CoF {:.2f}%  |  Liabilities vs Yield {:.2f}%'.format(
-    avg_cost_funds, avg_asset_yld))
-print('  ' + hdr); print('  ' + '-'*95)
-for _, r in tbl.iterrows():
-    spd = r['Spread (bps)']
-    flag = '  **' if (r['Side']=='A' and spd < 0) or (r['Side']=='L' and spd < 0) else ''
-    line = '  {:<25} {:>2} {:>8} {:>10,.0f} {:>+11.1f} {:>7.2f} {:>7.2f} {:>+11.0f}{}'.format(
-        r['Product'], r['Side'], r['Type'],
-        r['Balance (M)'], r['NII Int (M)'],
-        r['Eff. Rate (%)'], r['Benchmark (%)'], spd, flag)
-    print(line)
+_margin_rows = [
+    [r['Product'], r['Side'], r['Type'], f"{r['Balance (M)']:,.0f}",
+     f"{r['NII Int (M)']:+.1f}", f"{r['Eff. Rate (%)']:.2f}", f"{r['Benchmark (%)']:.2f}",
+     pos_neg(r['Spread (bps)'], '+.0f')]
+    for _, r in tbl.iterrows()
+]
+display(html_table(
+    ['Product', 'S', 'Type', 'Bal(M)', 'NII Int(M)', 'Rate%', 'Bench%', 'Spread bps'],
+    _margin_rows,
+    aligns=['left','center','right','right','right','right','right','right'],
+    title='Product Margin vs Benchmark',
+    note=(f'Benchmark: Assets vs CoF {avg_cost_funds:.2f}%  |  Liabilities vs Yield '
+          f'{avg_asset_yld:.2f}%.  Red spread = product priced below its benchmark.'),
+))
 
 # Chart
 fig2, (axA, axL) = plt.subplots(1, 2, figsize=(15, 5))
@@ -432,14 +510,17 @@ axes3[2].set_title(f'Annual Interest Cost ({total_exp/1e6:.0f} M PLN total)')
 axes3[2].set_ylabel('M PLN')
 plt.tight_layout(); plt.show()
 
-print(f'\\n  {"Product":<25} {"Balance (M)":>12} {"Cost (M)":>10} {"Rate%":>8} {"% of liabs":>12}')
-print('  '+'-'*72)
-for _, r in _l.iterrows():
-    print(f'  {r["label"]:<25} {r["bal_abs"]/1e6:>12,.0f} {r["cost_abs"]/1e6:>10.1f} '
-          f'{(r["eff_cost"] or 0)*100:>8.2f} {r["bal_abs"]/total_liabs*100:>11.1f}%')
-print('  '+'-'*72)
-print(f'  {"TOTAL":<25} {total_liabs/1e6:>12,.0f} {total_exp/1e6:>10.1f} '
-      f'{avg_cost_funds:>8.2f} {"100.0%":>12}')
+_fund_rows = [
+    [r['label'], f'{r["bal_abs"]/1e6:,.0f}', f'{r["cost_abs"]/1e6:.1f}',
+     f'{(r["eff_cost"] or 0)*100:.2f}', f'{r["bal_abs"]/total_liabs*100:.1f}%']
+    for _, r in _l.iterrows()
+]
+display(html_table(
+    ['Product', 'Balance (M)', 'Cost (M)', 'Rate%', '% of liabs'],
+    _fund_rows,
+    total_row=['TOTAL', f'{total_liabs/1e6:,.0f}', f'{total_exp/1e6:.1f}',
+               f'{avg_cost_funds:.2f}', '100.0%'],
+))
 """)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -488,15 +569,20 @@ for ax, side, total_b, title in [
 
 plt.tight_layout(); plt.show()
 
-for side, lbl in [('A','ASSETS'),('L','LIABILITIES')]:
+for side, lbl in [('A','Assets'),('L','Liabilities')]:
     _s = prod[prod['bs_side']==side]; tot = _s['balance_amt'].abs().sum()
-    print(f'\\n  {lbl}:')
+    _rt_rows = []
     for rt, rl in [('F','Fixed'),('V','Variable'),('A','Admin')]:
         _r = _s[_s['rate_type']==rt]
         if _r.empty: continue
         b = _r['balance_amt'].abs().sum()
         eff = abs(_r['nii_interest'].sum()) / b * 100 if b else 0
-        print(f'    {rl:<10} {b/1e9:>5.2f} B PLN  ({b/tot*100:>5.1f}%)  avg rate {eff:.2f}%')
+        _rt_rows.append([rl, f'{b/1e9:.2f} B PLN', f'{b/tot*100:.1f}%', f'{eff:.2f}%'])
+    display(html_table(
+        [lbl, 'Balance', '% of total', 'Avg rate'],
+        _rt_rows,
+        aligns=['left','right','right','right'],
+    ))
 """)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -560,13 +646,17 @@ ax5b.text(3.55, max(_agg_vals)*0.82,
           bbox=dict(boxstyle='round,pad=0.4', fc='lightyellow', ec='grey', alpha=0.9))
 plt.tight_layout(); plt.show()
 
-print(f'\\n  {"Product (Side)":<35} {"Interest (M)":>14} {"Renewal (M)":>13} {"Total (M)":>12}')
-print('  '+'-'*78)
-for _, r in _bridge.iterrows():
-    print(f'  {r["label"]+" ("+r["bs_side"]+")":<35} '
-          f'{r["int_m"]:>+14.1f} {r["ren_m"]:>+13.1f} {r["tot_m"]:>+12.1f}')
-print('  '+'-'*78)
-print(f'  {"NET":<35} {_tot_int:>+14.1f} {_tot_ren:>+13.1f} {_tot_int+_tot_ren:>+12.1f}')
+_bridge_rows = [
+    [f'{r["label"]} ({r["bs_side"]})', pos_neg(r['int_m'], '+.1f'),
+     pos_neg(r['ren_m'], '+.1f'), pos_neg(r['tot_m'], '+.1f')]
+    for _, r in _bridge.iterrows()
+]
+display(html_table(
+    ['Product (Side)', 'Interest (M)', 'Renewal (M)', 'Total (M)'],
+    _bridge_rows,
+    total_row=['NET', pos_neg(_tot_int, '+.1f'), pos_neg(_tot_ren, '+.1f'),
+               pos_neg(_tot_int + _tot_ren, '+.1f')],
+))
 """)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -608,22 +698,35 @@ for (pc, side, rt), g in _nii_d.groupby(['product_code','bs_side','rate_type']):
 _pm = pd.DataFrame(_pm_rows).sort_values(['_order','Margin (bps)'], ascending=[True,False]).drop(columns='_order')
 
 # ── Table ──────────────────────────────────────────────────────────────────
-hdr6 = '{:<26} {:>2} {:>8} {:>10} {:>12} {:>12} {:>12} {:>16}'.format(
-    'Product','S','Type','Bal(M)','Client rt%','Market rt%','Margin bps','Contribution M')
-print('\\n' + hdr6)
-print('-'*105)
+def _pm_flag_color(r):
+    weak = (r['Side']=='A' and r['Margin (bps)'] < 0) or (r['Side']=='L' and r['Margin (bps)'] > 0)
+    return '#C62828' if weak else None
+
+_pm_rows = []
 for _, r in _pm.iterrows():
-    flag = '  <<<' if r['Side']=='A' and r['Margin (bps)'] < 0 else (
-           '  <<<' if r['Side']=='L' and r['Margin (bps)'] > 0 else '')
-    print('{:<26} {:>2} {:>8} {:>10,.0f} {:>12.2f} {:>12.2f} {:>+12.0f} {:>+16.1f}{}'.format(
-        r['Product'], r['Side'], r['Type'], r['Balance (M)'],
-        r['Client rt (%)'], r['Market rt (%)'], r['Margin (bps)'], r['Contribution (M)'], flag))
+    color = _pm_flag_color(r)
+    _pm_rows.append([
+        r['Product'], r['Side'], r['Type'], f"{r['Balance (M)']:,.0f}",
+        f"{r['Client rt (%)']:.2f}", f"{r['Market rt (%)']:.2f}",
+        (f"{r['Margin (bps)']:+.0f}", color),
+        (f"{r['Contribution (M)']:+.1f}", color),
+    ])
+display(html_table(
+    ['Product', 'S', 'Type', 'Bal(M)', 'Client rt%', 'Market rt%', 'Margin bps', 'Contribution M'],
+    _pm_rows,
+    aligns=['left','center','right','right','right','right','right','right'],
+    note='Red = asset priced below market or liability priced above market (margin working against the bank).',
+))
 _tot_a = _pm[_pm['Side']=='A']['Contribution (M)'].sum()
 _tot_l = _pm[_pm['Side']=='L']['Contribution (M)'].sum()
-print('-'*105)
-print(f'  Assets total contribution:      {_tot_a:>+8.1f} M PLN / year')
-print(f'  Liabilities total contribution: {_tot_l:>+8.1f} M PLN / year')
-print(f'  Combined margin value:          {_tot_a+_tot_l:>+8.1f} M PLN / year')
+display(html_table(
+    ['Margin Value / Year', 'M PLN'],
+    [
+        ['Assets total contribution',      pos_neg(_tot_a, '+.1f')],
+        ['Liabilities total contribution', pos_neg(_tot_l, '+.1f')],
+    ],
+    total_row=['Combined margin value', pos_neg(_tot_a + _tot_l, '+.1f')],
+))
 
 # ── Chart ─────────────────────────────────────────────────────────────────
 fig6, (ax6a, ax6b) = plt.subplots(1, 2, figsize=(16, 6))
@@ -750,14 +853,19 @@ ax.set_ylabel('NIM (%)'); ax.set_title('Net Interest Margin per Tenor Bucket')
 plt.tight_layout(); plt.show()
 
 # Text summary
-print('\\n  Margin profile  —  weighted avg by tenor bucket')
-print(f'  {"Bucket":<8} {"Asset marg":>12} {"Liab marg":>12} {"NIM":>10} {"Asset bal M":>12} {"Liab bal M":>12}')
-print('  ' + '-'*70)
+_margtime_rows = []
 for bkt in _common_bkts:
     ra = _ba_c.loc[bkt]; rl = _bl_c.loc[bkt]
     nim = ra['client_rt'] - rl['client_rt']
-    print('  {:<8} {:>+11.0f}bps {:>+11.0f}bps {:>9.2f}% {:>12,.0f} {:>12,.0f}'.format(
-        bkt, ra['margin_bps'], rl['margin_bps'], nim, ra['bal_m'], rl['bal_m']))
+    _margtime_rows.append([
+        bkt, pos_neg(ra['margin_bps'], '+.0f'), pos_neg(rl['margin_bps'], '+.0f'),
+        f'{nim:.2f}%', f"{ra['bal_m']:,.0f}", f"{rl['bal_m']:,.0f}",
+    ])
+display(html_table(
+    ['Bucket', 'Asset marg (bps)', 'Liab marg (bps)', 'NIM', 'Asset bal (M)', 'Liab bal (M)'],
+    _margtime_rows,
+    title='Margin profile — weighted avg by tenor bucket',
+))
 """)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -787,7 +895,7 @@ _OPT_PREP_DIR = os.path.normpath(os.path.join(os.getcwd(), '..', 'optimize_prep'
 if _OPT_PREP_DIR not in sys.path:
     sys.path.insert(0, _OPT_PREP_DIR)
 from bs_vector import BalanceSheetParams
-from ftp_store import load_ftp_rates, margin_unit_rate
+from ftp_store import load_ftp_rates, margin_unit_rate, equity_benefit_unit_rate
 
 PARAMS_PATH = os.path.normpath(os.path.join(os.getcwd(), '..', 'optimize_prep', 'output', 'product_params.npz'))
 EP_OPEX_RATE = 0.0065   # flat opex rate on non-equity balance -- matches bs_optimizer.py's OPEX_RATE
@@ -800,52 +908,61 @@ if ep_ftp_rate is None:
     ep_ftp_rate = np.zeros_like(ep_params.nii_unit_rate)
 
 ep_margin_rate = margin_unit_rate(ep_params.nii_unit_rate, ep_ftp_rate, ep_params.bs_side)
+ep_eqbenefit_rate = equity_benefit_unit_rate(ep_ftp_rate, ep_params.rwa_factor, ep_params.cet1_target)
 
 ep_df = pd.DataFrame({
     'product_code': ep_params.product_code,
     'bs_side':      ep_params.bs_side,
     'balance':      ep_params.balance_arr,
     'margin':       ep_params.balance_arr * ep_margin_rate,
+    'eq_benefit':   ep_params.balance_arr * ep_eqbenefit_rate,
     'fee':          ep_params.balance_arr * ep_params.fee_unit_rate,
     'el':           ep_params.balance_arr * ep_params.el_unit,
     'coc':          ep_params.balance_arr * ep_params.rwa_factor * ep_params.cet1_target * ep_params.coc_rate,
     'opex':         np.where(ep_params.is_equity, 0.0, ep_params.balance_arr * EP_OPEX_RATE),
 })
-ep_df['ep'] = ep_df['margin'] + ep_df['fee'] - ep_df['el'] - ep_df['coc'] - ep_df['opex']
+ep_df['ep'] = (ep_df['margin'] + ep_df['eq_benefit'] + ep_df['fee']
+               - ep_df['el'] - ep_df['coc'] - ep_df['opex'])
 
 # ── aggregate cohorts -> one row per product_code ─────────────────────────────
 ep_prod = (ep_df.groupby(['product_code', 'bs_side'], as_index=False)
-                 .agg(balance=('balance','sum'), margin=('margin','sum'), fee=('fee','sum'),
+                 .agg(balance=('balance','sum'), margin=('margin','sum'),
+                      eq_benefit=('eq_benefit','sum'), fee=('fee','sum'),
                       el=('el','sum'), coc=('coc','sum'), opex=('opex','sum'), ep=('ep','sum')))
 ep_prod['label']  = ep_prod['product_code'].map(PROD_LABELS).fillna(ep_prod['product_code'])
 ep_prod['ep_bps'] = np.where(ep_prod['balance'] != 0, ep_prod['ep'] / ep_prod['balance'].abs() * 10000, 0.0)
 ep_prod = ep_prod.sort_values('ep', ascending=False)
 
 _ep_total_bal = ep_prod['balance'].abs().sum()
-_tot_margin, _tot_fee = ep_prod['margin'].sum(), ep_prod['fee'].sum()
+_tot_margin, _tot_eqb = ep_prod['margin'].sum(), ep_prod['eq_benefit'].sum()
+_tot_fee              = ep_prod['fee'].sum()
 _tot_el, _tot_coc     = ep_prod['el'].sum(),     ep_prod['coc'].sum()
 _tot_opex, _tot_ep    = ep_prod['opex'].sum(),   ep_prod['ep'].sum()
 
-print(f'\\n{"="*66}')
-print(f'  ECONOMIC PROFIT (EP)  |  {CCY}  |  {REPORT_DATE.date()}')
-print(f'{"="*66}')
-print(f'  EP = Margin (over FTP) + Fee - EL - CoC - OpEx')
-print(f'  CET1 target {ep_params.cet1_target*100:.1f}%  |  Cost of capital {ep_params.coc_rate*100:.1f}%'
-      f'  |  OpEx rate {EP_OPEX_RATE*100:.2f}% of balance')
-print(f'{"-"*66}')
-print(f'  Margin (over FTP)        {_tot_margin/1e6:>+9.1f}  M PLN')
-print(f'  Fee income               {_tot_fee/1e6:>+9.1f}  M PLN')
-print(f'  Expected loss (EL)       {-_tot_el/1e6:>+9.1f}  M PLN')
-print(f'  Cost of capital (CoC)    {-_tot_coc/1e6:>+9.1f}  M PLN')
-print(f'  Operating cost (OpEx)    {-_tot_opex/1e6:>+9.1f}  M PLN')
-print(f'{"-"*66}')
-print(f'  ECONOMIC PROFIT (EP)     {_tot_ep/1e6:>+9.1f}  M PLN   '
-      f'({_tot_ep/total_assets*10000:>+.0f} bps of total assets)')
-print(f'{"="*66}')
+display(html_table(
+    ['Economic Profit (EP) Components', 'Value'],
+    [
+        ['Margin (over FTP)',     pos_neg(_tot_margin/1e6, '+9.1f')],
+        ['Equity benefit',        pos_neg(_tot_eqb/1e6,    '+9.1f')],
+        ['Fee income',            pos_neg(_tot_fee/1e6,    '+9.1f')],
+        ['Expected loss (EL)',    pos_neg(-_tot_el/1e6,    '+9.1f')],
+        ['Cost of capital (CoC)', pos_neg(-_tot_coc/1e6,   '+9.1f')],
+        ['Operating cost (OpEx)', pos_neg(-_tot_opex/1e6,  '+9.1f')],
+    ],
+    total_row=['ECONOMIC PROFIT (EP)',
+               pos_neg(_tot_ep/1e6, '+9.1f')],
+    title=f'ECONOMIC PROFIT (EP)  |  {CCY}  |  {REPORT_DATE.date()}',
+    note=(f'EP = Margin (over FTP) + Equity benefit + Fee - EL - CoC - OpEx.  '
+          f'CET1 target {ep_params.cet1_target*100:.1f}%  |  '
+          f'Cost of capital {ep_params.coc_rate*100:.1f}%  |  '
+          f'OpEx rate {EP_OPEX_RATE*100:.2f}% of balance.  '
+          f'M PLN, EP = {_tot_ep/total_assets*10000:+.0f} bps of total assets.'),
+))
 
-# ── Waterfall: book-level EP bridge (Margin -> Fee -> -EL -> -CoC -> -OpEx -> EP) ──
+# ── Waterfall: book-level EP bridge (Margin -> EqBenefit -> Fee -> -EL -> -CoC -> -OpEx -> EP) ──
 _ep_components = [
     ('Margin\\n(over FTP)', _tot_margin/1e6, C_INC),
+    ('Equity\\nBenefit',    _tot_eqb/1e6,     C_INC),
     ('Fee\\nincome',        _tot_fee/1e6,     C_INC),
     ('Expected\\nLoss',     -_tot_el/1e6,     C_EXP),
     ('Cost of\\nCapital',   -_tot_coc/1e6,    C_EXP),
@@ -884,19 +1001,30 @@ ax8c.set_ylabel('M PLN'); ax8c.set_title(f'Total book: EP = {_tot_ep/1e6:+.1f}M 
                                           f'({_tot_ep/total_assets*10000:+.0f} bps of total assets)')
 plt.tight_layout(); plt.show()
 
-print(f'\\n  {"Product":<25}{"Side":>5} {"Bal(M)":>9} {"Margin(M)":>10} {"Fee(M)":>7} '
-      f'{"EL(M)":>7} {"CoC(M)":>7} {"OpEx(M)":>8} {"EP(M)":>8} {"EP(bps)":>9}')
-print('  ' + '-'*102)
-for _, r in ep_prod.iterrows():
-    print(f'  {r["label"]:<25}{r["bs_side"]:>5} {r["balance"]/1e6:>9,.0f} {r["margin"]/1e6:>+10.1f} '
-          f'{r["fee"]/1e6:>+7.1f} {-r["el"]/1e6:>+7.1f} {-r["coc"]/1e6:>+7.1f} {-r["opex"]/1e6:>+8.1f} '
-          f'{r["ep"]/1e6:>+8.1f} {r["ep_bps"]:>+9.0f}')
-print('  ' + '-'*102)
-print(f'  {"TOTAL":<25}{"":>5} {_ep_total_bal/1e6:>9,.0f} {_tot_margin/1e6:>+10.1f} {_tot_fee/1e6:>+7.1f} '
-      f'{-_tot_el/1e6:>+7.1f} {-_tot_coc/1e6:>+7.1f} {-_tot_opex/1e6:>+8.1f} {_tot_ep/1e6:>+8.1f} '
-      f'{(_tot_ep/_ep_total_bal*10000):>+9.0f}')
-print('\\n  Note: acquisition cost is excluded -- it only applies when comparing to a')
-print('  rebalanced target mix in the optimizer, not to the book as it stands today.')
+_ep_prod_rows = [
+    [r['label'], r['bs_side'], f"{r['balance']/1e6:,.0f}",
+     pos_neg(r['margin']/1e6, '+.1f'), pos_neg(r['eq_benefit']/1e6, '+.1f'),
+     pos_neg(r['fee']/1e6, '+.1f'),
+     pos_neg(-r['el']/1e6, '+.1f'), pos_neg(-r['coc']/1e6, '+.1f'),
+     pos_neg(-r['opex']/1e6, '+.1f'), pos_neg(r['ep']/1e6, '+.1f'),
+     pos_neg(r['ep_bps'], '+.0f')]
+    for _, r in ep_prod.iterrows()
+]
+display(html_table(
+    ['Product', 'Side', 'Bal(M)', 'Margin(M)', 'EqBen(M)', 'Fee(M)', 'EL(M)', 'CoC(M)', 'OpEx(M)', 'EP(M)', 'EP(bps)'],
+    _ep_prod_rows,
+    aligns=['left','center','right','right','right','right','right','right','right','right','right'],
+    total_row=[
+        'TOTAL', '', f'{_ep_total_bal/1e6:,.0f}',
+        pos_neg(_tot_margin/1e6, '+.1f'), pos_neg(_tot_eqb/1e6, '+.1f'), pos_neg(_tot_fee/1e6, '+.1f'),
+        pos_neg(-_tot_el/1e6, '+.1f'), pos_neg(-_tot_coc/1e6, '+.1f'),
+        pos_neg(-_tot_opex/1e6, '+.1f'), pos_neg(_tot_ep/1e6, '+.1f'),
+        pos_neg(_tot_ep/_ep_total_bal*10000, '+.0f'),
+    ],
+    title='Economic Profit by Product',
+    note=('Acquisition cost is excluded — it only applies when comparing to a rebalanced '
+          'target mix in the optimizer, not to the book as it stands today.'),
+))
 
 # ── Chart: EP by product ──────────────────────────────────────────────────────
 fig8, (ax8a, ax8b) = plt.subplots(1, 2, figsize=(16, 6))

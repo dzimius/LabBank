@@ -1,17 +1,17 @@
-"""Export bank_report.ipynb to PDF (or HTML fallback).
+"""Export ALM_report.ipynb to PDF (or HTML fallback).
 
 Usage
 -----
     python export_report.py
 
 The script:
-  1. Executes bank_report.ipynb in-place (cell outputs refreshed).
+  1. Executes ALM_report.ipynb in-place (cell outputs refreshed).
   2. Converts the executed notebook to PDF via nbconvert --to webpdf
      (uses a headless Chromium; no LaTeX required).
   3. If webpdf fails (e.g. Playwright not installed), falls back to HTML.
 
 Output is written next to the notebook:
-  - bank_report.pdf   (or bank_report.html on fallback)
+  - ALM_report.pdf   (or ALM_report.html on fallback)
 
 Requirements
 ------------
@@ -24,7 +24,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-NOTEBOOK = Path(__file__).with_name("bank_report.ipynb")
+NOTEBOOK = Path(__file__).with_name("ALM_report.ipynb")
 PDF_OUT  = NOTEBOOK.with_suffix(".pdf")
 HTML_OUT = NOTEBOOK.with_suffix(".html")
 

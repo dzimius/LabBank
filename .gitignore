@@ -53,7 +53,7 @@ Diogo Gobira*.pdf
 # committing duplicate rendered output alongside the notebook source.
 # (Hand-authored HTML like docs/*.html and optimize_prep/method_b_explainer.html
 # is unaffected -- only these specific notebook-export paths are ignored.)
-visual_rep/bank_report.html
+visual_rep/ALM_report.html
 visual_rep/finance_report.html
 bs_optimization/notebooks/optimization_report.html
 bs_optimization/notebooks/optimization_report_clean.html

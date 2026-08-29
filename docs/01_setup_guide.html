@@ -69,8 +69,8 @@ source venv/bin/activate
 <pre><code class="language-bash">pip install -r requirements.txt
 streamlit run sandbox/app.py
 </code></pre>
-<p>Streamlit opens a browser tab at <code>http://localhost:8501</code>. You'll see six tabs: Balance Sheet, IRS Book, NMD Stress, Metrics, Gap Analysis, and Market Curves. Everything is computed from files already checked into the repo (<code>optimize_prep/output/*.npz</code>, <code>balance_generate/input_data/bank_data.xlsx</code>, and a few supporting Excel files) — no database, no credentials, no orchestration engine involved.</p>
-<p><strong>What to try first:</strong> open the Balance Sheet tab, change a percentage in the "✏️ New %" column (both Assets and Liabilities+Equity must each sum to 100%), then check the Metrics tab to see how NII, EVE, and the EBA Supervisory Outlier Test respond.</p>
+<p>Streamlit opens a browser tab at <code>http://localhost:8501</code>. You'll see six tabs: Balance Sheet, ALM Metrics, Gap Analysis, Market Curves, NMD Stress, and IRS Book. Everything is computed from files already checked into the repo (<code>optimize_prep/output/*.npz</code>, <code>balance_generate/input_data/bank_data.xlsx</code>, and a few supporting Excel files) — no database, no credentials, no orchestration engine involved.</p>
+<p><strong>What to try first:</strong> open the Balance Sheet tab, change a percentage in the "✏️ New %" column (both Assets and Liabilities+Equity must each sum to 100%), then check the ALM Metrics tab to see how NII, EVE, and the EBA Supervisory Outlier Test respond.</p>
 <h3 id="troubleshooting-path-a">Troubleshooting Path A</h3>
 <table>
 <thead>
@@ -168,7 +168,7 @@ streamlit run sandbox/app.py
 <li>Edit <code>balance_generate/input_data/bank_data.xlsx</code> with your own product balances, rates, and currencies. For swaps, edit <code>ir_derivatives/input/irs_input.xlsx</code>. If you're changing which products exist (not just their weights), also check <code>balance_generate/input_data/interest_rt.xlsx</code> — that's where each product's rate coefficients (<code>a</code>, <code>b</code>) and its <code>client_floor</code>/<code>client_cap</code> live (see the methodology doc's "Rate floors and caps" section); a new product with no row there gets no floor/cap at all.</li>
 <li>Run <code>labbank_data_job</code> in Dagster.</li>
 <li>Open LabBank (<code>streamlit run sandbox/app.py</code>, or if it's already running, just refresh) and click <strong>"🔄 Reload my data"</strong> in the sidebar.</li>
-<li>LabBank now shows your balance sheet — Balance Sheet, Metrics, Gap Analysis, etc. all reflect it.</li>
+<li>LabBank now shows your balance sheet — Balance Sheet, ALM Metrics, Gap Analysis, etc. all reflect it.</li>
 </ol>
 <p>Repeat steps 1–3 as many times as you like; SQL Server stays up the whole time.</p>
 <h3 id="5-running-workflows-directly-without-dagster">5. Running workflows directly (without Dagster)</h3>

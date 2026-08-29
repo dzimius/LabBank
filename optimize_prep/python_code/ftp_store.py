@@ -22,11 +22,26 @@ date, for that ORIGINAL tenor -- same historical-curve machinery
 swap_ladder.py already uses for its seasoned buckets (ns_curve_model.py),
 reused here rather than duplicated.
 
+NMD (current accounts, savings accounts -- product_name in NMD_PRODUCT_NAMES)
+have no contractual repricing tenor to refix to or lock at origination, so
+neither the floating nor the fixed convention above applies. Simple-example
+convention (2026-08-15): market_rt = trailing NMD_LOOKBACK_MONTHS (12) simple
+moving average of the 1Y point on the historical PLN fixing panel -- smooths
+out day-to-day market noise the way a real replicating-portfolio NMD model
+would, without building a full replicating-portfolio ladder here. RECOMPUTED
+every report_date (the whole trailing window shifts), unlike fixed cohorts'
+locked-at-origination rate. liq_spread uses the same liquidity_spread()
+formula as everything else, at the single-row default repricing_tenor_m
+(currently 12M for these products, from extract_params.py) -- not a
+behavioural NMD duration, consistent with how every other single-row product
+is treated.
+
 liquidity_spread(t) : linear 0% at t=0 months -> 0.5% at t=120 months (10Y),
                       capped at 0.5% beyond. Uses the SAME tenor basis as the
                       market-rate component for that cohort (current
                       remaining tenor for floating, locked original tenor
-                      for fixed) -- so it's locked/refixes in step with it.
+                      for fixed, single-row default for NMD) -- so it's
+                      locked/refixes in step with it.
 
 Deliberately NOT threaded through the SQL extraction pipeline
 (extract_params.py) -- computed once from data already in product_params.npz
@@ -37,7 +52,10 @@ Re-running the full balance-generation ETL for one new field isn't
 warranted here.
 
 Used by bs_optimizer.py / joint_optimizer.py's margin_unit_rate() to derive
-margin-over-FTP income (replacing client-rate NII in the EP objective).
+margin-over-FTP income (replacing client-rate NII in the EP objective), and
+by equity_benefit_unit_rate() to derive the offsetting FTP credit for the
+capital-funded share of each cohort's balance (see that function's docstring
+for why the credit is needed).
 NOT used by compute_nii_cf_all / compute_eve_cf_fast_all -- the EVE/NII SOT
 regulatory calculation stays client-rate based, unaffected by this.
 """
@@ -59,10 +77,35 @@ LIQUIDITY_CAP_BPS    = 50.0    # 0.50% at 10Y+
 LIQUIDITY_CAP_MONTHS = 120.0   # 10Y
 REPORT_DATE          = pd.Timestamp("2026-06-30")   # matches extract_params.REPORT_DATE
 
+# NMD (current/savings accounts) -- identified by product_name, not product_code,
+# to match the same naming convention b_s_gen_objects.compute_deposit_client_rt
+# already uses (its 'deposit_names' set), rather than a separate hardcoded
+# product-code allowlist.
+NMD_PRODUCT_NAMES    = ("current_account", "saving_account")
+NMD_LOOKBACK_MONTHS  = 12      # trailing window for the 1Y-rate moving average
+NMD_MARKET_TENOR     = "1Y"    # historical panel column (see ns_curve_model.load_historical_panel)
+
 
 def _liquidity_spread(tenor_m: np.ndarray) -> np.ndarray:
     return (np.clip(tenor_m, 0.0, LIQUIDITY_CAP_MONTHS) / LIQUIDITY_CAP_MONTHS
             * LIQUIDITY_CAP_BPS / 10000.0)
+
+
+def _trailing_market_rate_avg(
+    panel: pd.DataFrame,
+    tenor_col: str = NMD_MARKET_TENOR,
+    report_date: pd.Timestamp = REPORT_DATE,
+    months: int = NMD_LOOKBACK_MONTHS,
+) -> float:
+    """Simple moving average of `tenor_col`'s historical rate (panel values are
+    bps, see load_historical_panel) over the trailing `months` calendar months
+    up to and including `report_date`. Returns decimal (e.g. 0.035 = 3.5%)."""
+    window_start = report_date - pd.DateOffset(months=months)
+    window = panel.loc[(panel.index > window_start) & (panel.index <= report_date), tenor_col]
+    if window.empty:
+        raise ValueError(f"No historical '{tenor_col}' observations in the trailing "
+                          f"{months}M window ending {report_date.date()} -- check fixing_input.xlsx coverage")
+    return float(window.mean()) / 10000.0
 
 
 def _elapsed_months_since_origination(cohort_id: str, report_date: pd.Timestamp = REPORT_DATE) -> int:
@@ -86,18 +129,16 @@ def _historical_zero_rate(ns_ts, tenor_years: float, months_ago: int, tau: float
     return rate_bps / 10000.0
 
 
-def floating_ftp_rate(params, is_float: np.ndarray, curve_tensors) -> np.ndarray:
-    """(n,) FTP market-rate + liquidity-spread component for FLOATING cohorts
-    only, refixed to `curve_tensors`'s base scenario at each cohort's fixing
-    tenor. Zero elsewhere (fixed/equity/other cohorts -- caller combines
-    with those separately). Factored out of compute_ftp_rates() so a
-    hypothetical curve can reuse this exact floating-refix logic (see
-    sandbox/app.py's Finance Metrics tab) without re-running the
-    curve-independent fixed-cohort historical-NS-fit branch below on every
-    Streamlit rerun -- fixed cohorts are locked at origination and
-    genuinely don't move with a hypothetical CURRENT-environment curve."""
+def floating_ftp_components(params, is_float: np.ndarray, curve_tensors) -> tuple[np.ndarray, np.ndarray]:
+    """(market_rt, liq_spread), each (n,), for FLOATING cohorts only, refixed
+    to `curve_tensors`'s base scenario at each cohort's fixing tenor. Zero
+    elsewhere (fixed/equity/other cohorts -- caller combines with those
+    separately). Split out of floating_ftp_rate() so callers that need the
+    market-rate / liquidity-spread breakdown (e.g. SQL persistence) don't
+    have to re-derive it from the summed rate."""
     n = len(params.cohort_id)
-    ftp = np.zeros(n, dtype=float)
+    market_rt = np.zeros(n, dtype=float)
+    liq_spread = np.zeros(n, dtype=float)
     base_idx = curve_tensors.scenario_index("base")
     for ccy in np.unique(params.currency):
         ccy_mask = (params.currency == ccy) & is_float
@@ -106,42 +147,81 @@ def floating_ftp_rate(params, is_float: np.ndarray, curve_tensors) -> np.ndarray
         fwd = curve_tensors.fwd_rates[base_idx, curve_tensors.currency_index(str(ccy))]
         tenor_m = np.clip(params.repricing_tenor_m[ccy_mask], 1.0, 360.0)
         idx = np.clip(np.round(tenor_m).astype(int) - 1, 0, 359)
-        ftp[ccy_mask] = fwd[idx] + _liquidity_spread(tenor_m)
-    return ftp
+        market_rt[ccy_mask] = fwd[idx]
+        liq_spread[ccy_mask] = _liquidity_spread(tenor_m)
+    return market_rt, liq_spread
 
 
-def compute_ftp_rates(params, curve_tensors) -> np.ndarray:
-    """(n,) FTP rate per cohort, decimal (e.g. 0.035 = 3.5%). Zero for equity
-    (equity has no client rate / FTP concept in this model -- its cost is
-    already captured separately via cost of capital)."""
+def floating_ftp_rate(params, is_float: np.ndarray, curve_tensors) -> np.ndarray:
+    """(n,) FTP market-rate + liquidity-spread component for FLOATING cohorts
+    only. Factored out of compute_ftp_rates() so a hypothetical curve can
+    reuse this exact floating-refix logic (see sandbox/app.py's Finance
+    Metrics tab) without re-running the curve-independent fixed-cohort
+    historical-NS-fit branch below on every Streamlit rerun -- fixed cohorts
+    are locked at origination and genuinely don't move with a hypothetical
+    CURRENT-environment curve."""
+    market_rt, liq_spread = floating_ftp_components(params, is_float, curve_tensors)
+    return market_rt + liq_spread
+
+
+def compute_ftp_components(params, curve_tensors) -> tuple[np.ndarray, np.ndarray]:
+    """(market_rt, liq_spread), each (n,), decimal, per cohort. Zero for
+    equity (equity has no client rate / FTP concept in this model -- its
+    cost is already captured separately via cost of capital). Split out of
+    compute_ftp_rates() so callers (e.g. build_ftp_rates.py's SQL write)
+    can persist market_rt/liq_spread as separate columns alongside the
+    summed ftp_rate, rather than only the combined figure."""
     n = len(params.cohort_id)
-    ftp = np.zeros(n, dtype=float)
+    market_rt = np.zeros(n, dtype=float)
+    liq_spread = np.zeros(n, dtype=float)
     is_float = (params.rate_type == "V") & ~params.is_equity
     is_fixed = (params.rate_type == "F") & ~params.is_equity
+    is_nmd = np.isin(params.product_name.astype(str), NMD_PRODUCT_NAMES)
 
-    n_other = int((~params.is_equity & ~is_float & ~is_fixed).sum())
+    n_other = int((~params.is_equity & ~is_float & ~is_fixed & ~is_nmd).sum())
     if n_other > 0:
         print(f"  [ftp_store] {n_other} non-equity cohort(s) have no F/V rate_type "
               f"(e.g. IRS product '0000', or 'single-row' aggregate products) -- "
               f"FTP=0 for these, margin == client rate unchanged")
 
     # ── Floating: refixes to today's (report-date) curve at the fixing tenor ──
-    ftp += floating_ftp_rate(params, is_float, curve_tensors)
+    f_market, f_liq = floating_ftp_components(params, is_float, curve_tensors)
+    market_rt += f_market
+    liq_spread += f_liq
 
-    # ── Fixed: locked at origination, historical curve, original tenor ────────
+    # ── Fixed / NMD both need the historical fixing panel -- load once ────────
     fixed_idx = np.where(is_fixed)[0]
-    if len(fixed_idx) > 0:
+    nmd_idx = np.where(is_nmd)[0]
+    if len(fixed_idx) > 0 or len(nmd_idx) > 0:
         from ns_curve_model import DIEBOLD_LI_TAU, fit_ns_timeseries, load_historical_panel
 
         panel = load_historical_panel()
-        ns_ts = fit_ns_timeseries(panel, DIEBOLD_LI_TAU)
-        for i in fixed_idx:
-            elapsed_m = _elapsed_months_since_origination(str(params.cohort_id[i]))
-            original_tenor_m = max(float(params.repricing_tenor_m[i]) + elapsed_m, 1.0)
-            rate = _historical_zero_rate(ns_ts, original_tenor_m / 12.0, elapsed_m, DIEBOLD_LI_TAU)
-            ftp[i] = rate + float(_liquidity_spread(np.array([original_tenor_m]))[0])
 
-    return ftp
+        # ── Fixed: locked at origination, historical curve, original tenor ──
+        if len(fixed_idx) > 0:
+            ns_ts = fit_ns_timeseries(panel, DIEBOLD_LI_TAU)
+            for i in fixed_idx:
+                elapsed_m = _elapsed_months_since_origination(str(params.cohort_id[i]))
+                original_tenor_m = max(float(params.repricing_tenor_m[i]) + elapsed_m, 1.0)
+                rate = _historical_zero_rate(ns_ts, original_tenor_m / 12.0, elapsed_m, DIEBOLD_LI_TAU)
+                market_rt[i] = rate
+                liq_spread[i] = float(_liquidity_spread(np.array([original_tenor_m]))[0])
+
+        # ── NMD: trailing 12M moving average of the 1Y market rate ──────────
+        if len(nmd_idx) > 0:
+            nmd_market = _trailing_market_rate_avg(panel)
+            market_rt[nmd_idx] = nmd_market
+            liq_spread[nmd_idx] = _liquidity_spread(params.repricing_tenor_m[nmd_idx])
+
+    return market_rt, liq_spread
+
+
+def compute_ftp_rates(params, curve_tensors) -> np.ndarray:
+    """(n,) FTP rate per cohort, decimal (e.g. 0.035 = 3.5%). Zero for equity
+    (equity has no client rate / FTP concept in this model -- its cost is
+    already captured separately via cost of capital)."""
+    market_rt, liq_spread = compute_ftp_components(params, curve_tensors)
+    return market_rt + liq_spread
 
 
 def margin_unit_rate(nii_unit_rate: np.ndarray, ftp_rate: np.ndarray, bs_side: np.ndarray) -> np.ndarray:
@@ -156,9 +236,49 @@ def margin_unit_rate(nii_unit_rate: np.ndarray, ftp_rate: np.ndarray, bs_side: n
     return nii_unit_rate - sign * ftp_rate
 
 
-def save_ftp_rates(ftp_rate: np.ndarray, cohort_id: np.ndarray, path: str = FTP_PATH) -> None:
+def equity_benefit_unit_rate(ftp_rate: np.ndarray, rwa_factor: np.ndarray, cet1_target: float) -> np.ndarray:
+    """Equity Benefit per unit balance -- the FTP credit margin_unit_rate() is
+    missing on its own. margin_unit_rate() charges an asset the FULL ftp_rate
+    on 100% of its balance, as if every zloty were funded by transfer-priced
+    debt; CoC (elsewhere: RWA x CET1_target x coc_rate) separately charges
+    that SAME asset for the capital that actually funds capital_pct of it.
+    Between the two, the capital-funded share pays twice: once via CoC for
+    consuming capital, once via Margin for "owing" FTP-priced debt funding it
+    never needed. Equity Benefit removes the second charge by crediting
+    ftp_rate back on capital_pct of the balance -- economically, capital is
+    free (non-interest-bearing) funding, so the fraction of the balance sheet
+    it funds shouldn't also carry a market-rate funding cost.
+
+    capital_pct = rwa_factor x cet1_target, clipped to [0, 1] (a balance can't
+    be more than 100% capital-funded even if rwa_factor x cet1_target would
+    imply otherwise for a very high-risk-weight cohort). rwa_factor is already
+    0 for liability/equity rows in this codebase, so capital_pct -- and
+    therefore this rate -- is naturally 0 for non-assets too, with no bs_side
+    branching needed here (unlike margin_unit_rate(), which does need one).
+    """
+    capital_pct = np.clip(rwa_factor * cet1_target, 0.0, 1.0)
+    return ftp_rate * capital_pct
+
+
+def save_ftp_rates(
+    ftp_rate: np.ndarray,
+    cohort_id: np.ndarray,
+    market_rt: np.ndarray | None = None,
+    liq_spread: np.ndarray | None = None,
+    path: str = FTP_PATH,
+) -> None:
+    """market_rt/liq_spread are optional (backward-compatible) -- when given,
+    cached alongside ftp_rate so the breakdown survives a reload without
+    recomputation. load_ftp_rates() still returns only the combined
+    ftp_rate array; callers that need the breakdown read the npz directly
+    (see build_ftp_rates.py) or opt_prep.ftp_rates in SQL."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    np.savez(path, ftp_rate=ftp_rate, cohort_id=cohort_id)
+    kwargs = dict(ftp_rate=ftp_rate, cohort_id=cohort_id)
+    if market_rt is not None:
+        kwargs["market_rt"] = market_rt
+    if liq_spread is not None:
+        kwargs["liq_spread"] = liq_spread
+    np.savez(path, **kwargs)
     print(f"FTP rates saved: {path}  ({len(cohort_id)} cohorts, "
           f"mean {float(np.mean(ftp_rate[ftp_rate > 0]))*100:.2f}%)")
 
