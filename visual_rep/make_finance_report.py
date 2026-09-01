@@ -222,20 +222,6 @@ nii_scen = rsql('''
     GROUP BY scenario_id, currency
 ''', rd=RD, ccy=CCY)
 
-# 5. Repricing gap
-try:
-    ir_gap = rsql('''
-        SELECT currency, tenor_bucket, bucket_start_dt, bucket_end_dt,
-               gap_cf, ISNULL(gap_cf_ca, 0) AS gap_cf_ca
-        FROM irrbb.ir_gap_beh WHERE currency = :ccy
-    ''', ccy=CCY)
-except Exception:
-    ir_gap = rsql('''
-        SELECT currency, tenor_bucket, bucket_start_dt, bucket_end_dt,
-               gap_cf, 0.0 AS gap_cf_ca
-        FROM irrbb.ir_gap_beh WHERE currency = :ccy
-    ''', ccy=CCY)
-
 # ── Master product table ──────────────────────────────────────────────────────
 prod = (nii_prod
         .merge(rate_prod, on=['product_code','bs_side'], how='left')
