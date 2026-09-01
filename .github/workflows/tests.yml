@@ -1,0 +1,25 @@
+name: tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  fast-approx-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        # The optimize_prep fast-approximation layer and its tests are pure
+        # NumPy — no SQL Server, no pandas, no QuantLib. Keep this minimal so
+        # the check stays fast and green without the full pipeline stack.
+        run: pip install numpy pytest
+
+      - name: Run fast-approximation test suite
+        run: pytest optimize_prep/tests/ -q

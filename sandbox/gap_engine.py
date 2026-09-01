@@ -50,6 +50,52 @@ def _bucket_idx(months: float) -> int:
     return len(BUCKETS) - 1
 
 
+# lower/upper month bound of every bucket, e.g. "3M" -> (2, 3), "1-2Y" -> (12, 24)
+_BUCKET_EDGES = [(0.0 if i == 0 else float(_BUCKET_UPPER[i - 1]), float(up))
+                 for i, up in enumerate(_BUCKET_UPPER)]
+
+
+def _profile_row(params, i: int, n_b: int) -> np.ndarray | None:
+    """Row i's baked-in ir_gap_beh_a repricing profile (fraction of balance per
+    bucket), or None if the npz predates the field or the product has no row."""
+    gp = getattr(params, "gap_reprice_frac_m", None)
+    if gp is None or i >= len(gp):
+        return None
+    pi = np.asarray(gp[i], dtype=float)
+    return pi if pi.shape == (n_b,) and pi.any() else None
+
+
+def _reprice_spread(balance: float, t_first_m: float, freq_m: float) -> np.ndarray:
+    """Distribute a cohort's balance across repricing buckets.
+
+    A cohort aggregates many contracts that each reprice every ``freq_m`` months.
+    Their individual next-repricing dates are staggered, not simultaneous, so
+    dumping the whole balance into one bucket (the cohort-average months-to-
+    first-repricing) badly over-concentrates the near end of the ladder relative
+    to the production ``irrbb.ir_gap_beh`` view, which places every contract at
+    its own fixing date.
+
+    Model the next-repricing month as uniform over
+    ``[t_first_m - freq_m/2, t_first_m + freq_m/2]`` (mean = the cohort average),
+    with the lower edge clamped at 0 — contracts already past their fixing
+    reprice in the first bucket. The window is renormalised after clamping so
+    the whole balance is always placed. Example: a quarterly-reset cohort in
+    steady state (t_first ≈ 1.5, freq = 3) puts one third of the balance in each
+    of the 1M / 2M / 3M buckets.
+    """
+    rep = np.zeros(len(BUCKETS))
+    F   = max(float(freq_m), 1e-6)
+    t1  = max(0.0, float(t_first_m))
+    lo  = max(0.0, t1 - F / 2.0)
+    hi  = max(t1 + F / 2.0, lo + 1e-6)
+    width = hi - lo
+    for b, (b_lo, b_hi) in enumerate(_BUCKET_EDGES):
+        overlap = min(hi, b_hi) - max(lo, b_lo)
+        if overlap > 0.0:
+            rep[b] += balance * overlap / width
+    return rep
+
+
 def _freq_to_months(freq) -> float:
     if freq is None or (isinstance(freq, float) and np.isnan(freq)):
         return 3.0
@@ -175,11 +221,12 @@ def compute_repricing_gap(
     """
     if report_date is None:
         report_date = REPORT_DATE_DEFAULT
+    try:
+        nmd_models_base = _load_nmd_model(DEP_BEH_PATH)
+    except Exception:
+        nmd_models_base = {}
     if nmd_models is None:
-        try:
-            nmd_models = _load_nmd_model(DEP_BEH_PATH)
-        except Exception:
-            nmd_models = {}
+        nmd_models = nmd_models_base
 
     n_b  = len(BUCKETS)
     bs_a = np.zeros(n_b)
@@ -198,25 +245,53 @@ def compute_repricing_gap(
         pc_int  = int(pc_str) if pc_str.isdigit() else -1
 
         if pc_int in _NMD_CODES:
-            # ── NMD: use behavioral repricing model ──────────────────────────
-            repricing = _nmd_repricing_by_bucket(bal, pc_int, nmd_models)
+            # ── NMD: report profile at baseline + live delta for decay edits ──
+            # The frozen ir_gap_beh_a profile keeps the baseline gap identical to
+            # the ALM report; the behavioural model supplies only the *change*
+            # when the NMD Stress tab edits the decay curve.
+            prof = _profile_row(params, i, n_b)
+            live_now  = _nmd_repricing_by_bucket(bal, pc_int, nmd_models)
+            live_base = _nmd_repricing_by_bucket(bal, pc_int, nmd_models_base)
+            if prof is not None:
+                repricing = bal * prof + (live_now - live_base)
+            else:
+                repricing = live_now
             if side == "A":
                 bs_a += repricing
             elif side == "L":
                 bs_l += repricing
         else:
-            # ── Other products: use t_first_m from npz ───────────────────────
-            t = float(params.cohort_t_first_m[i])
-            if t >= 999:
-                t = float(params.repricing_tenor_m[i])
-            if t >= 999:
-                t = 300   # long-dated unclassified
+            # ── Other products ──────────────────────────────────────────────
+            # Preferred: the exact per-product repricing profile the ALM /
+            # finance reports use (irrbb.ir_gap_beh_a), baked into the npz as a
+            # fraction of product balance per bucket. Scaling it by this row's
+            # (edited) balance reproduces the report gap at baseline and moves
+            # correctly with Balance Sheet edits.
+            prof = _profile_row(params, i, n_b)
 
-            bi = _bucket_idx(t)
+            if prof is not None:
+                spread = bal * prof
+            elif not (bool(params.is_cohort[i]) if hasattr(params, "is_cohort") else True):
+                # Single-row product with no ir_gap_beh_a row → not in the
+                # production repricing gap either. Currently only product 3500
+                # (non-interest-bearing cash), which genuinely does not reprice.
+                spread = np.zeros(n_b)
+            else:
+                # Cohort missing from ir_gap_beh_a (or old npz without the
+                # profile field): spread the balance over a reset-frequency-wide
+                # window centred on the cohort-average first-repricing month.
+                t1 = float(params.cohort_t_first_m[i])
+                F  = float(params.repricing_tenor_m[i])
+                if F >= 999:
+                    F = t1 if t1 < 999 else 300.0
+                if t1 >= 999:
+                    t1 = F / 2.0
+                spread = _reprice_spread(bal, t1, F)
+
             if side == "A":
-                bs_a[bi] += bal
+                bs_a += spread
             elif side == "L":
-                bs_l[bi] += bal
+                bs_l += spread
 
     # ── IRS: per-swap float leg at actual next fixing ─────────────────────────
     irs_a = np.zeros(n_b)
@@ -261,8 +336,15 @@ def compute_repricing_gap(
     })
 
 
-def compute_liq_gap(params, report_date: date | None = None) -> pd.DataFrame:
-    """12-month liquidity gap from cohort_capital_m."""
+def compute_liq_gap(params, report_date: date | None = None,
+                    weights: np.ndarray | None = None) -> pd.DataFrame:
+    """12-month liquidity gap from cohort_capital_m.
+
+    weights : optional (n,) array, fraction of total_assets per npz row — same
+              array as ``compute_repricing_gap``. When given, each row's balance
+              is ``weights[i] * params.total_assets`` so the liquidity gap
+              reflects Balance Sheet tab edits; omit for the shipped baseline.
+    """
     n_m = 12
     asset_cf = np.zeros(n_m)
     liab_cf  = np.zeros(n_m)
@@ -271,7 +353,8 @@ def compute_liq_gap(params, report_date: date | None = None) -> pd.DataFrame:
     for i in range(n):
         if str(params.product_code[i]) == "0000" or str(params.bs_side[i]) == "E":
             continue
-        bal   = float(params.balance_arr[i])
+        bal   = (float(weights[i]) * float(params.total_assets) if weights is not None
+                 else float(params.balance_arr[i]))
         cap_m = params.cohort_capital_m[i]
         for m in range(n_m):
             cf = bal * float(cap_m[m])

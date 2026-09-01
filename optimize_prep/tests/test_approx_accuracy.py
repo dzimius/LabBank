@@ -80,6 +80,15 @@ def _make_params(n: int = 4) -> BalanceSheetParams:
     inflow_30d    = np.array([0.05, 0.02, 0.0, 0.0])
     amort_frac    = np.array([0.08, 0.0, 0.5, 0.9])
 
+    # ── credit risk / RWA / fees / acquisition cost (assets only) ──────────────
+    rwa_factor    = np.array([0.35, 0.0, 0.0, 0.0])
+    pd_rate       = np.array([0.01, 0.0, 0.0, 0.0])
+    lgd_rate      = np.array([0.45, 0.0, 0.0, 0.0])
+    el_unit       = pd_rate * lgd_rate
+    fee_unit      = np.array([0.002, 0.0, 0.0, 0.0])
+    acq_cost      = np.array([0.001, 0.0, 0.0, 0.0])
+    vol_elast     = np.zeros(n)
+
     coeff_a       = np.ones(n)
     coeff_b       = np.zeros(n)
     client_floor  = np.full(n, -np.inf)
@@ -108,6 +117,21 @@ def _make_params(n: int = 4) -> BalanceSheetParams:
         lcr_runoff        = lcr_runoff,
         asf_factor        = asf_factor,
         rsf_factor        = rsf_factor,
+        rwa_factor        = rwa_factor,
+        pd_rate           = pd_rate,
+        lgd_rate          = lgd_rate,
+        el_unit           = el_unit,
+        fee_unit_rate     = fee_unit,
+        acq_cost_rate     = acq_cost,
+        coc_rate          = 0.10,
+        cet1_target       = 0.12,
+        vol_elasticity        = vol_elast,
+        nii_unit_rate_new_biz = nii_unit.copy(),
+        subst_src_pc      = np.array([], dtype=object),
+        subst_src_side    = np.array([], dtype=object),
+        subst_dst_pc      = np.array([], dtype=object),
+        subst_dst_side    = np.array([], dtype=object),
+        subst_rates       = np.array([], dtype=float),
         inflow_30d_frac   = inflow_30d,
         amort_frac_1y     = amort_frac,
         coeff_a           = coeff_a,
@@ -123,6 +147,7 @@ def _make_params(n: int = 4) -> BalanceSheetParams:
         cohort_capital_remain_m = np.zeros((n, 12)),
         cohort_locked_rate   = np.zeros(n),
         cohort_t_first_m     = np.full(n, 999.0),
+        gap_reprice_frac_m   = np.zeros((n, 16)),
         scenario_ids         = scenario_ids,
         total_assets         = 5_000_000_000.0,
         report_date          = "2024-12-31",

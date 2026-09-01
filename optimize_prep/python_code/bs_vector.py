@@ -118,6 +118,14 @@ class BalanceSheetParams:
     cohort_locked_rate:   np.ndarray  # float64, (n,)     locked-period weighted rate
     cohort_t_first_m:     np.ndarray  # float64, (n,)     months to first future fixing
 
+    # ── sandbox repricing-gap profile (from irrbb.ir_gap_beh_a) ───────────────
+    gap_reprice_frac_m:  np.ndarray  # float64, (n, 16)  |gap_cf| per sandbox tenor
+                                      # bucket ÷ product balance — lets the sandbox
+                                      # Gap Analysis tab reproduce the ALM report gap
+                                      # and scale it with balance-sheet edits. All
+                                      # zeros where the product has no ir_gap_beh_a
+                                      # row (falls back to a cohort-average model).
+
     # ── scenario labels ───────────────────────────────────────────────────────
     scenario_ids: np.ndarray      # str, (S,)  e.g. ['par_up', 'par_dn', ...]
 
@@ -287,6 +295,11 @@ class BalanceSheetParams:
                 data["cohort_t_first_m"].astype(float)
                 if "cohort_t_first_m" in data
                 else np.full(n, 999.0)
+            ),
+            gap_reprice_frac_m = (
+                data["gap_reprice_frac_m"].astype(float)
+                if "gap_reprice_frac_m" in data
+                else np.zeros((n, 16))
             ),
         )
 

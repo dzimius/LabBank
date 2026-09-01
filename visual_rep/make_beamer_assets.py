@@ -424,9 +424,15 @@ def make_nii_bridge():
 
 # ── 7. REPRICING GAP ──────────────────────────────────────────────────────────
 def make_repricing_gap():
+    # gap_cf already includes the current-account contribution; gap_cf_irs is the
+    # separate IRS-overlay column written by the ir_derivatives workflow. The
+    # chart title is "Balance Sheet + IRS", so the net is gap_cf + gap_cf_irs.
+    # (Earlier this added gap_cf_ca by mistake — the CA subset that is *already*
+    # inside gap_cf — which double-counted current accounts in the near buckets
+    # and dropped the IRS overlay entirely.)
     try:
         gap = rsql('''
-            SELECT tenor_bucket, gap_cf, ISNULL(gap_cf_ca, 0) AS gap_irs
+            SELECT tenor_bucket, gap_cf, ISNULL(gap_cf_irs, 0) AS gap_irs
             FROM irrbb.ir_gap_beh WHERE currency=:ccy
         ''', ccy=CCY)
     except Exception:

@@ -13,6 +13,21 @@ Payment schedule:
   - Float leg : quarterly coupon at fwd rate (default freq 3M)
 
 Both schedules are projected on the monthly grid of CurveTensors.
+
+Float-leg reset frequency is deliberately NOT a parameter here
+--------------------------------------------------------------
+`float_fixing_freq` is read by gap_engine (a repricing-timing view) but not by
+this module, and the IRS Book editor locks that column. Reason: with the float
+leg projected on forward rates over a monthly grid, reset frequency nets out of
+both metrics — NII over the 12M horizon is `N · mean(fwd[0:12]) · 1yr`
+regardless of how the resets are chunked, and the float-leg PV telescopes to
+`N · (1 − DF(T))` regardless of reset frequency. To make reset frequency
+actually move NII/EVE you need a rate-lock layer: the float leg accrues at the
+last fixing rate (scenario-independent) until the next reset date, then reprices
+to forwards — mirroring the bank's own floating-cohort treatment in
+CohortRates. That is a real model extension (locked stub in `_nii_one` /
+`_eve_one`, `t_next_reset` from `gap_engine._irs_next_float_repricing_m`), left
+out here on purpose to keep this analytic layer consistent with the npz baseline.
 """
 from __future__ import annotations
 

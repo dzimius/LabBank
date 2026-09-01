@@ -68,7 +68,14 @@ def apply_eve_bias(
     bias_eve_unit: np.ndarray,
     scenario_ids:  list[str],
 ) -> dict[str, float]:
-    """Add EVE bias correction to fast result dict (in place, also returned)."""
+    """Add EVE bias correction to fast result dict (in place, also returned).
+
+    No-op if the bias tensor's cohort count does not match ``amounts`` — a stale
+    bias_corrections.npz (different product set) should degrade gracefully, not
+    crash the optimizer / sandbox.
+    """
+    if bias_eve_unit is None or bias_eve_unit.shape[0] != len(amounts):
+        return result
     for s_idx, scen in enumerate(scenario_ids):
         if scen in result:
             result[scen] += float(np.dot(amounts, bias_eve_unit[:, s_idx]))
@@ -85,7 +92,12 @@ def apply_nii_bias(
 
     Shifts each shocked scenario's absolute NII so delta_NII matches exact.
     Base NII is unchanged (bias only applies to shocked deltas).
+
+    No-op if the bias tensor's cohort count does not match ``amounts`` (see
+    ``apply_eve_bias``).
     """
+    if bias_nii_unit is None or bias_nii_unit.shape[0] != len(amounts):
+        return result
     for s_idx, scen in enumerate(scenario_ids):
         if scen in result:
             result[scen] += float(np.dot(amounts, bias_nii_unit[:, s_idx]))

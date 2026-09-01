@@ -728,6 +728,77 @@ def _load_cohort_repricing() -> pd.DataFrame:
     return agg[_COHORT_KEY + ["repricing_tenor_m", "rate_type"]]
 
 
+# ── sandbox repricing-gap profile ────────────────────────────────────────────
+# The LabBank sandbox (sandbox/gap_engine.py) draws its Gap Analysis tab from a
+# 16-bucket ladder. Rather than re-approximating the repricing gap from cohort
+# averages, bake the exact per-product profile the ALM / finance reports use
+# (irrbb.ir_gap_beh_a) into the npz so the sandbox reproduces the report at
+# baseline and scales it correctly when the balance sheet is edited.
+#
+# Bucket upper bounds MUST match sandbox/gap_engine.py::_BUCKET_UPPER.
+_SANDBOX_GAP_UPPER_M = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 24, 36, 60, 10_000]
+
+
+def _sandbox_gap_bucket(months: float) -> int:
+    for i, up in enumerate(_SANDBOX_GAP_UPPER_M):
+        if months <= up:
+            return i
+    return len(_SANDBOX_GAP_UPPER_M) - 1
+
+
+def _tenor_bucket_months(label: str) -> float:
+    """'1D'->~0, '7M'->7, '18M'->18, '>30Y'/'>360M'->big."""
+    s = str(label).strip().upper()
+    if s == "1D":
+        return 0.03
+    if s.startswith(">"):
+        return 400.0
+    if s.endswith("M"):
+        try:
+            return float(s[:-1])
+        except ValueError:
+            return 400.0
+    if s.endswith("Y"):
+        try:
+            return float(s[:-1]) * 12.0
+        except ValueError:
+            return 400.0
+    return 400.0
+
+
+def _load_gap_reprice_profile() -> dict:
+    """Per-product |gap_cf| across the 16 sandbox tenor buckets.
+
+    Returns {(product_code, bs_side, currency): ndarray(16)} of unnormalised
+    |gap_cf| (PLN) summed into the sandbox buckets. IRS rows (product_code
+    '0000') are excluded — the sandbox rebuilds the swap overlay live from the
+    editable IRS book. NMD product codes are kept but the sandbox ignores them
+    (it drives NMDs from the editable decay curve instead).
+    """
+    q = text("""
+        SELECT CAST(product_code AS VARCHAR(4)) AS product_code,
+               bs_side, currency, tenor_bucket,
+               CAST(gap_cf AS FLOAT) AS gap_cf
+        FROM irrbb.ir_gap_beh_a
+        WHERE CAST(product_code AS VARCHAR(4)) <> '0000'
+    """)
+    df = _try_query(q)
+    if df.empty:
+        print("  [warn] irrbb.ir_gap_beh_a empty/absent — sandbox gap falls "
+              "back to the cohort-average model")
+        return {}
+
+    out: dict = {}
+    for (pc, sid, ccy), grp in df.groupby(["product_code", "bs_side", "currency"]):
+        vec = np.zeros(16, dtype=float)
+        for _, r in grp.iterrows():
+            bi = _sandbox_gap_bucket(_tenor_bucket_months(r["tenor_bucket"]))
+            vec[bi] += abs(float(r["gap_cf"] or 0.0))
+        out[(str(pc), str(sid), str(ccy))] = vec
+    print(f"  loaded ir_gap_beh_a repricing profile for {len(out)} products")
+    return out
+
+
 def _load_cohort_coupon_rates() -> pd.DataFrame:
     """Balance-weighted average client_rt per cohort from sched tables.
 
@@ -2754,6 +2825,28 @@ def build_product_params() -> None:
     cohort_locked_rate = params_df["cohort_locked_rate"].fillna(0.0).to_numpy(dtype=float)
     cohort_t_first_m   = params_df["cohort_t_first_m"].fillna(999.0).to_numpy(dtype=float)
 
+    # ── sandbox repricing-gap profile  (n, 16) ───────────────────────────────
+    # Attach each product's ir_gap_beh_a profile to every one of its rows,
+    # normalised by the product's total npz balance so that
+    #   Σ_rows  balance_row × gap_reprice_frac_m[row]  ==  |ir_gap_beh_a| profile
+    # at baseline, and scales linearly with balance-sheet edits.
+    _gap_prof_raw = _load_gap_reprice_profile()
+    _pc_a   = params_df["product_code"].astype(str).to_numpy()
+    _side_a = params_df["bs_side"].astype(str).to_numpy()
+    _ccy_a  = params_df["currency"].astype(str).to_numpy()
+    _prod_bal: dict = {}
+    for _k, _b in zip(zip(_pc_a, _side_a, _ccy_a), balance_arr):
+        _prod_bal[_k] = _prod_bal.get(_k, 0.0) + float(_b)
+    gap_reprice_frac_m = np.zeros((n, 16), dtype=float)
+    for _i in range(n):
+        _k = (_pc_a[_i], _side_a[_i], _ccy_a[_i])
+        _v = _gap_prof_raw.get(_k)
+        _tot = _prod_bal.get(_k, 0.0)
+        if _v is not None and _tot > 0.0:
+            gap_reprice_frac_m[_i] = _v / _tot
+    print(f"  gap_reprice_frac_m: {int(gap_reprice_frac_m.any(axis=1).sum())}/{n} "
+          f"rows carry a report-based repricing profile")
+
     # ─────────────────────────────────────────────────────────────────────────
     # CohortRates tables — rate_matrix, EVE duration units, quarterly CFs
     # ─────────────────────────────────────────────────────────────────────────
@@ -3180,7 +3273,14 @@ def build_product_params() -> None:
         cet1_target       = np.array([cet1_target]),
         # Price-volume elasticity: rate change per 1pp of product weight (all sides)
         vol_elasticity         = params_df["vol_elasticity"].fillna(0.0).to_numpy(dtype=float),
-        # New-business NII rate: equals book rate for now (FTP data needed for market-rate adjustment)
+        # New-business NII rate — legacy scalar fallback, set to the book rate.
+        # The curve-based new-business/renewal model lives in
+        # CohortRates.renewal_rate_matrix (built above from forward rates +
+        # coeff_a/coeff_b + floor/cap) and is what compute_nii_cf_all actually
+        # uses. This scalar is only read by bs_optimizer.py as a coarse proxy;
+        # FTP-adjusted pricing there comes from ftp_store.margin_unit_rate(),
+        # not from threading FTP through this SQL extraction (ftp_store.py
+        # docstring explains why it stays a post-hoc cache).
         nii_unit_rate_new_biz  = nii_unit_rate,
         # Substitution/cannibalism pairs (k pairs)
         subst_src_pc           = subst_df["source_code"].to_numpy(dtype=object) if len(subst_df) else np.array([], dtype=object),
@@ -3213,6 +3313,7 @@ def build_product_params() -> None:
         cohort_capital_remain_m = cohort_capital_remain_m,
         cohort_locked_rate   = cohort_locked_rate,
         cohort_t_first_m     = cohort_t_first_m,
+        gap_reprice_frac_m   = gap_reprice_frac_m,
         # CohortRates (cr_*) — CF-based NII/EVE tables
         cr_rate_matrix          = _rate_matrix,
         cr_renewal_rate_matrix  = _renewal_rate_matrix,

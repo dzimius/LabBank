@@ -44,6 +44,24 @@ htmlcov/
 # Excel lock files (created while a workbook is open)
 ~$*.xlsx
 
+# Local backup copy of the private bs_optimization submodule — NEVER commit
+# (contains the private LabBank-Optimization source; a stray `git add .` would
+#  publish it). Keep working backups outside the repo, or under this name.
+bs_optimization.bak/
+
+# Root-level scratch dirs (module-level output dirs like optimize_prep/output/
+# are tracked and unaffected by these anchored patterns)
+/output/
+/tmp/
+
+# draw.io autosave / backup / lock files
+*.bkp
+.$*.drawio
+
+# visual_rep scratch dumps (notebook cell captures during report auditing)
+visual_rep/cell_*.txt
+visual_rep/scan*.txt
+
 # Copyrighted reference material - never commit, cite only
 Diogo Gobira*.pdf
 

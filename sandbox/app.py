@@ -526,7 +526,9 @@ with tab_irs:  # tab-bar position 6
         "(WIBOR). This is the correct hedge for floating-rate loan books: "
         "the bank pays WIBOR to the IRS counterparty, offsetting WIBOR received from borrowers, "
         "leaving a fixed spread.\n\n"
-        "Edit notional or fixed rate. Add rows with **+**; delete via row checkbox.",
+        "Edit notional, fixed rate, dates or *Pay Fixed?*. Add rows with **+**; delete via row checkbox.\n\n"
+        "*Reset frequency* (`Fixing Freq`) is a fixed attribute of each swap, shown for reference only — "
+        "see the help tooltip on that column.",
         icon="ℹ️",
     )
 
@@ -547,7 +549,20 @@ with tab_irs:  # tab-bar position 6
             "fixed_rate":       st.column_config.NumberColumn(
                                     "Fixed Rate", min_value=0.0, max_value=1.0,
                                     step=0.0025, format="%.4f", width="small"),
-            "float_rate_index": st.column_config.TextColumn("Float Index", width="small"),
+            "float_rate_index": st.column_config.TextColumn("Float Index", width="small",
+                                    disabled=True),
+            "float_pay_freq":   st.column_config.TextColumn("Float Pay Freq", width="small",
+                                    disabled=True),
+            "float_fixing_freq": st.column_config.TextColumn("Fixing Freq", width="small",
+                                    disabled=True,
+                                    help="Float-leg reset frequency — a fixed attribute of each "
+                                         "swap in the book, not a sandbox lever. The Gap Analysis "
+                                         "tab reflects it (it is a repricing-timing view); the "
+                                         "ALM-metric engine projects the float leg on forward "
+                                         "rates over a monthly grid, where reset frequency nets "
+                                         "out of both NII (same 12M average forward however the "
+                                         "resets are chunked) and EVE (float leg telescopes to "
+                                         "N·(1−DF) regardless of reset frequency)."),
             "float_spread":     st.column_config.NumberColumn("Float Spread",
                                     format="%.4f", width="small"),
             "disc_curve":       st.column_config.TextColumn("Disc Curve", width="small"),
@@ -1148,9 +1163,10 @@ with tab_gap:  # tab-bar position 3
     # ── Liquidity Gap ─────────────────────────────────────────────────────────
     st.subheader("Liquidity Gap — 12-Month Capital Flows")
     st.caption("Principal inflows from assets (blue) and outflows from liabilities (red) "
-               "per month.  Net LIQ gap = inflows − outflows (dashed line).")
+               "per month.  Net LIQ gap = inflows − outflows (dashed line).  "
+               "Scales with Balance Sheet tab edits.")
 
-    liq      = compute_liq_gap(params)
+    liq      = compute_liq_gap(params, weights=_bs_weights_gap)
     months_l = liq["month"].tolist()
     a_in     = (liq["asset_inflows"] / 1e6).tolist()
     l_out    = (liq["liab_outflows"] / 1e6).tolist()
