@@ -120,45 +120,72 @@ def compute_nii_hyp(
     curves:      CurveTensors,
     fwd_hyp_pln: np.ndarray,
 ) -> tuple[float, dict[str, float]]:
-    """Return (nii_hyp_base, delta_nii_dict) using full CF computation.
+    """Return (nii_hyp_base, delta_nii_dict).
 
-    Rebuilds rate_matrix from the hypothetical CurveTensors, computes NII via
-    einsum over outstanding/interest profiles, and applies the same calibration
-    corrections as the main pipeline (fixed-rate override, synthetic-row fallback,
-    base-level bias correction).
+    Base NII
+    --------
+    Rebuild the client-rate matrix from the hypothetical forward curve (floors /
+    caps applied at the *hypothetical* rate level), run the CF einsum, then anchor
+    to the exact-pipeline base with a **curve-independent** offset:
+
+        bias[i] = exact_nii_base[i] - CF_fast_nii_base_on_MARKET_curve[i]
+
+    so the hypothetical curve's genuine effect on base NII flows through instead
+    of being cancelled by re-anchoring against the hypothetical CF base.
+
+    delta_NII (per EBA shock)
+    -------------------------
+    The base supervisory curve is the calibration point, so start from the exact
+    ``params.delta_nii_unit`` and add only the second-order correction the CF
+    model sees from moving the base curve — i.e. the difference in how the
+    0%-floor / cap bites at the hypothetical level vs the market level:
+
+        d[i,s] = market_delta[i,s]
+               + ( (nii_hyp[i,s]-nii_hyp[i,base]) - (nii_mkt[i,s]-nii_mkt[i,base]) )
+
+    Both CF terms come from the *same* code path, so any model quirk cancels in
+    the delta-of-deltas.  When hyp == market this reproduces ``delta_nii_unit``
+    exactly.
     """
-    import os as _os, sys as _sys
-    _optprep = _os.path.join(_os.path.dirname(__file__), "..", "optimize_prep", "python_code")
-    if _optprep not in _sys.path:
-        _sys.path.insert(0, _optprep)
-    from nii_eve_cf_fast import (
-        _apply_fixed_rate_calibration,
-        _apply_calibrated_delta_fallback,
-        _apply_base_nii_bias,
-    )
+    pln_idx      = int(np.where(curves.currencies == "PLN")[0][0])
+    fwd_mkt_pln  = curves.fwd_rates[0, pln_idx, :curves.n_months]
 
-    hyp_curves          = build_hyp_curve_tensors(curves, fwd_hyp_pln)
-    hyp_rm, hyp_rnm     = build_hyp_rate_matrix(params, cr, hyp_curves)
+    # Both re-priced through the identical code path so the delta-of-deltas below
+    # isolates purely the effect of swapping the base curve.
+    market_curves = build_hyp_curve_tensors(curves, fwd_mkt_pln)
+    hyp_curves    = build_hyp_curve_tensors(curves, fwd_hyp_pln)
+
+    hyp_rm,  hyp_rnm   = build_hyp_rate_matrix(params, cr, hyp_curves)
+    mkt_rm,  mkt_rnm   = build_hyp_rate_matrix(params, cr, market_curves)
 
     amount_x_out  = (balance * params.sign)[:, None] * params.cohort_interest_yf_m   # (n, 12)
-    nii_c         = np.einsum("im,ims->is", amount_x_out, hyp_rm)                    # (n, n_scen)
-
     cap_x_remain  = (balance * params.sign)[:, None] * params.cohort_capital_remain_m  # (n, 12)
-    nii_r         = np.einsum("im,ims->is", cap_x_remain, hyp_rnm)                    # (n, n_scen)
 
-    nii_total = nii_c + nii_r
-    _apply_fixed_rate_calibration(nii_total, balance, params, cr)
-    _apply_calibrated_delta_fallback(nii_total, balance, params, cr)
-    _apply_base_nii_bias(nii_total, balance, params, cr)
+    nii_hyp = (np.einsum("im,ims->is", amount_x_out, hyp_rm)
+               + np.einsum("im,ims->is", cap_x_remain, hyp_rnm))                     # (n, n_scen)
+    nii_mkt = (np.einsum("im,ims->is", amount_x_out, mkt_rm)
+               + np.einsum("im,ims->is", cap_x_remain, mkt_rnm))
 
     base_idx = cr.scenario_index("base")
-    nii_base = float(nii_total[:, base_idx].sum())
 
+    # ── base level: hyp CF base + curve-independent calibration offset ────────
+    bias      = (balance * params.nii_unit_rate) - nii_mkt[:, base_idx]
+    nii_base  = float((nii_hyp[:, base_idx] + bias).sum())
+
+    # ── shocked deltas: exact market delta + floor/cap re-binding correction ──
+    p_scen = list(params.scenario_ids)
     delta_nii: dict[str, float] = {}
     for rs, scen in enumerate(cr.rate_scenario_ids):
         scen = str(scen)
-        if scen != "base":
-            delta_nii[scen] = float(nii_total[:, rs].sum()) - nii_base
+        if scen == "base":
+            continue
+        try:
+            market_delta = float(np.dot(balance, params.delta_nii_unit[:, p_scen.index(scen)]))
+        except ValueError:
+            market_delta = float(nii_mkt[:, rs].sum() - nii_mkt[:, base_idx].sum())
+        cf_adj = float((nii_hyp[:, rs] - nii_hyp[:, base_idx]).sum()
+                       - (nii_mkt[:, rs] - nii_mkt[:, base_idx]).sum())
+        delta_nii[scen] = market_delta + cf_adj
 
     return nii_base, delta_nii
 
@@ -193,8 +220,13 @@ def compute_eve_hyp(
 
     delta_EVE (shocked)
     -------------------
-    Reuse calibrated delta_eve_unit — shock sensitivity is approximately
-    level-independent to first order.
+    Reuse the calibrated ``delta_eve_unit`` from the exact pipeline.  EVE shock
+    sensitivity does shift with the base level (convexity, and the 0%-floor on
+    down-shocks), but re-deriving it needs full CF re-discounting under every
+    (hyp-curve × shock) pair; that is a documented first-order approximation
+    here — the shock shape itself is unchanged by ``build_hyp_curve_tensors``,
+    so to first order the sensitivity carries over.  The NII deltas *do* pick up
+    the floor re-binding (see ``compute_nii_hyp``).
     """
     n_m      = curves.n_months
     pln_idx  = int(np.where(curves.currencies == "PLN")[0][0])

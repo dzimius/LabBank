@@ -20,3 +20,24 @@ def optimize_prep_tensors(context) -> MaterializeResult:
     return MaterializeResult(
         metadata={"script": MetadataValue.path(str(script))}
     )
+
+
+@asset(
+    deps=["optimize_prep_tensors"],
+    group_name="optimize",
+    compute_kind="python",
+    description=(
+        "Pre-compute exact per-product IRRBB (NII + EVE, base + 7 EBA shocks) for "
+        "the 15 stylised hypothetical yield curves the LabBank sandbox offers. "
+        "Re-prices the existing run-off / 12M CF streams under each curve with the "
+        "production pipeline functions — no CF regeneration. Writes "
+        "sandbox/scenario_curves.npz (read by the sandbox with a cohort-set "
+        "staleness guard; falls back to the analytical model if stale)."
+    ),
+)
+def hyp_scenario_curves(context) -> MaterializeResult:
+    script = PROJECT_ROOT / "sandbox" / "build_scenario_curves.py"
+    run_workflow(context, script)
+    return MaterializeResult(
+        metadata={"script": MetadataValue.path(str(script))}
+    )

@@ -669,57 +669,60 @@ with tab_metrics:  # tab-bar position 2
         _bal_c  = _w_c * ta_val
         _mkt_mc = run_metrics(_w_c, params, curves, ta_val)
 
+        # Prefer the exact pre-computed per-cohort IRRBB for this curve
+        # (scenario_curves.npz, built by build_scenario_curves.py running the
+        # production re-pricing functions).  Falls back to the analytical
+        # hyp_engine model when the npz is missing / stale (cohort-set drift).
         _sc_ld  = load_scenario_curves()
-        # scenario_curves.npz is a per-cohort cache (see build_scenario_curves.py)
-        # that goes stale whenever product_params.npz is regenerated with a
-        # different cohort set (e.g. a new product added) -- fall back to the
-        # linear approximation below instead of a shape-mismatch crash.
-        _has_pc = (
-            "hyp_nii_unit_rate" in _sc_ld
-            and "cohort_id" in _sc_ld
-            and len(_sc_ld["cohort_id"]) == len(params.cohort_id)
-            and np.array_equal(_sc_ld["cohort_id"], params.cohort_id)
-        )
         _hyp_shape = st.session_state.get("hyp_shape_sel", "current")
         _hyp_level = st.session_state.get("hyp_level_sel", "")
         _hyp_key   = f"{_hyp_shape}_{_hyp_level}"
-        try:
-            _pc_idx = _sc_ld["scenario_ids"].index(_hyp_key) if _has_pc else None
-        except ValueError:
-            _pc_idx = None
+        _has_pc = (
+            "hyp_eve_pv_factor" in _sc_ld
+            and "cohort_id" in _sc_ld
+            and len(_sc_ld["cohort_id"]) == len(params.cohort_id)
+            and np.array_equal(_sc_ld["cohort_id"], params.cohort_id)
+            and _hyp_key in list(_sc_ld.get("scenario_ids", []))
+        )
 
-        if _has_pc and _pc_idx is not None:
-            # ── pre-computed path: floor-correct NII delta, CF-correct EVE ──
-            _hyp_nii = float(np.dot(_bal_c, np.nan_to_num(_sc_ld["hyp_nii_unit_rate"][_pc_idx])))
-            _hyp_eve = float(np.dot(_bal_c, np.nan_to_num(_sc_ld["hyp_eve_pv_factor"][_pc_idx])))
+        if _has_pc:
+            _pc  = list(_sc_ld["scenario_ids"]).index(_hyp_key)
+            _shk = list(_sc_ld["hyp_shock_ids"])
+            _hyp_nii = float(np.dot(_bal_c, np.nan_to_num(_sc_ld["hyp_nii_unit_rate"][_pc])))
+            _hyp_eve = float(np.dot(_bal_c, np.nan_to_num(_sc_ld["hyp_eve_pv_factor"][_pc])))
             mod_adj["nii_base"] += _hyp_nii - _mkt_mc.nii_base
             mod_adj["eve_base"] += _hyp_eve - _mkt_mc.eve_base
-
-            _shock_ids = list(_sc_ld["hyp_shock_ids"])
             for _s in list(mod_adj["delta_nii"]):
-                if _s in _shock_ids:
-                    _k    = _shock_ids.index(_s)
-                    _irs  = mod_adj["delta_nii"][_s] - _mkt_mc.delta_nii.get(_s, 0.0)
-                    mod_adj["delta_nii"][_s] = (
-                        float(np.dot(_bal_c, np.nan_to_num(_sc_ld["hyp_delta_nii_unit"][_pc_idx, :, _k])))
-                        + _irs
-                    )
+                if _s in _shk:
+                    _k = _shk.index(_s)
+                    _hd = float(np.dot(_bal_c, np.nan_to_num(_sc_ld["hyp_delta_nii_unit"][_pc, :, _k])))
+                    mod_adj["delta_nii"][_s] += _hd - _mkt_mc.delta_nii.get(_s, 0.0)
             for _s in list(mod_adj["delta_eve"]):
-                if _s in _shock_ids:
-                    _k    = _shock_ids.index(_s)
-                    _irs  = mod_adj["delta_eve"][_s] - _mkt_mc.delta_eve.get(_s, 0.0)
-                    mod_adj["delta_eve"][_s] = (
-                        float(np.dot(_bal_c, np.nan_to_num(_sc_ld["hyp_delta_eve_unit"][_pc_idx, :, _k])))
-                        + _irs
-                    )
+                if _s in _shk:
+                    _k = _shk.index(_s)
+                    _hd = float(np.dot(_bal_c, np.nan_to_num(_sc_ld["hyp_delta_eve_unit"][_pc, :, _k])))
+                    mod_adj["delta_eve"][_s] += _hd - _mkt_mc.delta_eve.get(_s, 0.0)
+            st.caption(
+                f"↳ Hypothetical curve **{_hyp_lbl}** — exact per-product NII & EVE "
+                f"(base + 7 EBA shocks) re-priced under this curve with the production "
+                f"pipeline; scaled to the edited balance sheet."
+            )
         else:
-            # ── fallback: linear approximation (run build_scenario_curves.py) ─
             _hyp_mc = compute_hyp_metrics(_bal_c, params, cohort_rates, curves, _hyp_fwd)
             mod_adj["nii_base"] += _hyp_mc["nii_base"] - _mkt_mc.nii_base
             mod_adj["eve_base"] += _hyp_mc["eve_base"] - _mkt_mc.eve_base
-            if not _has_pc:
-                st.caption("ℹ️ Run `python sandbox/build_scenario_curves.py` for "
-                           "floor-correct delta_NII and CF-correct delta_EVE.")
+            for _s in list(mod_adj["delta_nii"]):
+                if _s in _hyp_mc["delta_nii"]:
+                    mod_adj["delta_nii"][_s] += _hyp_mc["delta_nii"][_s] - _mkt_mc.delta_nii.get(_s, 0.0)
+            for _s in list(mod_adj["delta_eve"]):
+                if _s in _hyp_mc["delta_eve"]:
+                    mod_adj["delta_eve"][_s] += _hyp_mc["delta_eve"][_s] - _mkt_mc.delta_eve.get(_s, 0.0)
+            st.caption(
+                f"↳ Hypothetical curve **{_hyp_lbl}** *(approximate — run "
+                f"`python sandbox/build_scenario_curves.py` for the exact re-pricing)*: "
+                f"base NII re-priced off the curve; base EVE via duration extrapolation; "
+                f"ΔNII with floor/cap re-binding; ΔEVE = base-curve sensitivity."
+            )
 
     # ── NMD overlay: add analytical delta from NMD stress tab ────────────────
     _nmd_nii      = st.session_state.get("nmd_delta_nii",      0.0)

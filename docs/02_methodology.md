@@ -319,7 +319,9 @@ Three repricing-gap panels — assets vs. liabilities repricing per bucket with 
 
 ### 📉 Market Curves
 
-The base forward/zero curve per currency, the full set of EBA shock scenario curves overlaid, and a "hypothetical scenarios" panel where you can pick a stylised curve shape (normal, steep, humped, flat, inverted) and rate level (low/medium/high) to see NII/EVE under a rate environment that isn't one of the 7 EBA scenarios.
+The base forward/zero curve per currency, the full set of EBA shock scenario curves overlaid, and a "hypothetical scenarios" panel where you pick a stylised curve shape (normal, steep, humped, flat, inverted) and rate level (current, −300 bp, +150 bp) to see the ALM Metrics tab recompute for a rate environment that isn't one of the 7 EBA scenarios.
+
+For each of the 15 stylised curves, `sandbox/build_scenario_curves.py` pre-computes the **exact** per-product NII and EVE — base plus all 7 EBA shocks *on top of that hypothetical base* — by re-pricing the existing run-off / 12-month cash-flow streams with the same functions the production `irrbb_calc` pipeline uses (no cash-flow regeneration). The results land in `sandbox/scenario_curves.npz`; the app reads them and scales to the edited balance sheet, so a low-rate hypothetical curve correctly shows, for example, the 0% post-shock floor collapsing the down-shock ΔNII. If that npz is missing or stale (product-cohort set changed), the app falls back to a lighter analytical approximation and says so in a caption.
 
 ### 🏦 NMD Stress
 

@@ -1,22 +1,31 @@
 """build_scenario_curves.py
 =========================
-Generate stylized yield curve scenarios for the sandbox visualisation.
+Pre-compute the sandbox's 15 stylised hypothetical yield curves and the exact
+per-product IRRBB metrics for each.
 
 Produces sandbox/scenario_curves.npz with:
-  - 15 forward-rate curves (5 shapes × 3 levels) + discount-factor arrays.
+  - 15 forward-rate curves (5 shapes × 3 levels) + discount-factor arrays
   - Per-product IRRBB unit metrics for each curve:
-      hyp_nii_unit_rate  (15, n)      NII per PLN at hypothetical base
-      hyp_delta_nii_unit (15, n, S)   floor-adjusted delta NII per shock
-      hyp_eve_pv_factor  (15, n)      EVE PV factor at hypothetical base
-      hyp_delta_eve_unit (15, n, S)   CF-based delta EVE per shock
+      hyp_nii_unit_rate  (15, n)      NII / balance at the hypothetical base
+      hyp_delta_nii_unit (15, n, S)   ΔNII / balance per EBA shock
+      hyp_eve_pv_factor  (15, n)      EVE / balance at the hypothetical base
+      hyp_delta_eve_unit (15, n, S)   ΔEVE / balance per EBA shock
       hyp_shock_ids      (S,)         EBA shock scenario IDs
+      cohort_id          (n,)         staleness guard for the sandbox
 
-delta_NII is computed with 0%-floor clipping at the hypothetical rate level so
-asymmetric floor effects (e.g. term deposits in low-rate environments) are
-captured correctly.  delta_EVE uses full CF re-discounting under the
-hypothetical CurveTensors.
+Metrics — two paths, exact preferred:
+  1. build_hyp_irrbb_metrics_exact  (default; needs SQL).  For each curve, feeds
+     the existing run-off / 12M CF streams to the *production* re-pricing
+     functions (eve_calc_objects / nii_calc_objects) with build_all_shocked_curves
+     producing that curve's base + 7 EBA shocked discount curves.  No CF
+     regeneration.  Captures NMD behavioural EVE, the real EBA 0%-floor logic,
+     and convexity.  Product-level results are broadcast to cohorts by
+     prod_metric / prod_balance (same mapping extract_params uses at base).
+  2. build_hyp_irrbb_metrics       (fallback; pure NumPy).  Reduced CF model,
+     matches sandbox/hyp_engine.compute_hyp_metrics.  Used only if SQL is
+     unavailable at precompute time.
 
-Run from the bank_project root:
+Run from the bank_project root (or via the Dagster asset hyp_scenario_curves):
     python sandbox/build_scenario_curves.py
 """
 from __future__ import annotations
@@ -260,6 +269,12 @@ def build_hyp_irrbb_metrics(params, cr, curves, sc_data: dict) -> dict:
 
         # EVE PV factor per unit balance (anchored to CF computation at hyp base)
         all_eve_pv_factor[i] = eve_mat[:, cr_base_idx] / safe_bal
+        # Blank rows (NMD, IRS: no CF schedule) get 0 from the CF matrix above —
+        # fall back to the calibrated market EVE PV factor so the base level is
+        # not silently missing the whole non-maturity book.  (The level effect of
+        # the hypothetical curve on NMD EVE is second order and left uncaptured.)
+        if blank_eve.any():
+            all_eve_pv_factor[i, blank_eve] = params.eve_pv_factor[blank_eve]
 
         # delta EVE per shock
         for k, scen in enumerate(shock_ids):
@@ -296,6 +311,154 @@ def build_hyp_irrbb_metrics(params, cr, curves, sc_data: dict) -> dict:
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# EXACT per-product IRRBB for every hypothetical curve
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_hyp_irrbb_metrics_exact(params, sc_data, report_date):
+    """Per-product NII + EVE (base + 7 EBA shocks) for each of the 15 hypothetical
+    curves, computed with the **production** re-pricing functions.
+
+    The exact pipeline separates "generate cash flows" (once) from "re-price under
+    a curve" (N times).  Here we feed the existing run-off / 12M CF streams to
+    ``eve_calc_objects.compute_eve_shocked_schedule`` and
+    ``nii_calc_objects.compute_nii_shocked_schedule`` with, for each hypothetical
+    curve, ``build_all_shocked_curves`` producing that curve's base + 7 shocked
+    discount curves.  No cash-flow regeneration.
+
+    Product-level results are broadcast to every cohort of the product by
+    ``prod_metric / prod_balance`` — identical to how ``extract_params`` maps
+    ``irrbb.eve_results`` onto cohorts for the base curve.
+
+    Requires SQL (offline precompute step only).  Returns the same dict shape as
+    ``build_hyp_irrbb_metrics``.
+    """
+    _root  = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    _IRRBB = os.path.join(_root, "irrbb_calc", "python_code")
+    if _IRRBB not in sys.path:
+        sys.path.insert(0, _IRRBB)
+    import pandas as pd
+    import config as _cfg
+    _cfg.report_date = pd.to_datetime(report_date)
+    import sql_setup as _sql
+    import eba_shock_curves as _esc
+    import eve_calc_objects as _eve
+    import nii_calc_objects as _nii
+
+    HORIZON_YF  = 1.0
+    horizon_end = _cfg.report_date + pd.Timedelta(days=round(HORIZON_YF * 365.25))
+    DISC_MAP    = {"PLN": "PLN_disc_curve", "EUR": "EUR_disc_curve", "USD": "USD_disc_curve"}
+    OWN_BPS     = -100.0
+
+    _ir = pd.read_excel(os.path.join(_root, "balance_generate", "input_data", "interest_rt.xlsx"))
+    def _map(col, transform=lambda x: x, skip_if=lambda x: False):
+        out = {}
+        for _, r in _ir.iterrows():
+            v = r.get(col)
+            if col in _ir.columns and not pd.isna(v) and not skip_if(float(v)):
+                out[str(int(r["product_code"]))] = transform(float(v))
+        return out
+    CAPS   = _map("client_cap")
+    FLOORS = _map("client_floor")
+    A_MAP  = _map("a", skip_if=lambda v: v == 1.0)
+    B_MAP  = _map("b", transform=lambda v: v / 100.0, skip_if=lambda v: v == 0.0)
+
+    # CF streams (loaded once)
+    eve_beh = _sql.load_all_beh_schedules(_cfg.report_date)
+    try:
+        _sw = _sql.load_all_swap_beh_schedules(_cfg.report_date)
+        if not _sw.empty:
+            eve_beh = pd.concat([eve_beh, _sw], ignore_index=True)
+    except Exception:
+        pass
+    nii_beh = _sql.load_beh_schedules(_cfg.report_date, horizon_end)
+    try:
+        _sw = _sql.load_swap_beh_schedules(_cfg.report_date, horizon_end)
+        if not _sw.empty:
+            nii_beh = pd.concat([nii_beh, _sw], ignore_index=True)
+    except Exception:
+        pass
+    print(f"  CF rows: EVE {len(eve_beh):,}  NII {len(nii_beh):,}")
+
+    mkt_df   = _sql.load_mkt_curves(_cfg.report_date)          # curve_name, n_days, d_f
+    pln_mask = mkt_df["curve_name"] == DISC_MAP["PLN"]
+    pln_days = mkt_df.loc[pln_mask, "n_days"].to_numpy(dtype=float)
+
+    n   = len(params.product_code)
+    key = np.array([f"{params.product_code[i]}|{params.bs_side[i]}" for i in range(n)])
+    prod_bal = {k: float(params.balance_arr[key == k].sum()) for k in np.unique(key)}
+
+    shock_ids = [s for s in _esc.ALL_SCENARIO_IDS if s != "base"]       # 7
+    n_hyp     = len(sc_data["scenario_ids"])
+    out_nii   = np.zeros((n_hyp, n));                 out_dnii = np.zeros((n_hyp, n, len(shock_ids)))
+    out_eve   = np.zeros((n_hyp, n));                 out_deve = np.zeros((n_hyp, n, len(shock_ids)))
+
+    N_M = int(np.asarray(sc_data["n_months"]).flat[0])
+    yr  = np.arange(1, N_M + 1) / 12.0
+
+    def _daily_disc(sub):
+        parts = []
+        for ccy, cn in DISC_MAP.items():
+            g = sub[sub["curve_name"] == cn]
+            if g.empty:
+                continue
+            daily = _esc._log_interp_daily_df(g["n_days"].to_numpy(), g["d_f"].to_numpy(),
+                                              int(g["n_days"].max()))
+            daily["node_date"] = _cfg.report_date + pd.to_timedelta(daily["n_days"], unit="D")
+            daily.insert(0, "curve_name", cn)
+            parts.append(daily.set_index(["curve_name", "node_date"])["d_f"].sort_index())
+        return pd.concat(parts).sort_index()
+
+    for i, sid in enumerate(sc_data["scenario_ids"]):
+        fwd_hyp  = np.asarray(sc_data["fwd_rates"][i], dtype=float)[:N_M]     # annualised, monthly
+        df_hyp_m = np.exp(-np.cumsum(fwd_hyp / 12.0))
+        z_hyp_m  = -np.log(np.clip(df_hyp_m, 1e-12, None)) / yr
+        z_nodes  = np.interp(pln_days / 365.25, yr, z_hyp_m, left=z_hyp_m[0], right=z_hyp_m[-1])
+        df_nodes = np.where(pln_days > 0, np.exp(-z_nodes * (pln_days / 365.25)), 1.0)
+
+        hyp_mkt = mkt_df.copy()
+        hyp_mkt.loc[pln_mask, "d_f"] = df_nodes
+
+        shocked = _esc.build_all_shocked_curves(hyp_mkt, _cfg.report_date, "PLN", OWN_BPS, 0.0)
+
+        p_nii, p_eve = {}, {}
+        for scen in _esc.ALL_SCENARIO_IDS:
+            disc = _daily_disc(shocked[shocked["scenario_id"] == scen])
+            es = _eve.compute_eve_shocked_schedule(
+                eve_beh, disc, DISC_MAP, scen, 0.0, CAPS, FLOORS, A_MAP, B_MAP)
+            ns = _nii.compute_nii_shocked_schedule(
+                nii_beh, disc, DISC_MAP, _cfg.report_date, scen, HORIZON_YF, 0.0,
+                CAPS, FLOORS, A_MAP, B_MAP)
+            es["k"] = es["product_code"].astype(str) + "|" + es["bs_side"].astype(str)
+            ns["k"] = ns["product_code"].astype(str) + "|" + ns["bs_side"].astype(str)
+            p_eve[scen] = es.groupby("k")["pv_total"].sum().to_dict()
+            p_nii[scen] = ns.groupby("k")["nii_total"].sum().to_dict()
+
+        for j in range(n):
+            k  = key[j]
+            pb = prod_bal.get(k, 0.0)
+            if pb <= 0:
+                continue
+            eb = p_eve["base"].get(k, 0.0)
+            nb = p_nii["base"].get(k, 0.0)
+            out_eve[i, j] = eb / pb
+            out_nii[i, j] = nb / pb
+            for kk, s in enumerate(shock_ids):
+                out_deve[i, j, kk] = (p_eve[s].get(k, 0.0) - eb) / pb
+                out_dnii[i, j, kk] = (p_nii[s].get(k, 0.0) - nb) / pb
+
+        print(f"  [{i+1:2d}/{n_hyp}] {sid:16s}  EVE base {sum(p_eve['base'].values())/1e6:+8.0f} M   "
+              f"NII base {sum(p_nii['base'].values())/1e6:+7.0f} M")
+
+    return {
+        "hyp_nii_unit_rate":  out_nii,
+        "hyp_delta_nii_unit": out_dnii,
+        "hyp_eve_pv_factor":  out_eve,
+        "hyp_delta_eve_unit": out_deve,
+        "hyp_shock_ids":      np.array(shock_ids, dtype=object),
+    }
+
+
 # ── entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -324,8 +487,16 @@ if __name__ == "__main__":
     sc_data = build_scenario_curves(real_fwd_pln)
     print(f"  {len(sc_data['scenario_ids'])} scenarios: {list(sc_data['scenario_ids'])}")
 
-    print("\nPre-computing IRRBB unit metrics for all hypothetical curves...")
-    irrbb = build_hyp_irrbb_metrics(params, cr, curves, sc_data)
+    _report_date = str(params.report_date)
+    try:
+        print("\nPre-computing EXACT per-product IRRBB for all hypothetical curves "
+              "(production re-pricing functions, needs SQL)...")
+        irrbb = build_hyp_irrbb_metrics_exact(params, sc_data, _report_date)
+        print("  -> exact path OK")
+    except Exception as _exc:
+        print(f"  !! exact path failed ({type(_exc).__name__}: {_exc})")
+        print("  -> falling back to the reduced numpy model (compute_hyp_metrics parity)")
+        irrbb = build_hyp_irrbb_metrics(params, cr, curves, sc_data)
     print(f"\n  hyp_nii_unit_rate:  {irrbb['hyp_nii_unit_rate'].shape}")
     print(f"  hyp_delta_nii_unit: {irrbb['hyp_delta_nii_unit'].shape}")
     print(f"  hyp_eve_pv_factor:  {irrbb['hyp_eve_pv_factor'].shape}")

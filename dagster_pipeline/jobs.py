@@ -10,6 +10,7 @@ from dagster_pipeline.assets import (
     eba_sot_results,
     lcr_nsfr_results,
     optimize_prep_tensors,
+    hyp_scenario_curves,
 )
 
 # ── Balance sheet generation (with optional IRS positions) ────────────────────
@@ -105,11 +106,11 @@ liq_only_job = define_asset_job(
 # Run after any full pipeline run to refresh the fast-approximation tensors.
 optimize_prep_job = define_asset_job(
     name="optimize_prep_job",
-    selection=AssetSelection.assets(optimize_prep_tensors),
+    selection=AssetSelection.assets(optimize_prep_tensors, hyp_scenario_curves),
     description=(
-        "Build optimizer curve tensors and product parameters, "
-        "then run fast-vs-exact accuracy check. "
-        "Run after full_run_job or irs_update_job."
+        "Build optimizer curve tensors and product parameters, run the "
+        "fast-vs-exact accuracy check, then pre-compute exact IRRBB for the "
+        "sandbox's 15 hypothetical curves. Run after full_run_job or irs_update_job."
     ),
 )
 
@@ -130,6 +131,7 @@ labbank_data_job = define_asset_job(
         eba_sot_results,
         lcr_nsfr_results,
         optimize_prep_tensors,
+        hyp_scenario_curves,
     ),
     description=(
         "Full pipeline + optimizer prep in one job: regenerate the balance "
