@@ -75,3 +75,6 @@ visual_rep/ALM_report.html
 visual_rep/finance_report.html
 bs_optimization/notebooks/optimization_report.html
 bs_optimization/notebooks/optimization_report_clean.html
+# Raw per-tenor rate downloads (POLONIA/WIBOR from stooq) — the consolidated
+# balance_gen_add_data/input/wibor_all.xlsx is the tracked artefact.
+balance_gen_add_data/wibor_stooq/download/
