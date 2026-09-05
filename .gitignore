@@ -71,7 +71,9 @@ Diogo Gobira*.pdf
 # committing duplicate rendered output alongside the notebook source.
 # (Hand-authored HTML like docs/*.html and optimize_prep/method_b_explainer.html
 # is unaffected -- only these specific notebook-export paths are ignored.)
-visual_rep/ALM_report.html
+# ALM_report.html is the exception: committed as a static, viewable snapshot
+# (see visual_rep/ALM_report.html) -- it will go stale until someone re-runs
+# export_report.py and commits the refresh; it is not auto-kept-in-sync.
 visual_rep/finance_report.html
 bs_optimization/notebooks/optimization_report.html
 bs_optimization/notebooks/optimization_report_clean.html
