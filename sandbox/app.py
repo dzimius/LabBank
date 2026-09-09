@@ -73,6 +73,28 @@ def _build_stressed_nmd_for_gap(
         result[6300] = result[6000]
     return result
 
+
+def _apply_bulk_nmd(pc: str, editor_key: str, seed_arr, lo: int, hi: int,
+                    value_frac: float) -> None:
+    """Button callback: set Stressed % to a flat value across tenor rows [lo, hi].
+
+    Runs before the rerun, so it can rewrite the editor seed *and* bump the
+    per-product seed version (which is baked into the editor's widget key) in
+    lock-step. Manual cell edits made since the last apply/reset live in the
+    data_editor's own widget state as `edited_rows`; fold those in first so the
+    bulk fill layers on top of them instead of discarding them.
+    """
+    cur = np.array(seed_arr, dtype=float).copy()
+    ws = st.session_state.get(editor_key, {})
+    for r, chg in ws.get("edited_rows", {}).items():
+        if "Stressed %" in chg and chg["Stressed %"] is not None:
+            cur[int(r)] = np.clip(float(chg["Stressed %"]) / 100.0, 0.0, 1.0)
+    cur[lo:hi + 1] = float(np.clip(value_frac, 0.0, 1.0))
+    st.session_state["nmd_editor_seed"][pc] = cur
+    st.session_state["nmd_seed_ver"][pc] = (
+        st.session_state["nmd_seed_ver"].get(pc, 0) + 1
+    )
+
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="LabBank Sandbox", page_icon="🏦", layout="wide")
 st.markdown("""
@@ -161,6 +183,12 @@ def _init():
         # NMD stress state — keyed by product_code
         "nmd_stressed_pct":    {pc: df["pct"].to_numpy().copy()
                                 for pc, df in _nmd_models_df.items()},
+        # bulk-fill support: per-product editor seed override + a version counter
+        # that bumps the editor's widget key whenever the seed changes (so the
+        # seed only ever changes in lock-step with the key — same rule the
+        # Balance Sheet editor follows to avoid data_editor feedback-loop desync)
+        "nmd_editor_seed":     {},
+        "nmd_seed_ver":        {},
         "nmd_delta_nii":       0.0,
         "nmd_delta_eve_base":  0.0,
         "nmd_delta_eve_sh":    {s: 0.0 for s in _shocked},
@@ -543,7 +571,11 @@ with tab_irs:  # tab-bar position 6
             "pay_fixed":        st.column_config.CheckboxColumn(
                                     "Pay Fixed?", width="small",
                                     help="☐ = receive fixed / pay WIBOR  |  ☑ = pay fixed / receive WIBOR"),
-            "currency":         st.column_config.TextColumn("CCY", width="small"),
+            "currency":         st.column_config.SelectboxColumn("CCY", width="small",
+                                    options=["PLN"], required=True,
+                                    help="Book is PLN-only for now. Single-option list — the "
+                                         "ALM-metric and gap engines look up the PLN disc/fwd "
+                                         "curves regardless of this field."),
             "start_date":       st.column_config.DateColumn("Start", width="small"),
             "maturity_date":    st.column_config.DateColumn("Maturity", width="small"),
             "fixed_rate":       st.column_config.NumberColumn(
@@ -563,11 +595,19 @@ with tab_irs:  # tab-bar position 6
                                          "out of both NII (same 12M average forward however the "
                                          "resets are chunked) and EVE (float leg telescopes to "
                                          "N·(1−DF) regardless of reset frequency)."),
-            "float_spread":     st.column_config.NumberColumn("Float Spread",
-                                    format="%.4f", width="small"),
-            "disc_curve":       st.column_config.TextColumn("Disc Curve", width="small"),
-            "fwd_curve":        st.column_config.TextColumn("Fwd Curve", width="small"),
+            "disc_curve":       st.column_config.SelectboxColumn("Disc Curve", width="small",
+                                    options=["PLN_disc_curve"], required=True,
+                                    help="Single-option list for now — PLN-only book. The sandbox "
+                                         "always discounts on the PLN curve."),
+            "fwd_curve":        st.column_config.SelectboxColumn("Fwd Curve", width="small",
+                                    options=["PLN_fwd_curve"], required=True,
+                                    help="Single-option list for now — PLN-only book. The sandbox "
+                                         "always projects the float leg on the PLN forward curve."),
         },
+        column_order=["swap_id", "notional", "pay_fixed", "currency",
+                      "start_date", "maturity_date", "fixed_rate",
+                      "float_rate_index", "float_pay_freq", "float_fixing_freq",
+                      "disc_curve", "fwd_curve"],
         hide_index=True, key=f"ed_irs_{rc}",
     )
     st.session_state["_cur_irs"] = edited_irs.copy()
@@ -1233,6 +1273,8 @@ with tab_nmd:  # tab-bar position 5
             if st.button("↺ Reset NMD", use_container_width=True):
                 for _pc, _df in nmd_models.items():
                     st.session_state["nmd_stressed_pct"][_pc] = _df["pct"].to_numpy().copy()
+                st.session_state["nmd_editor_seed"] = {}
+                st.session_state["nmd_seed_ver"]    = {}
                 st.session_state["nmd_delta_nii"]      = 0.0
                 st.session_state["nmd_delta_eve_base"] = 0.0
                 st.session_state["nmd_delta_eve_sh"]   = {s: 0.0 for s in params.scenario_ids}
@@ -1263,15 +1305,22 @@ with tab_nmd:  # tab-bar position 5
             pct_prev_base[1:] = pct_base[:-1]
         outflow_base_pct = (pct_prev_base - pct_base) * 100.0
 
-        # Always seed the editor from the STABLE baseline, never from session
-        # state -- each product already gets its own widget key (nmd_ed_{pc_sel}_{rc})
-        # below, so Streamlit's own per-key state already preserves edits when
-        # switching products/tabs. Feeding session_state back into `data=` here
-        # created a feedback loop (this rerun's seed = last rerun's own output),
-        # which is the classic Streamlit data_editor desync that needs a second
-        # identical edit before it "sticks" -- same bug class the Balance Sheet
-        # editor already avoids by always passing its static baseline (2026-08-15 fix).
-        _init_stressed = pct_base
+        # Seed the editor from the STABLE baseline, never from the per-rerun
+        # session_state read-back -- each product gets its own widget key
+        # (nmd_ed_{pc_sel}_{rc}_{seed_ver}) so Streamlit's per-key state already
+        # preserves edits when switching products/tabs. Feeding session_state
+        # back into `data=` with a *stable* key creates a feedback loop (this
+        # rerun's seed = last rerun's own output) -- the classic data_editor
+        # desync that needs a second identical edit before it "sticks" (same bug
+        # class the Balance Sheet editor avoids, 2026-08-15 fix).
+        #
+        # The bulk-fill helper below is the one sanctioned way to change the
+        # seed: its callback rewrites nmd_editor_seed[pc] AND bumps
+        # nmd_seed_ver[pc], so the seed only ever moves in lock-step with the
+        # key -- no feedback loop.
+        _seed_ver      = int(st.session_state["nmd_seed_ver"].get(pc_sel, 0))
+        _seed_override = st.session_state["nmd_editor_seed"].get(pc_sel)
+        _init_stressed = pct_base if _seed_override is None else np.asarray(_seed_override, dtype=float)
         editor_df = pd.DataFrame({
             "Tenor":          tenor_lbl,
             "Baseline %":     (pct_base * 100.0).round(2),
@@ -1303,7 +1352,7 @@ with tab_nmd:  # tab-bar position 5
                 },
                 hide_index=True,
                 use_container_width=True,
-                key=f"nmd_ed_{pc_sel}_{rc}",
+                key=f"nmd_ed_{pc_sel}_{rc}_{_seed_ver}",
             )
 
             pct_stressed = np.clip(
@@ -1311,6 +1360,40 @@ with tab_nmd:  # tab-bar position 5
             )
             # Persist this product's stressed pct so the other tabs can read it
             st.session_state["nmd_stressed_pct"][pc_sel] = pct_stressed
+
+            # ── bulk-fill helper: set a flat Stressed % across a tenor range ──
+            # data_editor pastes a single copied cell into the anchor cell only,
+            # so filling 20+ tenor rows by hand is tedious. This writes the whole
+            # range in one click (folding in any manual edits first).
+            with st.expander("⚡ Bulk-fill a tenor range"):
+                _bc1, _bc2 = st.columns(2)
+                _lo_lbl = _bc1.selectbox("From tenor", tenor_lbl, index=0,
+                                         key=f"nmd_bulk_lo_{pc_sel}")
+                _hi_default = len(tenor_lbl) - 1
+                _hi_lbl = _bc2.selectbox("To tenor", tenor_lbl, index=_hi_default,
+                                         key=f"nmd_bulk_hi_{pc_sel}")
+                _bv1, _bv2 = st.columns([2, 1])
+                _bulk_val = _bv1.number_input(
+                    "Stressed %", min_value=0.0, max_value=100.0, value=0.0,
+                    step=1.0, format="%.2f", key=f"nmd_bulk_val_{pc_sel}")
+                _lo_i, _hi_i = tenor_lbl.index(_lo_lbl), tenor_lbl.index(_hi_lbl)
+                _bv2.markdown("<br>", unsafe_allow_html=True)
+                _bv2.button(
+                    "Apply", use_container_width=True,
+                    disabled=_lo_i > _hi_i,
+                    key=f"nmd_bulk_apply_{pc_sel}",
+                    on_click=_apply_bulk_nmd,
+                    args=(pc_sel, f"nmd_ed_{pc_sel}_{rc}_{_seed_ver}",
+                          _init_stressed, _lo_i, _hi_i, _bulk_val / 100.0),
+                )
+                if _lo_i > _hi_i:
+                    st.caption("⚠️ 'From' tenor is after 'To' tenor.")
+                else:
+                    st.caption(
+                        f"Sets **{_hi_i - _lo_i + 1}** rows "
+                        f"({_lo_lbl} → {_hi_lbl}) to **{_bulk_val:.2f}%**. "
+                        "Manual edits are kept."
+                    )
 
             if K > 1 and np.any(np.diff(pct_stressed) > 0):
                 st.warning(

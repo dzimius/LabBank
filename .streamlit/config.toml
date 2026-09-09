@@ -1,0 +1,5 @@
+[client]
+# Hide the developer toolbar (Rerun / Clear cache / Deploy) and, with it, the
+# "c" and "r" keyboard shortcuts — a stray keypress on the page body kept
+# popping the "Clear caches" confirmation dialog while editing tables.
+toolbarMode = "viewer"

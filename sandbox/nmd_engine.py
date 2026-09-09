@@ -23,8 +23,8 @@ import numpy as np
 import pandas as pd
 
 NMD_PRODUCTS = {
-    "6000": "Current Account",
-    "8000": "Saving Account",
+    "6000": "Current Account (PLN)",
+    "8000": "Saving Account (PLN)",
 }
 
 _HERE = os.path.dirname(os.path.abspath(__file__))

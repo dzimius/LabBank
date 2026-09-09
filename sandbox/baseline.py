@@ -145,10 +145,13 @@ def load_irs_baseline() -> pd.DataFrame:
     df = pd.read_excel(IRS_PATH)
     df["start_date"]    = pd.to_datetime(df["start_date"]).dt.date
     df["maturity_date"] = pd.to_datetime(df["maturity_date"]).dt.date
+    # float_spread is intentionally dropped: it is inert in the sandbox engines
+    # (irs_engine / gap_engine never read it) so exposing it in the editor would
+    # imply a lever that does nothing. It still lives in the full pipeline.
     keep = ["swap_id", "notional", "pay_fixed", "currency",
             "start_date", "maturity_date", "fixed_rate",
             "float_rate_index", "float_fixing_freq", "float_pay_freq",
-            "float_spread", "disc_curve", "fwd_curve"]
+            "disc_curve", "fwd_curve"]
     return df[[c for c in keep if c in df.columns]].copy()
 
 
