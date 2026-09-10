@@ -9,6 +9,15 @@ LCR = HQLA / Net Cash Outflows
   Inflows_30d  = min(CF asset inflows within 30d × 0.75, 0.75 × Outflows_30d)
   Net Outflows = Outflows_30d − Inflows_30d
 
+SIMPLIFICATION — inflow treatment. Basel III applies counterparty-specific
+inflow rates (retail/non-financial 50%, financial 100%, ...) and then caps
+*total* recognised inflows at 75% of outflows. This model does not carry
+counterparty tags on cash-flow rows, so it uses a single flat 0.75 recognition
+factor on all 30-day inflows as a stand-in, then applies the 75% aggregate cap
+on top. Both steps push the ratio the same way, so the result is conservative
+(LCR no higher than a fully-tagged calculation would give); it is a laboratory
+approximation, not the regulatory inflow waterfall.
+
 NSFR (Net Stable Funding Ratio) — Basel III / EBA
 --------------------------------------------------
 NSFR = ASF / RSF
@@ -110,9 +119,15 @@ def compute_lcr(
                 * ccy_df.loc[dep_mask, "LCR"]
             ).sum()
 
-        # Inflows capped at 75% of outflows (Basel III §33(d))
-        raw_inflows = inflows_map.get(ccy, 0.0) * 0.75  # 75% recognition rate
-        cap = 0.75 * outflows
+        # Inflow treatment — SIMPLIFICATION (see module docstring):
+        #   1. flat 0.75 recognition factor on all 30d inflows, standing in for
+        #      Basel III's counterparty-specific inflow rates (no counterparty
+        #      tags on CF rows here)
+        #   2. aggregate cap at 75% of outflows (Basel III §33(d) / LCR DA Art. 33)
+        # Both steps only ever lower the ratio, so the LCR reported here is
+        # conservative relative to a fully counterparty-tagged calculation.
+        raw_inflows = inflows_map.get(ccy, 0.0) * 0.75  # step 1: flat recognition factor
+        cap = 0.75 * outflows                            # step 2: aggregate cap
         inflows = min(raw_inflows, cap)
 
         net_outflows = max(outflows - inflows, 0.0)
