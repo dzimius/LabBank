@@ -57,14 +57,14 @@ FLOORS_MAP: dict[str, float] = {
     if "client_floor" in _ir_df.columns and not pd.isna(r.get("client_floor"))
 }
 COEFF_A_MAP: dict[str, float] = {
-    str(int(r["product_code"])): float(r["a"])
+    str(int(r["product_code"])): float(r["beta"])
     for _, r in _ir_df.iterrows()
-    if "a" in _ir_df.columns and not pd.isna(r.get("a")) and float(r["a"]) != 1.0
+    if "beta" in _ir_df.columns and not pd.isna(r.get("beta")) and float(r["beta"]) != 1.0
 }
 COEFF_B_MAP: dict[str, float] = {
-    str(int(r["product_code"])): float(r["b"]) / 100.0
+    str(int(r["product_code"])): float(r["margin_pct"]) / 100.0
     for _, r in _ir_df.iterrows()
-    if "b" in _ir_df.columns and not pd.isna(r.get("b")) and float(r["b"]) != 0.0
+    if "margin_pct" in _ir_df.columns and not pd.isna(r.get("margin_pct")) and float(r["margin_pct"]) != 0.0
 }
 
 # ── 0. Load Tier 1 capital ────────────────────────────────────────────────────

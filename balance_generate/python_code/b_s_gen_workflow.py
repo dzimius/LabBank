@@ -26,7 +26,7 @@ df_bs_struct['amort_type'] = df_bs_struct['amort_type'].astype('Int64')
 df_result = df_bs_struct.merge(df_client_t, on='client_type_id', how='left')
 
 # Load interest rate formula file and historical fixings
-# interest_rt.xlsx columns: product_code, a, b (% points), index_floor, client_floor
+# interest_rt.xlsx columns: product_code, beta, margin_pct (% points), index_floor, client_floor, client_cap
 # rate_index per product is taken from bank_data_only_dep.xlsx (already loaded as df_bs_struct)
 interest_rt = pd.read_excel('input_data/interest_rt.xlsx')
 fixing_file = '../balance_gen_add_data/input/fixing_input.xlsx'

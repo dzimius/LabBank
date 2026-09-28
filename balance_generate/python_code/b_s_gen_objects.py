@@ -1150,14 +1150,16 @@ def compute_deposit_client_rt(
 ) -> pd.DataFrame:
     """Add client_rt column (decimal) to deposit rows in all_tx.
 
-    Formula per product: client_rt = a * market_rate + b/100
+    Formula per product:
+      client_rt = clip(beta * max(market_rate, index_floor) + margin_pct/100, client_floor, client_cap)
       - Fixed deposits (rate_type='F'):   market_rate = fixing at start_date
       - Other deposits (rate_type='A/V'): market_rate = fixing at report_date (instant repricing)
-      - If a=0: client_rt = b/100 (e.g. 0% for current accounts)
+      - If beta=0: client_rt = margin_pct/100 (e.g. 0% for current accounts)
 
-    interest_rt columns : product_code, a, b (in % points)
+    interest_rt columns : product_code, beta, margin_pct (in % points; blank = 0),
+                          index_floor, client_floor, client_cap (decimals; blank = none)
     bs_struct columns   : product_code, rate_index (rate_index already encodes the tenor,
-                          e.g. 'PLN_BID_6M'); add rate_index for any deposit product with a != 0
+                          e.g. 'PLN_BID_6M'); add rate_index for any deposit product with beta != 0
     fixings columns     : fixing_date, rate_index, rate (in % points), ...
                           lookup key is (fixing_date, rate_index) — tenor is embedded in rate_index
     """
@@ -1214,8 +1216,10 @@ def compute_deposit_client_rt(
 
     for pc in sorted(deposit_pcs):
         row_ir = ir.loc[pc]
-        a     = float(row_ir['a'])
-        b_pct = float(row_ir['b'])   # percentage points, e.g. 0.5 → 0.005 in decimal
+        a     = float(row_ir['beta'])
+        b_pct = float(row_ir['margin_pct'])   # percentage points, e.g. 0.5 → 0.005 in decimal
+        if np.isnan(b_pct):
+            b_pct = 0.0
 
         # Floor parameters — at most one of index_floor / client_floor may be set
         index_floor = (
@@ -1228,32 +1232,41 @@ def compute_deposit_client_rt(
             if 'client_floor' in row_ir.index and not pd.isna(row_ir['client_floor'])
             else None
         )
+        client_cap = (
+            float(row_ir['client_cap'])
+            if 'client_cap' in row_ir.index and not pd.isna(row_ir['client_cap'])
+            else None
+        )
         if index_floor is not None and client_floor is not None:
             raise ValueError(
                 f"product_code {pc}: both index_floor and client_floor are set in "
                 "interest_rt.xlsx. Only one floor type is allowed per product."
             )
 
-        def _apply_floor(mkt_rate_dec: float) -> float:
-            """Apply index_floor (to input) or client_floor (to output)."""
-            if index_floor is not None:
-                mkt_rate_dec = max(mkt_rate_dec, index_floor)
-            result = a * mkt_rate_dec + b_pct / 100.0
+        def _apply_floor_cap(result: float) -> float:
+            """Apply client_floor / client_cap to the output rate."""
             if client_floor is not None:
                 result = max(result, client_floor)
+            if client_cap is not None:
+                result = min(result, client_cap)
             return result
+
+        def _apply_floor(mkt_rate_dec: float) -> float:
+            """Apply index_floor (to input), then client_floor / client_cap (to output)."""
+            if index_floor is not None:
+                mkt_rate_dec = max(mkt_rate_dec, index_floor)
+            return _apply_floor_cap(a * mkt_rate_dec + b_pct / 100.0)
 
         pc_mask = deposit_mask & (all_tx['product_code'].astype(int) == pc)
 
         if a == 0.0:
-            raw = b_pct / 100.0
-            all_tx.loc[pc_mask, 'client_rt'] = max(raw, client_floor) if client_floor is not None else raw
+            all_tx.loc[pc_mask, 'client_rt'] = _apply_floor_cap(b_pct / 100.0)
             # index_rt stays NaN (no market rate dependency)
             continue
 
         if pc not in pc_to_rate_index.index:
             raise ValueError(
-                f"product_code {pc} has a != 0 but no rate_index in bank_data_only_dep.xlsx. "
+                f"product_code {pc} has beta != 0 but no rate_index in bank_data_only_dep.xlsx. "
                 "Add rate_index for this product."
             )
         rate_index = pc_to_rate_index[pc]
@@ -1302,8 +1315,8 @@ def compute_asset_rates(
     index_rt = effective index rate for this contract (decimal):
       - Floating (rate_type='V'): fixing at report_date  (reprices with market)
       - Fixed    (rate_type='F'): fixing at start_date   (locked at origination)
-    client_rt = a * max(index_rt, index_floor) + b/100
-      a, b from interest_rt.xlsx (b in % points); default a=1, b=0.
+    client_rt = beta * max(index_rt, index_floor) + margin_pct/100
+      beta, margin_pct from interest_rt.xlsx (margin_pct in % points); default beta=1, margin_pct=0.
     """
     asset_names = {
         'mortgage_fixed', 'mortgage_float', 'cash_loan_fixed', 'cash_loan_float',
@@ -1368,10 +1381,10 @@ def compute_asset_rates(
             row_ir = ir.loc[pc]
             if 'index_floor' in row_ir.index and not pd.isna(row_ir.get('index_floor', np.nan)):
                 index_floor = float(row_ir['index_floor'])
-            if 'a' in row_ir.index and not pd.isna(row_ir.get('a', np.nan)):
-                a = float(row_ir['a'])
-            if 'b' in row_ir.index and not pd.isna(row_ir.get('b', np.nan)):
-                b_dec = float(row_ir['b']) / 100.0   # % points → decimal
+            if 'beta' in row_ir.index and not pd.isna(row_ir.get('beta', np.nan)):
+                a = float(row_ir['beta'])
+            if 'margin_pct' in row_ir.index and not pd.isna(row_ir.get('margin_pct', np.nan)):
+                b_dec = float(row_ir['margin_pct']) / 100.0   # % points → decimal
 
         def _client_rt(index_rt_dec: float) -> float:
             floored = max(index_rt_dec, index_floor) if index_floor is not None else index_rt_dec

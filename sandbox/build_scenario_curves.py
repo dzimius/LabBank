@@ -360,8 +360,8 @@ def build_hyp_irrbb_metrics_exact(params, sc_data, report_date):
         return out
     CAPS   = _map("client_cap")
     FLOORS = _map("client_floor")
-    A_MAP  = _map("a", skip_if=lambda v: v == 1.0)
-    B_MAP  = _map("b", transform=lambda v: v / 100.0, skip_if=lambda v: v == 0.0)
+    A_MAP  = _map("beta", skip_if=lambda v: v == 1.0)
+    B_MAP  = _map("margin_pct", transform=lambda v: v / 100.0, skip_if=lambda v: v == 0.0)
 
     # CF streams (loaded once)
     eve_beh = _sql.load_all_beh_schedules(_cfg.report_date)

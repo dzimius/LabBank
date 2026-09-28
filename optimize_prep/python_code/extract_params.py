@@ -143,7 +143,7 @@ def _load_bs_structure() -> pd.DataFrame:
 def _load_rate_coefficients() -> pd.DataFrame:
     df = pd.read_excel(INTEREST_PATH)
     df["product_code"] = df["product_code"].astype(str)
-    df = df.rename(columns={"a": "coeff_a", "b": "coeff_b"})
+    df = df.rename(columns={"beta": "coeff_a", "margin_pct": "coeff_b"})
     df["coeff_b"] = df["coeff_b"] / 100.0  # Excel stores percent (e.g. 0.50 = 50bps); convert to decimal
     return df.set_index("product_code")
 
