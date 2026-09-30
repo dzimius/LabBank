@@ -15,6 +15,7 @@ def _apply_rt_limits(
     coeff_b_map:   dict | None = None,
     base_eff_rate: "np.ndarray | pd.Series | None" = None,
     base_fwd_rt:   "np.ndarray | pd.Series | None" = None,
+    contract_margin: "np.ndarray | pd.Series | None" = None,
 ) -> np.ndarray:
     """Apply per-product rate transform and floor/cap.
 
@@ -24,17 +25,24 @@ def _apply_rt_limits(
         added again.  With a=1: client_rt = base_eff_rate + delta_fwd (margin
         preserved exactly).
 
-    Renewal / new business — omit base rates:
+    Renewal / new business / administered rates — omit base rates:
         client_rt = a * rate + b
-        Here b is the contractual spread applied to the shocked index rate.
+        b = product-level spread (coeff_b_map) when the product has one, else
+        contract_margin (the contract's own spread from cf.products.margin, e.g.
+        a mortgage's origination margin -- EBA constant balance sheet renews
+        like-for-like), else 0.  Same rule as labbank_common.rate_models.
 
-    Products absent from coeff maps default to a=1, b=0.
+    Products absent from coeff maps default to a=1.
     All values must be in decimal.
     """
     shocked = np.asarray(rate, dtype=float)
     pcs     = product_codes.astype(str)
     a_v     = pcs.map(coeff_a_map or {}).fillna(1.0).to_numpy(dtype=float)
-    b_v     = pcs.map(coeff_b_map or {}).fillna(0.0).to_numpy(dtype=float)
+    b_v     = pcs.map(coeff_b_map or {}).to_numpy(dtype=float)
+    if contract_margin is not None:
+        cm = pd.to_numeric(pd.Series(np.asarray(contract_margin)), errors="coerce").to_numpy(dtype=float)
+        b_v = np.where(np.isnan(b_v), cm, b_v)
+    b_v     = np.nan_to_num(b_v, nan=0.0)
 
     if base_eff_rate is not None and base_fwd_rt is not None:
         base_e = np.asarray(base_eff_rate, dtype=float)
@@ -263,7 +271,7 @@ def compute_nii_shocked(
     # ── Effective rate per CF (eff_rate_shocked) ───────────────────────────────
     # F (fixed)          → contracted_rt (unchanged)
     # V (variable)       → stable-margin: contracted_rt + a*(fwd_shocked - base_fwd)
-    # A (administrative) → 0% regardless of scenario (bank-managed rate)
+    # A (administrative) → rate-model formula on the shocked index (e.g. current accounts: beta=0 → 0%)
     rate_type_s = df.get("rate_type", pd.Series("V", index=df.index))
     df["eff_rate_shocked"] = _contracted_rt                                  # F: contracted
     mask_var   = rate_type_s == "V"
@@ -278,7 +286,12 @@ def compute_nii_shocked(
         )
     elif mask_var.any():
         df.loc[mask_var, "eff_rate_shocked"] = df.loc[mask_var, "fwd_rt_shocked"]
-    df.loc[mask_admin, "eff_rate_shocked"] = 0.0                            # A: always 0%
+    if mask_admin.any() and "product_code" in df.columns:                 # A: rate-model formula
+        df.loc[mask_admin, "eff_rate_shocked"] = _apply_rt_limits(
+            df.loc[mask_admin, "fwd_rt_shocked"], df.loc[mask_admin, "product_code"],
+            caps_map, floors_map, coeff_a_map, coeff_b_map,
+            contract_margin=df.loc[mask_admin, "margin"] if "margin" in df.columns else None,
+        )
 
     # ── NII components ─────────────────────────────────────────────────────────
     df["sign"] = np.where(df["bs_side"] == "A", 1.0, -1.0)
@@ -301,12 +314,10 @@ def compute_nii_shocked(
         renewal_rt = _apply_rt_limits(
             df["fwd_rt_shocked"], df["product_code"],
             caps_map, floors_map, coeff_a_map, coeff_b_map,
+            contract_margin=df.get("margin"),
         )
     else:
         renewal_rt = df["fwd_rt_shocked"].to_numpy()
-    if "rate_type" in df.columns:
-        renewal_rt = renewal_rt.copy()
-        renewal_rt[(df["rate_type"] == "A").to_numpy()] = 0.0
     df["nii_renewal"]  = (
         df["total_capital"]
         * renewal_rt
@@ -414,12 +425,10 @@ def compute_nii_base_schedule(
 
     if "product_code" in df.columns:
         renewal_rt = _apply_rt_limits(renewal_base, df["product_code"],
-                                      caps_map, floors_map, coeff_a_map, coeff_b_map)
+                                      caps_map, floors_map, coeff_a_map, coeff_b_map,
+                                      contract_margin=df.get("margin"))
     else:
         renewal_rt = renewal_base.to_numpy()
-    if "rate_type" in df.columns:
-        renewal_rt = renewal_rt.copy()
-        renewal_rt[(df["rate_type"] == "A").to_numpy()] = 0.0
     df["nii_renewal"] = df["total_capital"] * renewal_rt * df["remain_yf"] * df["sign"]
     df["nii_total"] = df["nii_interest"] + df["nii_renewal"]
 
@@ -534,7 +543,7 @@ def compute_nii_shocked_schedule(
     _contracted_rt_s = (df.get("int_pmt", pd.Series(0.0, index=df.index)).fillna(0.0)
                         / _denom_s).fillna(0.0)
 
-    # eff_rate_shocked: F=contracted (unchanged), V=stable-margin on locked rate, A=0%
+    # eff_rate_shocked: F=contracted (unchanged), V=stable-margin on locked rate, A=rate-model formula
     rate_type_s = df.get("rate_type", pd.Series("V", index=df.index))
     df["eff_rate_shocked"] = _contracted_rt_s                      # F: contracted rate
     mask_var   = rate_type_s == "V"
@@ -549,7 +558,12 @@ def compute_nii_shocked_schedule(
         )
     elif mask_var.any():
         df.loc[mask_var, "eff_rate_shocked"] = fwd_rt_for_interest.loc[mask_var]
-    df.loc[mask_admin, "eff_rate_shocked"] = 0.0
+    if mask_admin.any() and "product_code" in df.columns:        # A: rate-model formula
+        df.loc[mask_admin, "eff_rate_shocked"] = _apply_rt_limits(
+            fwd_rt_for_interest.loc[mask_admin], df.loc[mask_admin, "product_code"],
+            caps_map, floors_map, coeff_a_map, coeff_b_map,
+            contract_margin=df.loc[mask_admin, "margin"] if "margin" in df.columns else None,
+        )
 
     df["sign"] = np.where(df["bs_side"] == "A", 1.0, -1.0)
     df["nii_interest"] = (
@@ -586,10 +600,10 @@ def compute_nii_shocked_schedule(
         renewal_rt_shocked = _apply_rt_limits(
             fwd_rt_for_renewal, df["product_code"],
             caps_map, floors_map, coeff_a_map, coeff_b_map,
+            contract_margin=df.get("margin"),
         )
     else:
         renewal_rt_shocked = fwd_rt_for_renewal.to_numpy()
-    renewal_rt_shocked[mask_admin.to_numpy()] = 0.0
     df["nii_renewal"]   = (
         df["total_capital"] * renewal_rt_shocked * df["remain_yf"] * df["sign"]
     )
@@ -665,12 +679,10 @@ def compute_nii_base(
         renewal_rt = _apply_rt_limits(
             renewal_base, df["product_code"],
             caps_map, floors_map, coeff_a_map, coeff_b_map,
+            contract_margin=df.get("margin"),
         )
     else:
         renewal_rt = renewal_base.to_numpy()
-    if "rate_type" in df.columns:
-        renewal_rt = renewal_rt.copy()
-        renewal_rt[(df["rate_type"] == "A").to_numpy()] = 0.0
 
     df["nii_renewal"] = (
         df["total_capital"] * renewal_rt * df["remain_yf"] * df["sign"]

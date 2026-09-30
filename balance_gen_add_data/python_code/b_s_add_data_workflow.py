@@ -1,7 +1,11 @@
 import pandas as pd
 import os
+import sys
 import b_s_add_data_objects as bs_objs
 import sql_setup
+
+sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')))
+from labbank_common import rate_models
 
 if __name__ == "__main__":
     report_date = pd.to_datetime('2026-06-30')
@@ -16,7 +20,7 @@ if __name__ == "__main__":
 
     mode = 0
     sql_setup._ensure_schemas()
-    sql_setup.reset_data_models(mode, report_date, ['models_loan', 'models_deposit_ir', 'models_deposit_liq'])
+    sql_setup.reset_data_models(mode, report_date, ['models_loan', 'models_deposit_ir', 'models_deposit_liq', 'models_rate'])
 
     sql_setup.reset_data_remove_always(["mkt.curves", "mkt.fixings", "sched.loans", "sched.fin_inst", "sched.deposits"])
 
@@ -40,6 +44,11 @@ if __name__ == "__main__":
 
     df_loan_beh = bs_objs.loan_beh_models_job(loan_file_name)
     sql_setup.append_df_to_table(df_loan_beh, 'models_loan')
+
+###client-rate model (beta / margin / floors / caps per product) -> bs.models_rate
+######################
+    df_rate = rate_models.read_rate_excel(path=rate_models.EXCEL_PATH)
+    sql_setup.append_df_to_table(df_rate, 'models_rate')
 
 
 #### create sched id tables

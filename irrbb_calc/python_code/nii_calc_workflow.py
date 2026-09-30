@@ -45,27 +45,17 @@ DISC_CURVE_MAP = {
     "USD": "USD_disc_curve"
 }
 
-_ir_df = pd.read_excel("../balance_generate/input_data/interest_rt.xlsx")
-CAPS_MAP: dict[str, float] = {
-    str(int(r["product_code"])): float(r["client_cap"])
-    for _, r in _ir_df.iterrows()
-    if "client_cap" in _ir_df.columns and not pd.isna(r.get("client_cap"))
-}
-FLOORS_MAP: dict[str, float] = {
-    str(int(r["product_code"])): float(r["client_floor"])
-    for _, r in _ir_df.iterrows()
-    if "client_floor" in _ir_df.columns and not pd.isna(r.get("client_floor"))
-}
-COEFF_A_MAP: dict[str, float] = {
-    str(int(r["product_code"])): float(r["beta"])
-    for _, r in _ir_df.iterrows()
-    if "beta" in _ir_df.columns and not pd.isna(r.get("beta")) and float(r["beta"]) != 1.0
-}
-COEFF_B_MAP: dict[str, float] = {
-    str(int(r["product_code"])): float(r["margin_pct"]) / 100.0
-    for _, r in _ir_df.iterrows()
-    if "margin_pct" in _ir_df.columns and not pd.isna(r.get("margin_pct")) and float(r["margin_pct"]) != 0.0
-}
+# Per-product client-rate model (beta, spread, floors, caps) from bs.models_rate --
+# same source as the CF engine and the NII/EVE fast layer (labbank_common.rate_models)
+import sys
+sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")))
+from labbank_common import rate_models
+CAPS_MAP, FLOORS_MAP, COEFF_A_MAP, COEFF_B_MAP = rate_models.rate_maps(
+    rate_models.load_rate_models(
+        sql_setup.engine, config.report_date,
+        required_codes=rate_models.deposit_product_codes(sql_setup.engine),
+    )
+)
 
 # ── 0. Load Tier 1 capital ────────────────────────────────────────────────────
 TIER1_CAPITAL = sql_setup.load_tier1_capital(config.report_date)

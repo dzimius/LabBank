@@ -26,7 +26,8 @@ def balance_transactions(context) -> MaterializeResult:
     description=(
         "Load market data and build schedule ID tables. "
         "Writes mkt.curves, mkt.fixings, sched.loans, sched.deposits, "
-        "sched.fin_inst, and schemat.models_* behavioral models."
+        "sched.fin_inst, and the bs.models_* behavioral models "
+        "(prepayment, NMD decay, client-rate model bs.models_rate)."
     ),
 )
 def balance_add_data(context) -> MaterializeResult:

@@ -30,6 +30,9 @@ sys.path.insert(0, BASE_DIR)
 
 import sql_setup as opt_sql
 
+sys.path.insert(0, os.path.normpath(ROOT_DIR))
+from labbank_common import rate_models  # noqa: E402
+
 engine = opt_sql.engine
 
 # ── configuration ──────────────────────────────────────────────────────────────
@@ -42,7 +45,6 @@ HORIZON_END     = REPORT_DATE + pd.Timedelta(days=HORIZON_DAYS)
 HORIZON_30D_END = REPORT_DATE + pd.Timedelta(days=HORIZON_30D)
 
 BS_PATH       = os.path.join(ROOT_DIR, "balance_generate", "input_data", "bank_data.xlsx")
-INTEREST_PATH = os.path.join(ROOT_DIR, "balance_generate", "input_data", "interest_rt.xlsx")
 NPZ_OUT       = os.path.join(BASE_DIR, "..", "output", "product_params.npz")
 EXCEL_OUT     = os.path.join(BASE_DIR, "..", "output", "params_inspection.xlsx")
 
@@ -141,11 +143,13 @@ def _load_bs_structure() -> pd.DataFrame:
 
 
 def _load_rate_coefficients() -> pd.DataFrame:
-    df = pd.read_excel(INTEREST_PATH)
-    df["product_code"] = df["product_code"].astype(str)
-    df = df.rename(columns={"beta": "coeff_a", "margin_pct": "coeff_b"})
-    df["coeff_b"] = df["coeff_b"] / 100.0  # Excel stores percent (e.g. 0.50 = 50bps); convert to decimal
-    return df.set_index("product_code")
+    """Client-rate model from bs.models_rate (labbank_common.rate_models), indexed by
+    product_code str. coeff_b = product-level spread (decimal), NaN where the
+    contract margin applies instead."""
+    rm = rate_models.load_rate_models(engine, REPORT_DATE)
+    df = rm.rename(columns={"beta": "coeff_a"})
+    df["coeff_b"] = rate_models.product_spread(rm)
+    return df
 
 
 def _load_fin_data() -> dict:
@@ -496,11 +500,12 @@ def _analytical_monthly_profile(
 
 
 def _load_cohort_float_margins() -> dict:
-    """Outstanding-weighted average margin per cohort for FLOATING products.
+    """Outstanding-weighted average margin (spread) per cohort.
 
-    margin is stored directly in cf.products as the per-CF origination spread.
+    margin is stored directly in cf.products as the per-CF effective spread
+    (product-level margin_pct when set, else the contract margin).
     Returns dict: (product_code, bs_side, currency, start_year, start_month) -> wavg_margin
-    Only cohort products are included; fixed-rate cohorts will simply not be looked up.
+    Used for the floating-period rate and for the renewal rate of every cohort.
     """
     q = text(f"""
         SELECT
@@ -1219,7 +1224,8 @@ def _load_cohort_effective_nii_tables(
             ISNULL(CAST(p.beh_capital_pmt AS FLOAT), 0.0)
               + ISNULL(CAST(p.prepayment_pmt AS FLOAT), 0.0) AS capital,
             ISNULL(CAST(p.beh_interest_pmt AS FLOAT), 0.0) AS interest,
-            ISNULL(CAST(p.fwd_rt AS FLOAT), 0.0) AS base_fwd
+            ISNULL(CAST(p.fwd_rt AS FLOAT), 0.0) AS base_fwd,
+            CAST(p.margin AS FLOAT) AS contract_margin
         FROM cf.products p
         JOIN sched_key s ON CAST(p.schedule_id AS VARCHAR(8)) = s.schedule_id
                          AND p.product_type = s.src
@@ -1256,7 +1262,10 @@ def _load_cohort_effective_nii_tables(
 
     pcs = df["product_code"].astype(str)
     a_v = pcs.map(ir_coeff["coeff_a"].to_dict()).fillna(1.0).to_numpy(dtype=float)
-    b_v = pcs.map(ir_coeff["coeff_b"].to_dict()).fillna(0.0).to_numpy(dtype=float)
+    # renewal spread: product-level spread when set, else the contract's own margin
+    b_v = pcs.map(ir_coeff["coeff_b"].dropna().to_dict()).to_numpy(dtype=float)
+    b_v = np.where(np.isnan(b_v), pd.to_numeric(df["contract_margin"], errors="coerce").to_numpy(dtype=float), b_v)
+    b_v = np.nan_to_num(b_v, nan=0.0)
     floor_v = pcs.map(
         ir_coeff["client_floor"].dropna().to_dict()
         if "client_floor" in ir_coeff.columns else {}
@@ -1430,7 +1439,8 @@ def _query_cohort_cf_schedule() -> pd.DataFrame:
             ISNULL(CAST(p.beh_outstanding AS FLOAT), 0.0) AS outstanding,
             ISNULL(CAST(p.beh_capital_pmt AS FLOAT), 0.0)
               + ISNULL(CAST(p.prepayment_pmt AS FLOAT), 0.0) AS capital,
-            ISNULL(CAST(p.beh_interest_pmt AS FLOAT), 0.0) AS interest
+            ISNULL(CAST(p.beh_interest_pmt AS FLOAT), 0.0) AS interest,
+            CAST(p.margin AS FLOAT) AS contract_margin
         FROM cf.products p
         JOIN sched_key s ON CAST(p.schedule_id AS VARCHAR(8)) = s.schedule_id
                          AND CAST(p.product_type AS VARCHAR(1)) = s.src
@@ -1484,6 +1494,11 @@ def _compute_cohort_eve_pv(
 
     pcs = df["product_code"].astype(str)
     a_v = pcs.map(ir_coeff["coeff_a"].to_dict()).fillna(1.0).to_numpy(dtype=float)
+    # spread for administered (A) rates: product-level spread, else contract margin
+    b_v = pcs.map(ir_coeff["coeff_b"].dropna().to_dict()).to_numpy(dtype=float)
+    if "contract_margin" in df.columns:
+        b_v = np.where(np.isnan(b_v), pd.to_numeric(df["contract_margin"], errors="coerce").to_numpy(dtype=float), b_v)
+    b_v = np.nan_to_num(b_v, nan=0.0)
     floor_v = pcs.map(
         ir_coeff["client_floor"].dropna().to_dict()
         if "client_floor" in ir_coeff.columns else {}
@@ -1616,7 +1631,9 @@ def _compute_cohort_eve_pv(
             lock_var = locked & is_var
             if lock_var.any():
                 int_s[lock_var] = interest[lock_var]
-            int_s[is_admin] = 0.0
+            if is_admin.any():   # administered rate: rate-model formula on the shocked index
+                adm_rt = np.minimum(cap_v, np.maximum(floor_v, a_v * fwd_sh + b_v))
+                int_s[is_admin] = outstanding[is_admin] * adm_rt[is_admin] * cf_yf[is_admin]
             df_end = _lookup_df(scen, df["cf_end_dt"])
 
         pv = (capital + int_s) * df_end
@@ -1975,7 +1992,7 @@ def build_product_params() -> None:
     subst_df = _load_subst_matrix()
     print(f"  {len(subst_df)} substitution pairs loaded")
 
-    print("Loading interest_rt.xlsx...")
+    print("Loading client-rate model (bs.models_rate)...")
     ir_coeff = _load_rate_coefficients()
 
     # ── cohort data ───────────────────────────────────────────────────────────
@@ -3043,8 +3060,9 @@ def build_product_params() -> None:
             ci  = _ccy_idx[i]
             ca  = _ca_arr[i];  cb = _cb_arr[i]
             fl  = _fl_arr[i];  cp = _cp_arr[i]
-            # use cohort-specific weighted margin if available; fall back to product coeff_b
-            if all_rows[i].get("is_cohort") and str(_rt_arr[i]) != "F":
+            # use cohort-specific weighted margin if available (fixed cohorts too: renewal
+            # is like-for-like incl. the contract margin); fall back to product coeff_b
+            if all_rows[i].get("is_cohort"):
                 ck_i = (str(all_rows[i]["product_code"]), str(all_rows[i]["bs_side"]),
                         str(all_rows[i]["currency"]),
                         int(all_rows[i].get("start_year") or 0),

@@ -162,6 +162,7 @@ def load_beh_schedules(report_date: pd.Timestamp, horizon_end: pd.Timestamp) -> 
             p.cf_end_dt,
             p.cf_yf,
             p.fwd_rt,
+            p.margin,
             p.beh_outstanding                    AS outstanding_bal,
             p.beh_capital_pmt                    AS capital_pmt,
             ISNULL(p.prepayment_pmt, 0.0)        AS prepayment_pmt,
@@ -334,6 +335,7 @@ def load_all_beh_schedules(report_date: pd.Timestamp) -> pd.DataFrame:
             p.cf_end_dt,
             p.cf_yf,
             p.fwd_rt,
+            p.margin,
             p.d_f                                        AS base_df,
             p.beh_outstanding                            AS outstanding_bal,
             p.beh_capital_pmt                            AS capital_pmt,
@@ -604,7 +606,7 @@ def reset_shocked_cf_products(table_name: str, table_type: str = "eve") -> None:
 
     table_type='nii'  — used for cf.products_par_dn:
       remain_yf    — (horizon_end − cf_end_dt) / 365, clipped ≥ 0 (NII horizon = 1 yr)
-      ren_client_rt — renewal client rate = a × fwd_rt + b (per-product transform)
+      ren_client_rt — renewal client rate = a × fwd_rt + b (b = product spread, else contract margin)
       nii_interest — beh_outstanding × client_rt × cf_yf × sign
       nii_renewal  — (beh_capital_pmt + prepayment_pmt) × ren_client_rt × remain_yf × sign
       nii_total    — nii_interest + nii_renewal
@@ -686,7 +688,7 @@ def write_shocked_cf_products(
 
     table_type='nii' (cf.products_par_dn):
       remain_yf     — max(0, horizon_end − cf_end_dt) / 365  [horizon = nii_horizon_yf]
-      ren_client_rt — renewal client rate = a × fwd_rt + b (per-product transform)
+      ren_client_rt — renewal client rate = a × fwd_rt + b (b = product spread, else contract margin)
       nii_interest  — beh_outstanding × client_rt × cf_yf × sign
       nii_renewal   — (beh_capital_pmt + prepayment_pmt) × ren_client_rt × remain_yf × sign
       nii_total     — nii_interest + nii_renewal
@@ -700,6 +702,9 @@ def write_shocked_cf_products(
     if df.empty:
         return
     out = df.copy()
+    # contract spread (cf.products.margin) -- 'margin' is overwritten below with the
+    # analytical client_rt - fwd_rt, so keep the original for the renewal rate
+    _contract_margin = out["margin"].copy() if "margin" in out.columns else None
 
     # ── Fix fwd_rt for periods starting before report_date ───────────────────
     # When cf_start_dt < report_date the shocked curve has no value for that
@@ -909,19 +914,18 @@ def write_shocked_cf_products(
 
         # ren_client_rt: per-product linear transform of fwd_rt at renewal
         #   = a x fwd_rt + b  (new-business formula, no base_eff_rate)
-        # Same transform used by compute_nii_base_schedule / compute_nii_shocked_schedule.
-        # Admin (A) products renew at 0 regardless of market rate.
+        # Same transform used by compute_nii_base_schedule / compute_nii_shocked_schedule
+        # (b = product spread, else the contract's own margin; A products follow the
+        # same rate-model formula -- current accounts have beta=0 → 0%).
         if "product_code" in out.columns:
             _ren_rt = _apply_rt_limits(
                 _fwd_ren, out["product_code"],
                 caps_map=caps_map, floors_map=floors_map,
                 coeff_a_map=coeff_a_map, coeff_b_map=coeff_b_map,
+                contract_margin=_contract_margin,
             )
         else:
             _ren_rt = _fwd_ren.copy()
-        if "rate_type" in out.columns:
-            _ren_rt = _ren_rt.copy()
-            _ren_rt[(out["rate_type"] == "A").to_numpy()] = 0.0
         out["ren_client_rt"] = _ren_rt
 
         # ── client_rt override for future-start variable base CFs ────────────────

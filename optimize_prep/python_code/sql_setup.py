@@ -93,7 +93,7 @@ ProductParams = Table(
     Column("inflow_30d_frac",   DECIMAL(8, 4),  nullable=True),   # 30-day inflow / balance (assets)
     Column("amort_frac_1y",     DECIMAL(8, 4),  nullable=True),   # 1Y capital repayment / balance
     Column("repricing_tenor_m", DECIMAL(8, 2),  nullable=True),   # months to first repricing
-    # From interest_rt.xlsx
+    # From the client-rate model (bs.models_rate)
     Column("coeff_a",           DECIMAL(8, 4),  nullable=True),   # rate pass-through coefficient
     Column("coeff_b",           DECIMAL(10, 6), nullable=True),   # spread (decimal, not bps)
     Column("client_floor",      DECIMAL(10, 6), nullable=True),   # client rate floor

@@ -1,5 +1,6 @@
 import pandas as pd
 import os
+import sys
 import sql_setup
 import config
 import datetime as dt
@@ -39,15 +40,15 @@ models_loan        = sql_setup.sql_select_models_loan()
 models_deposit_ir  = sql_setup.sql_select_models_deposit_ir()
 models_deposit_liq = sql_setup.sql_select_models_deposit_liq()
 
-# Load floor parameters per product from interest_rt.xlsx
-_ir_df = pd.read_excel('../balance_generate/input_data/interest_rt.xlsx')
-ir_params = {}
-for _, _r in _ir_df.iterrows():
-    pc = int(_r['product_code'])
-    ir_params[pc] = {
-        'index_floor': float(_r['index_floor']) if 'index_floor' in _ir_df.columns and not pd.isna(_r['index_floor']) else None,
-        'client_floor': float(_r['client_floor']) if 'client_floor' in _ir_df.columns and not pd.isna(_r['client_floor']) else None,
-    }
+# Client-rate model per product (beta, spread, floors, caps) from bs.models_rate --
+# every deposit product must have a row (no silent beta=1 default).
+sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')))
+from labbank_common import rate_models
+_rm = rate_models.load_rate_models(
+    sql_setup.engine, config.report_date,
+    required_codes=rate_models.deposit_product_codes(sql_setup.engine),
+)
+ir_params = rate_models.cf_params(_rm)
 
 disc_df = (
     disc_curves
@@ -155,8 +156,7 @@ for table_name in cf_obj.dict_cols_loan_fin_inst.keys():
 
         else:
             # fin_inst: beh = orig (no behavioural adjustment)
-            fin_inst_df = batch_df.drop(columns=['_is_annuity', 'margin', 'client_rt'],
-                                        errors='ignore')
+            fin_inst_df = batch_df.drop(columns=['_is_annuity'], errors='ignore')
             merged = cf_obj.merge_cf_orig_beh(fin_inst_df, fin_inst_df, how='inner')
 
         merged = _add_sched_meta(merged, df_in, product_type)

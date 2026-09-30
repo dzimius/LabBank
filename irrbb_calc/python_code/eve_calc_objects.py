@@ -223,7 +223,8 @@ def compute_eve_shocked(
                          fwd_rt_shocked derived from shocked disc curve over the
                          fixing period: (d_f(fixing_dt) / d_f(period_end) − 1) / yf_period
                          so that e.g. a 3M-fixing loan gets a 3M shocked rate.
-    - A (administrative): int_pmt treated as 0% (bank-managed, run-off).
+    - A (administrative): int_pmt at the rate-model formula on the shocked index
+                         (current accounts: beta=0 → 0%).
 
     PV components
     -------------
@@ -285,7 +286,14 @@ def compute_eve_shocked(
             _contracted_rt.loc[mask_var]
             + (df.loc[mask_var, "fwd_rt_shocked"] - df.loc[mask_var, "fwd_rt"].fillna(0.0))
         )
-    df.loc[mask_admin, "eff_rate_shocked"] = 0.0
+    if mask_admin.any() and "product_code" in df.columns:   # A: rate-model formula
+        df.loc[mask_admin, "eff_rate_shocked"] = _apply_rt_limits(
+            df.loc[mask_admin, "fwd_rt_shocked"], df.loc[mask_admin, "product_code"],
+            caps_map, floors_map, coeff_a_map, coeff_b_map,
+            contract_margin=df.loc[mask_admin, "margin"] if "margin" in df.columns else None,
+        )
+    else:
+        df.loc[mask_admin, "eff_rate_shocked"] = 0.0
 
     # ── Interest cash flows under shocked scenario ────────────────────────────
     # F: int_pmt unchanged (contractual); V: recomputed with full client rate; A: 0
@@ -301,7 +309,12 @@ def compute_eve_shocked(
     lock_var = locked_mask & var_idx
     if lock_var.any():
         int_pmt_shocked[lock_var] = df["int_pmt"].fillna(0.0).to_numpy()[lock_var]
-    int_pmt_shocked[mask_admin.to_numpy()] = 0.0
+    _adm = mask_admin.to_numpy()
+    int_pmt_shocked[_adm] = (
+        df.loc[mask_admin, "outstanding_bal"].fillna(0.0).to_numpy()
+        * df.loc[mask_admin, "eff_rate_shocked"].to_numpy(dtype=float)
+        * df.loc[mask_admin, "cf_yf"].fillna(0.0).to_numpy()
+    )
     df["int_pmt_shocked"] = int_pmt_shocked
 
     # ── PV components ─────────────────────────────────────────────────────────
@@ -411,7 +424,14 @@ def compute_eve_shocked_schedule(
             _contracted_rt.loc[mask_var]
             + (df.loc[mask_var, "fwd_rt_shocked"] - df.loc[mask_var, "fwd_rt"].fillna(0.0))
         )
-    df.loc[mask_admin, "eff_rate_shocked"] = 0.0
+    if mask_admin.any() and "product_code" in df.columns:   # A: rate-model formula
+        df.loc[mask_admin, "eff_rate_shocked"] = _apply_rt_limits(
+            df.loc[mask_admin, "fwd_rt_shocked"], df.loc[mask_admin, "product_code"],
+            caps_map, floors_map, coeff_a_map, coeff_b_map,
+            contract_margin=df.loc[mask_admin, "margin"] if "margin" in df.columns else None,
+        )
+    else:
+        df.loc[mask_admin, "eff_rate_shocked"] = 0.0
 
     int_pmt_shocked = df["int_pmt"].fillna(0.0).to_numpy(dtype=float).copy()
     var_idx = mask_var.to_numpy()
@@ -424,7 +444,12 @@ def compute_eve_shocked_schedule(
     lock_var = locked_mask & var_idx
     if lock_var.any():
         int_pmt_shocked[lock_var] = df["int_pmt"].fillna(0.0).to_numpy()[lock_var]
-    int_pmt_shocked[mask_admin.to_numpy()] = 0.0
+    _adm = mask_admin.to_numpy()
+    int_pmt_shocked[_adm] = (
+        df.loc[mask_admin, "outstanding_bal"].fillna(0.0).to_numpy()
+        * df.loc[mask_admin, "eff_rate_shocked"].to_numpy(dtype=float)
+        * df.loc[mask_admin, "cf_yf"].fillna(0.0).to_numpy()
+    )
     df["int_pmt_shocked"] = int_pmt_shocked
 
     df["sign"]          = np.where(df["bs_side"] == "A", 1.0, -1.0)
@@ -533,7 +558,14 @@ def compute_shocked_cf_detail(
             _contracted_rt.loc[mask_var]
             + (df.loc[mask_var, "fwd_rt_shocked"] - df.loc[mask_var, "fwd_rt"].fillna(0.0))
         )
-    df.loc[mask_admin, "eff_rate_shocked"] = 0.0
+    if mask_admin.any() and "product_code" in df.columns:   # A: rate-model formula
+        df.loc[mask_admin, "eff_rate_shocked"] = _apply_rt_limits(
+            df.loc[mask_admin, "fwd_rt_shocked"], df.loc[mask_admin, "product_code"],
+            caps_map, floors_map, coeff_a_map, coeff_b_map,
+            contract_margin=df.loc[mask_admin, "margin"] if "margin" in df.columns else None,
+        )
+    else:
+        df.loc[mask_admin, "eff_rate_shocked"] = 0.0
 
     int_pmt_shocked = df["int_pmt"].fillna(0.0).to_numpy(dtype=float).copy()
     var_idx = mask_var.to_numpy()
@@ -546,7 +578,12 @@ def compute_shocked_cf_detail(
     lock_var = locked_mask & var_idx
     if lock_var.any():
         int_pmt_shocked[lock_var] = df["int_pmt"].fillna(0.0).to_numpy()[lock_var]
-    int_pmt_shocked[mask_admin.to_numpy()] = 0.0
+    _adm = mask_admin.to_numpy()
+    int_pmt_shocked[_adm] = (
+        df.loc[mask_admin, "outstanding_bal"].fillna(0.0).to_numpy()
+        * df.loc[mask_admin, "eff_rate_shocked"].to_numpy(dtype=float)
+        * df.loc[mask_admin, "cf_yf"].fillna(0.0).to_numpy()
+    )
     df["int_pmt_shocked"] = int_pmt_shocked
     df["scenario_id"]     = scenario_id
     return df

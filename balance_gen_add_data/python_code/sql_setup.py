@@ -28,6 +28,7 @@ TABLE_SCHEMAS: dict[str, str] = {
     "models_loan":        "bs",
     "models_deposit_ir":  "bs",
     "models_deposit_liq": "bs",
+    "models_rate":        "bs",
 }
 
 def _ensure_schemas() -> None:
@@ -90,6 +91,20 @@ Depo_mod_liq = Table(
     schema="bs",
 )
 
+# Client-rate model (interest_rt.xlsx) -- see labbank_common/rate_models.py
+Rate_mod = Table(
+    "models_rate", metadata,
+    Column("report_date", Date, nullable=False),
+    Column("product_code", String(4), nullable=False),
+    Column("beta", DECIMAL(18, 6), nullable=False),
+    Column("margin_pct", DECIMAL(18, 6), nullable=True),
+    Column("index_floor", DECIMAL(18, 6), nullable=True),
+    Column("client_floor", DECIMAL(18, 6), nullable=True),
+    Column("index_cap", DECIMAL(18, 6), nullable=True),
+    Column("client_cap", DECIMAL(18, 6), nullable=True),
+    schema="bs",
+)
+
 
 TABLES = {
     "curves":             Curves,
@@ -97,6 +112,7 @@ TABLES = {
     "models_loan":        Loan_mod,
     "models_deposit_ir":  Depo_mod_ir,
     "models_deposit_liq": Depo_mod_liq,
+    "models_rate":        Rate_mod,
 }
 
 def append_df_to_table(df: pd.DataFrame, table_name: str) -> None:

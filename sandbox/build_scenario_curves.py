@@ -350,18 +350,11 @@ def build_hyp_irrbb_metrics_exact(params, sc_data, report_date):
     DISC_MAP    = {"PLN": "PLN_disc_curve", "EUR": "EUR_disc_curve", "USD": "USD_disc_curve"}
     OWN_BPS     = -100.0
 
-    _ir = pd.read_excel(os.path.join(_root, "balance_generate", "input_data", "interest_rt.xlsx"))
-    def _map(col, transform=lambda x: x, skip_if=lambda x: False):
-        out = {}
-        for _, r in _ir.iterrows():
-            v = r.get(col)
-            if col in _ir.columns and not pd.isna(v) and not skip_if(float(v)):
-                out[str(int(r["product_code"]))] = transform(float(v))
-        return out
-    CAPS   = _map("client_cap")
-    FLOORS = _map("client_floor")
-    A_MAP  = _map("beta", skip_if=lambda v: v == 1.0)
-    B_MAP  = _map("margin_pct", transform=lambda v: v / 100.0, skip_if=lambda v: v == 0.0)
+    # client-rate model from bs.models_rate -- same source as the production IRRBB run
+    if _root not in sys.path:
+        sys.path.insert(0, _root)
+    from labbank_common import rate_models as _rm
+    CAPS, FLOORS, A_MAP, B_MAP = _rm.rate_maps(_rm.load_rate_models(_sql.engine, _cfg.report_date))
 
     # CF streams (loaded once)
     eve_beh = _sql.load_all_beh_schedules(_cfg.report_date)

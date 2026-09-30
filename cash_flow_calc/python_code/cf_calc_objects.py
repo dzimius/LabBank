@@ -7,13 +7,20 @@ import numpy as np
 import pandas as pd
 import QuantLib as ql
 
+import os
+import sys
+
 import config
 import sql_setup
+
+sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')))
+from labbank_common import rate_models  # noqa: E402
 
 dict_cols_loan_fin_inst = {
     # balance_amt / init_balance_amt / amort_type pulled for vectorized payment computation
     # product_code links loan schedules to prepayment models (bs.models_loan table)
-    # margin is the per-product spread over the market forward rate (loans only)
+    # margin is the per-contract spread over the market forward rate (loans only); products
+    # with a product-level margin_pct in bs.models_rate use that instead (see rate_models)
     'loans': ['schedule_id', 'currency', 'start_date', 'maturity_date', 'payment_freq',
               'fixing_freq', 'dc_conv', 'b_day_conv', "rate_index", 'disc_curve', 'fwd_curve',
               'balance_amt', 'init_balance_amt', 'amort_type', 'product_code', 'bs_side', 'margin'],
@@ -732,24 +739,26 @@ def compute_amort_schedule_vectorized(
         df['margin'] = np.nan
     df = df.sort_values(['schedule_id', 'cf_end_dt']).reset_index(drop=True)
 
-    # ── Floor parameters from ir_params (index_floor applied to input; client_floor to output) ──
-    df['_idx_fl'] = np.nan
-    df['_cl_fl']  = np.nan
-    if ir_params and 'product_code' in df.columns:
-        def _fl(pc, key):
-            if pd.isna(pc):
-                return np.nan
-            v = ir_params.get(int(pc), {}).get(key)
-            return float(v) if v is not None else np.nan
-        _pc = pd.to_numeric(df['product_code'], errors='coerce')
-        df['_idx_fl'] = [_fl(pc, 'index_floor') for pc in _pc]
-        df['_cl_fl']  = [_fl(pc, 'client_floor') for pc in _pc]
+    # ── Client-rate model per row (labbank_common.rate_models) ────────────────
+    # client_rt = clip(beta * clip(fwd, index_floor, index_cap) + spread, client_floor, client_cap)
+    # spread = product-level margin_pct when set, else the contract margin (loans), else 0.
+    # The effective spread is written back to 'margin' so NII renewal can reuse it.
+    def _param(key, default=np.nan):
+        if not ir_params or 'product_code' not in df.columns:
+            return np.full(len(df), default, dtype=float)
+        pcs = pd.to_numeric(df['product_code'], errors='coerce')
+        vals = [ir_params.get(int(pc), {}).get(key) if not pd.isna(pc) else None for pc in pcs]
+        return np.array([default if v is None else v for v in vals], dtype=float)
 
-    # ── Effective forward rate after applying index floor ────────────────────
-    _eff = df['fwd_rt'].to_numpy(dtype=float)
-    _ifl = df['_idx_fl'].to_numpy(dtype=float)
-    _eff = np.where(np.isnan(_ifl), _eff, np.maximum(_eff, _ifl))
-    df['_eff_fwd'] = _eff
+    _prod_spread = _param('spread')
+    df['margin'] = np.where(np.isnan(_prod_spread),
+                            pd.to_numeric(df['margin'], errors='coerce').fillna(0.0).to_numpy(float),
+                            _prod_spread)
+    _rate_kw = dict(beta=_param('beta', 1.0), index_floor=_param('index_floor'),
+                    index_cap=_param('index_cap'), client_floor=_param('client_floor'),
+                    client_cap=_param('client_cap'))
+    df['_client_rt'] = rate_models.client_rate(df['fwd_rt'].to_numpy(dtype=float),
+                                               df['margin'].to_numpy(dtype=float), **_rate_kw)
 
     df['amort_type'] = pd.to_numeric(df['amort_type'], errors='coerce').fillna(0).astype(int)
 
@@ -786,9 +795,7 @@ def compute_amort_schedule_vectorized(
             # C_k = A - O_k * fwd_rt_k * cf_yf_k     → capital + int_pmt == A
             def _exact_annuity_group(group: pd.DataFrame) -> pd.DataFrame:
                 group = group.sort_values('cf_end_dt').reset_index(drop=True)
-                fwd        = group['_eff_fwd'].to_numpy(dtype=float)
-                margin_val = float(group['margin'].fillna(0.0).iloc[0])
-                client_rt  = fwd + margin_val
+                client_rt  = group['_client_rt'].to_numpy(dtype=float)
                 yf         = group['cf_yf'].to_numpy(dtype=float)
                 fixing_dt  = group['fixing_dt'].to_numpy()
                 B          = float(group['balance_amt'].iloc[0])
@@ -844,7 +851,7 @@ def compute_amort_schedule_vectorized(
             # closed-form O(k) = B*(1+r)^k - A*((1+r)^k-1)/r  (pure numpy power)
             # capital = A - O*r_const  (consistent with O formula)
             # int_pmt computed from actual client_rt at the end  → capital+int ≠ A
-            fwd1     = (df.loc[m1, '_eff_fwd'] + df.loc[m1, 'margin'].fillna(0.0)).to_numpy(dtype=float)
+            fwd1     = df.loc[m1, '_client_rt'].to_numpy(dtype=float)
             yf1      = df.loc[m1, 'cf_yf'].to_numpy(dtype=float)
             n1       = df.loc[m1, '_n'].to_numpy(dtype=float)
             B1       = df.loc[m1, 'balance_amt'].to_numpy(dtype=float)
@@ -871,14 +878,7 @@ def compute_amort_schedule_vectorized(
             df.loc[m1, 'capital_pmt']     = C1
             df.loc[m1, 'annuity_pmt']     = A1
 
-    # ── client_rt = eff_fwd + margin, then apply client_floor if set ─────────
-    df['client_rt'] = df['_eff_fwd'] + df['margin'].fillna(0.0)
-    _cl = df['_cl_fl'].to_numpy(dtype=float)
-    df['client_rt'] = np.where(
-        np.isnan(_cl),
-        df['client_rt'].to_numpy(float),
-        np.maximum(df['client_rt'].to_numpy(float), _cl),
-    )
+    df['client_rt'] = df['_client_rt']
 
     # ── Interest for all amort types ──────────────────────────────────────────
     df['int_pmt'] = df['outstanding_bal'] * df['client_rt'] * df['cf_yf']
@@ -888,7 +888,7 @@ def compute_amort_schedule_vectorized(
     df['annuity_pmt'] = df['annuity_pmt'].fillna(df['capital_pmt'] + df['int_pmt'])
     df = df.rename(columns={'annuity_pmt': 'total_pmt'})
 
-    drop_cols = ['_rank', '_n', '_is_last', 'balance_amt', 'amort_type', '_eff_fwd', '_idx_fl', '_cl_fl']
+    drop_cols = ['_rank', '_n', '_is_last', 'balance_amt', 'amort_type', '_client_rt']
     if 'product_code' in df.columns:
         drop_cols.append('product_code')
     df = df.drop(columns=drop_cols)

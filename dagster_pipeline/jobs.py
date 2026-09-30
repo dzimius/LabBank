@@ -142,6 +142,30 @@ labbank_data_job = define_asset_job(
     ),
 )
 
+# ── From existing SQL data (e.g. a bank's own positions) ──────────────────────
+# Skips balance generation and the add_data stage entirely: assumes dbo/schemat.*
+# positions, mkt.curves / mkt.fixings, sched.* and the bs.models_* behavioural
+# models -- including the client-rate model bs.models_rate -- are already in SQL.
+recalc_from_sql_job = define_asset_job(
+    name="recalc_from_sql_job",
+    selection=AssetSelection.assets(
+        cash_flows,
+        ir_swaps,
+        nii_results,
+        eve_results,
+        eba_sot_results,
+        lcr_nsfr_results,
+        optimize_prep_tensors,
+        hyp_scenario_curves,
+    ),
+    description=(
+        "Recompute everything downstream of the data already in SQL: cash flows → "
+        "IRS → IRRBB (NII, EVE, EBA SOT) + LCR/NSFR → optimize_prep + sandbox curves. "
+        "Use when positions, market data and behavioural / rate models were loaded "
+        "straight into SQL (no Excel inputs, no synthetic generation)."
+    ),
+)
+
 all_jobs = [
     balance_sheet_job,
     full_run_job,
@@ -150,4 +174,5 @@ all_jobs = [
     liq_only_job,
     optimize_prep_job,
     labbank_data_job,
+    recalc_from_sql_job,
 ]

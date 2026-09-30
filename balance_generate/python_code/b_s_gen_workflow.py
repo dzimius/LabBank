@@ -1,10 +1,14 @@
 import pandas as pd
 import os
+import sys
 from b_s_gen_objects import ProductFactory, compute_deposit_client_rt, compute_asset_rates
 from sqlalchemy import create_engine
 import config
 import sql_setup
 from sqlalchemy import text
+
+sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')))
+from labbank_common import rate_models
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(BASE_DIR)
@@ -25,10 +29,11 @@ df_bs_struct['balance_amt'] = full_balance_amt * df_bs_struct['bs_percentage'] /
 df_bs_struct['amort_type'] = df_bs_struct['amort_type'].astype('Int64')
 df_result = df_bs_struct.merge(df_client_t, on='client_type_id', how='left')
 
-# Load interest rate formula file and historical fixings
-# interest_rt.xlsx columns: product_code, beta, margin_pct (% points), index_floor, client_floor, client_cap
-# rate_index per product is taken from bank_data_only_dep.xlsx (already loaded as df_bs_struct)
-interest_rt = pd.read_excel('input_data/interest_rt.xlsx')
+# Client-rate model (beta, margin_pct, floors, caps per product) and historical fixings.
+# The model lives with the other behavioural models in balance_gen_add_data/input and is
+# loaded into SQL (bs.models_rate) by the add_data stage; generation reads the Excel
+# directly because it runs before add_data. rate_index per product comes from bank_data.xlsx.
+interest_rt = rate_models.read_rate_excel(config.report_date).reset_index()
 fixing_file = '../balance_gen_add_data/input/fixing_input.xlsx'
 fixings_raw = pd.read_excel(fixing_file)
 fixings_raw = fixings_raw.rename(columns={'date': 'fixing_date'})

@@ -19,7 +19,8 @@ jobs:
         # The optimize_prep fast-approximation layer and its tests are pure
         # NumPy — no SQL Server, no pandas, no QuantLib. Keep this minimal so
         # the check stays fast and green without the full pipeline stack.
-        run: pip install numpy pytest
+        # labbank_common's rate-model tests add pandas + openpyxl (Excel input check).
+        run: pip install numpy pandas openpyxl pytest
 
-      - name: Run fast-approximation test suite
-        run: pytest optimize_prep/tests/ -q
+      - name: Run test suites
+        run: pytest optimize_prep/tests/ labbank_common/tests/ -q

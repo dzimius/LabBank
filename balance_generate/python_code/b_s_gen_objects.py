@@ -11,6 +11,11 @@ from scipy.stats import truncnorm
 
 import config
 
+import os as _os
+import sys as _sys
+_sys.path.insert(0, _os.path.normpath(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)), '..', '..')))
+from labbank_common import rate_models  # noqa: E402
+
 ##### pozniej mozna przy zwyklym kodzie dodac context i tam krzywe, report date itp, to chat pokazywal jako ustawienie
 ##### w klasach
 
@@ -1151,13 +1156,14 @@ def compute_deposit_client_rt(
     """Add client_rt column (decimal) to deposit rows in all_tx.
 
     Formula per product:
-      client_rt = clip(beta * max(market_rate, index_floor) + margin_pct/100, client_floor, client_cap)
+      client_rt = rate_models.client_rate(market_rate, margin_pct/100, beta, floors/caps)
       - Fixed deposits (rate_type='F'):   market_rate = fixing at start_date
       - Other deposits (rate_type='A/V'): market_rate = fixing at report_date (instant repricing)
       - If beta=0: client_rt = margin_pct/100 (e.g. 0% for current accounts)
 
     interest_rt columns : product_code, beta, margin_pct (in % points; blank = 0),
-                          index_floor, client_floor, client_cap (decimals; blank = none)
+                          index_floor, client_floor, index_cap, client_cap (decimals; blank = none)
+                          -- see labbank_common/rate_models.py
     bs_struct columns   : product_code, rate_index (rate_index already encodes the tenor,
                           e.g. 'PLN_BID_6M'); add rate_index for any deposit product with beta != 0
     fixings columns     : fixing_date, rate_index, rate (in % points), ...
@@ -1220,47 +1226,16 @@ def compute_deposit_client_rt(
         b_pct = float(row_ir['margin_pct'])   # percentage points, e.g. 0.5 → 0.005 in decimal
         if np.isnan(b_pct):
             b_pct = 0.0
-
-        # Floor parameters — at most one of index_floor / client_floor may be set
-        index_floor = (
-            float(row_ir['index_floor'])
-            if 'index_floor' in row_ir.index and not pd.isna(row_ir['index_floor'])
-            else None
-        )
-        client_floor = (
-            float(row_ir['client_floor'])
-            if 'client_floor' in row_ir.index and not pd.isna(row_ir['client_floor'])
-            else None
-        )
-        client_cap = (
-            float(row_ir['client_cap'])
-            if 'client_cap' in row_ir.index and not pd.isna(row_ir['client_cap'])
-            else None
-        )
-        if index_floor is not None and client_floor is not None:
-            raise ValueError(
-                f"product_code {pc}: both index_floor and client_floor are set in "
-                "interest_rt.xlsx. Only one floor type is allowed per product."
-            )
-
-        def _apply_floor_cap(result: float) -> float:
-            """Apply client_floor / client_cap to the output rate."""
-            if client_floor is not None:
-                result = max(result, client_floor)
-            if client_cap is not None:
-                result = min(result, client_cap)
-            return result
+        _lim = {k: float(row_ir[k]) for k in ('index_floor', 'index_cap', 'client_floor', 'client_cap')}
 
         def _apply_floor(mkt_rate_dec: float) -> float:
-            """Apply index_floor (to input), then client_floor / client_cap (to output)."""
-            if index_floor is not None:
-                mkt_rate_dec = max(mkt_rate_dec, index_floor)
-            return _apply_floor_cap(a * mkt_rate_dec + b_pct / 100.0)
+            """Shared client-rate formula (labbank_common.rate_models.client_rate)."""
+            return float(rate_models.client_rate(mkt_rate_dec, b_pct / 100.0, a, **_lim))
 
         pc_mask = deposit_mask & (all_tx['product_code'].astype(int) == pc)
 
         if a == 0.0:
-            all_tx.loc[pc_mask, 'client_rt'] = _apply_floor_cap(b_pct / 100.0)
+            all_tx.loc[pc_mask, 'client_rt'] = _apply_floor(0.0)
             # index_rt stays NaN (no market rate dependency)
             continue
 
@@ -1315,17 +1290,22 @@ def compute_asset_rates(
     index_rt = effective index rate for this contract (decimal):
       - Floating (rate_type='V'): fixing at report_date  (reprices with market)
       - Fixed    (rate_type='F'): fixing at start_date   (locked at origination)
-    client_rt = beta * max(index_rt, index_floor) + margin_pct/100
-      beta, margin_pct from interest_rt.xlsx (margin_pct in % points); default beta=1, margin_pct=0.
+    client_rt = rate_models.client_rate(index_rt, spread, beta, limits) -- the all-in rate:
+      spread = margin_pct/100 when the product has one (set and != 0), else the contract
+      margin drawn at generation (loans) or 0.
     """
     asset_names = {
         'mortgage_fixed', 'mortgage_float', 'cash_loan_fixed', 'cash_loan_float',
         'investment_loan_fixed', 'investment_loan_float', 'bond_fixed', 'bond_float',
         'issued_bond', 'term_deposit',
     }
-    asset_mask = all_tx['product_name'].isin(asset_names)
+    # liability-side term deposits are priced by compute_deposit_client_rt
+    asset_mask = (all_tx['product_name'].isin(asset_names)
+                  & ~((all_tx['product_name'] == 'term_deposit') & (all_tx['bs_side'] == 'L')))
 
     all_tx = all_tx.copy()
+    if 'margin' not in all_tx.columns:
+        all_tx['margin'] = np.nan
     if 'index_rt' not in all_tx.columns:
         all_tx['index_rt'] = np.nan
     if 'client_rt' not in all_tx.columns:
@@ -1373,38 +1353,28 @@ def compute_asset_rates(
 
         rate_index = pc_bs_to_rate_index[key]
 
-        # Rate formula parameters from interest_rt (same convention as deposit products)
-        index_floor = None
-        a     = 1.0
-        b_dec = 0.0
+        # Rate model row (labbank_common.rate_models); products absent from the
+        # model default to beta=1, no product spread, no limits.
+        a, b_pct = 1.0, np.nan
+        lim = dict(index_floor=np.nan, index_cap=np.nan, client_floor=np.nan, client_cap=np.nan)
         if pc in ir.index:
             row_ir = ir.loc[pc]
-            if 'index_floor' in row_ir.index and not pd.isna(row_ir.get('index_floor', np.nan)):
-                index_floor = float(row_ir['index_floor'])
-            if 'beta' in row_ir.index and not pd.isna(row_ir.get('beta', np.nan)):
-                a = float(row_ir['beta'])
-            if 'margin_pct' in row_ir.index and not pd.isna(row_ir.get('margin_pct', np.nan)):
-                b_dec = float(row_ir['margin_pct']) / 100.0   # % points → decimal
+            a = float(row_ir['beta'])
+            b_pct = float(row_ir['margin_pct'])
+            lim = {k: float(row_ir[k]) for k in lim}
 
-        def _client_rt(index_rt_dec: float) -> float:
-            floored = max(index_rt_dec, index_floor) if index_floor is not None else index_rt_dec
-            return a * floored + b_dec
+        # Spread: a product-level margin_pct (set and != 0) replaces the contract
+        # margin drawn at generation; otherwise the contract keeps its own margin.
+        if not np.isnan(b_pct) and b_pct != 0.0:
+            all_tx.loc[pc_mask, 'margin'] = b_pct / 100.0
+        spread = pd.to_numeric(all_tx.loc[pc_mask, 'margin'], errors='coerce').fillna(0.0)
 
         float_mask = pc_mask & (all_tx['rate_type'] == 'V')
         fixed_mask = pc_mask & (all_tx['rate_type'] == 'F')
 
-        # Override per-contract margin with product-level b from interest_rt
-        if 'margin' in all_tx.columns and b_dec != 0.0:
-            all_tx.loc[pc_mask, 'margin'] = b_dec
-
-        # Floating: index_rt = fixing at report_date; client_rt = a * max(index_rt, floor) + b
+        # index_rt: floating = fixing at report_date, fixed = fixing at start_date (locked)
         if float_mask.any():
-            float_val = _get_fixing_dec(rate_index, report_ts)
-            all_tx.loc[float_mask, 'index_rt']  = float_val
-            if not np.isnan(float_val):
-                all_tx.loc[float_mask, 'client_rt'] = _client_rt(float_val)
-
-        # Fixed: index_rt = fixing at start_date; client_rt = a * max(index_rt, floor) + b
+            all_tx.loc[float_mask, 'index_rt'] = _get_fixing_dec(rate_index, report_ts)
         if fixed_mask.any():
             unique_starts = all_tx.loc[fixed_mask, 'start_date'].dropna().unique()
             start_to_rt = {}
@@ -1414,13 +1384,15 @@ def compute_asset_rates(
                 # source column carries datetime64 with a nonzero time part.
                 sd_ts = pd.Timestamp(sd).normalize()
                 start_to_rt[sd_ts] = _get_fixing_dec(rate_index, sd_ts)
-            index_rt_s = all_tx.loc[fixed_mask, 'start_date'].apply(
+            all_tx.loc[fixed_mask, 'index_rt'] = all_tx.loc[fixed_mask, 'start_date'].apply(
                 lambda d: start_to_rt.get(pd.Timestamp(d).normalize(), np.nan) if pd.notna(d) else np.nan
-            )
-            all_tx.loc[fixed_mask, 'index_rt']  = index_rt_s.values
-            all_tx.loc[fixed_mask, 'client_rt'] = index_rt_s.apply(
-                lambda rt: _client_rt(rt) if not np.isnan(rt) else np.nan
             ).values
+
+        # client_rt = full all-in rate (index formula + spread), same formula as the CF engine
+        rate_mask = float_mask | fixed_mask
+        idx_vals = all_tx.loc[rate_mask, 'index_rt'].to_numpy(dtype=float)
+        rt = rate_models.client_rate(idx_vals, spread.reindex(all_tx.index[rate_mask]).to_numpy(dtype=float), a, **lim)
+        all_tx.loc[rate_mask, 'client_rt'] = np.where(np.isnan(idx_vals), np.nan, rt)
 
     return all_tx
 
