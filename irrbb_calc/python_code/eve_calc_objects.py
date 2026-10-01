@@ -513,8 +513,8 @@ def compute_shocked_cf_detail(
     """Return row-level CF schedule enriched with shocked fwd_rt, d_f, and int_pmt.
 
     Same shock logic as compute_eve_shocked_schedule() but returns individual
-    CF rows (no groupby).  Used to populate cf.products_par_dn and
-    cf.products_worst_eve SQL tables so shocked cash flows can be compared
+    CF rows (no groupby).  Used to populate the analytical cf.eve_*_scenarios
+    and cf.nii_*_scenarios SQL tables so shocked cash flows can be compared
     directly against the base cf.products table.
 
     Columns added

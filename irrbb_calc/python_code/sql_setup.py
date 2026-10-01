@@ -600,11 +600,11 @@ def _assign_tenor_bucket(cf_end_dt: pd.Series, report_date: pd.Timestamp) -> pd.
 def reset_shocked_cf_products(table_name: str, table_type: str = "eve") -> None:
     """Drop and recreate cf.[table_name] with shocked CF schedule schema.
 
-    table_type='eve'  — used for cf.products_worst_eve:
+    table_type='eve'  — used for cf.eve_{base,par,short,step_flat,own}_scenarios:
       pv_capital   — (capital + prepayment) × d_f_shocked × sign
       pv_interest  — beh_interest_pmt × d_f_shocked × sign
 
-    table_type='nii'  — used for cf.products_par_dn:
+    table_type='nii'  — used for cf.nii_{base,par,own}_scenarios:
       remain_yf    — (horizon_end − cf_end_dt) / 365, clipped ≥ 0 (NII horizon = 1 yr)
       ren_client_rt — renewal client rate = a × fwd_rt + b (b = product spread, else contract margin)
       nii_interest — beh_outstanding × client_rt × cf_yf × sign
@@ -682,11 +682,11 @@ def write_shocked_cf_products(
     Expects df to contain the columns produced by
     eve_calc_objects.compute_shocked_cf_detail().
 
-    table_type='eve' (default, cf.products_worst_eve):
+    table_type='eve' (default, cf.eve_*_scenarios):
       pv_capital    — (capital + prepayment) × d_f_shocked × sign
       pv_interest   — int_pmt_shocked × d_f_shocked × sign
 
-    table_type='nii' (cf.products_par_dn):
+    table_type='nii' (cf.nii_*_scenarios):
       remain_yf     — max(0, horizon_end − cf_end_dt) / 365  [horizon = nii_horizon_yf]
       ren_client_rt — renewal client rate = a × fwd_rt + b (b = product spread, else contract margin)
       nii_interest  — beh_outstanding × client_rt × cf_yf × sign

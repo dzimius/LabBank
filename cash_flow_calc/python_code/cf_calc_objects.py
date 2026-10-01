@@ -33,7 +33,7 @@ sched_tables = ['loans', 'fin_inst']
 
 dict_cols_deposits = {
     # maturity_date = NULL means non-maturity deposit (overnight in origin schedule)
-    # product_code links to bs.models_deposit for behavioural schedule
+    # product_code links to bs.models_deposit_ir / bs.models_deposit_liq for the behavioural schedule
     # client_rt is the all-in rate paid to clients (a * market_rate + b), computed at balance generation
     'deposits': ['schedule_id', 'product_code', 'currency', 'rate_type', 'maturity_date', 'dc_conv',
                  'b_day_conv', 'disc_curve', 'balance_amt', 'bs_side', 'client_rt'],

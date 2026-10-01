@@ -7,8 +7,8 @@ from dagster_pipeline.runner import PROJECT_ROOT, run_workflow
     compute_kind="python",
     description=(
         "Generate synthetic balance sheet transactions. "
-        "Writes to schemat.transactions, schemat.loans, schemat.deposits, "
-        "schemat.financial_instruments, schemat.equity, schemat.cash_accounts."
+        "Writes to dbo.transactions, schemat.loans, schemat.deposits, "
+        "schemat.financial_instruments, schemat.equity."
     ),
 )
 def balance_transactions(context) -> MaterializeResult:
