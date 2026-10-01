@@ -96,6 +96,7 @@ Rate_mod = Table(
     "models_rate", metadata,
     Column("report_date", Date, nullable=False),
     Column("product_code", String(4), nullable=False),
+    Column("bs_side", String(3), nullable=True),
     Column("beta", DECIMAL(18, 6), nullable=False),
     Column("margin_pct", DECIMAL(18, 6), nullable=True),
     Column("index_floor", DECIMAL(18, 6), nullable=True),

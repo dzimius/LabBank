@@ -19,7 +19,9 @@ their own contract margin, deposits / instruments without one get 0.
 Storage
 -------
 Input file : balance_gen_add_data/input/interest_rt.xlsx  (one row per
-             report_date x product_code) -- loaded by the add_data stage into
+             report_date x product_code; bs_side A / L / A/L is descriptive --
+             liability rows must set beta, asset rows may leave beta and
+             margin_pct blank = beta 1 + contract margin) -- loaded by the add_data stage into
              SQL table bs.models_rate, next to the other behavioural models.
 Everything downstream of add_data reads bs.models_rate via load_rate_models(),
 so a bank feeding its own data can insert rows into bs.models_rate directly
@@ -53,6 +55,17 @@ def _normalise(df: pd.DataFrame) -> pd.DataFrame:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df["report_date"] = pd.to_datetime(df["report_date"]).dt.normalize()
     df["product_code"] = df["product_code"].astype(float).astype(int).astype(str)
+    # bs_side is descriptive (A, L, or A/L for a product on both sides, e.g. 7900);
+    # the model stays keyed by product_code. Liability rows (deposit tariffs) must
+    # state beta explicitly -- a blank beta there would silently mean full pass-through.
+    if "bs_side" not in df.columns:
+        df["bs_side"] = None
+    df["bs_side"] = df["bs_side"].where(df["bs_side"].notna(), None)
+    liab_blank = df["bs_side"].astype(str).str.upper().eq("L") & df["beta"].isna()
+    if liab_blank.any():
+        bad = sorted(df.loc[liab_blank, "product_code"].unique())
+        raise ValueError(f"liability products {bad}: beta must be set explicitly (blank beta = 1)")
+    # blank beta = 1 (follows the index); blank margin_pct = use the contract margin
     df["beta"] = df["beta"].fillna(1.0)
     both_floors = df["index_floor"].notna() & df["client_floor"].notna()
     if both_floors.any():
@@ -62,7 +75,7 @@ def _normalise(df: pd.DataFrame) -> pd.DataFrame:
     if dup.any():
         bad = sorted(df.loc[dup, "product_code"].unique())
         raise ValueError(f"duplicate rate-model rows for products {bad}")
-    return df[["report_date", "product_code"] + RATE_COLS].reset_index(drop=True)
+    return df[["report_date", "product_code", "bs_side"] + RATE_COLS].reset_index(drop=True)
 
 
 def _select_report_date(df: pd.DataFrame, report_date, source: str) -> pd.DataFrame:
