@@ -231,7 +231,8 @@ def create_sched_id_tbl_sql(
             {extra_select}
             {null_out_select}
         INTO {target_schema}.{target_table}
-        FROM grp_id;
+        FROM grp_id
+        OPTION (MAXDOP 1);   -- parallel plan here hung indefinitely on CXSYNC_PORT once
         """
 
     with engine.begin() as conn:

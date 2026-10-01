@@ -10,7 +10,8 @@ from dagster_pipeline.runner import PROJECT_ROOT, run_workflow
         "Build optimizer tensors and validate fast-metric approximations. "
         "Step 1: extract yield curve tensors (curve_tensors.npz). "
         "Step 2: extract product parameters (product_params.npz). "
-        "Step 3: accuracy check — fast vs exact NII/EVE/LCR/NSFR. "
+        "Step 3: FTP rates per cohort (ftp_rates.npz). "
+        "Step 4: accuracy check — fast vs exact NII/EVE/LCR/NSFR. "
         "Writes optimize_prep/output/*.npz, *.xlsx."
     ),
 )

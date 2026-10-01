@@ -140,6 +140,21 @@ def gen_init_bal_loan(
     return b_amount
 
 
+# Positions must still be alive on the report date: a start date of exactly
+# report_date - tenor gives maturity == report_date (or earlier after the
+# business-day roll), i.e. an already-matured position with no future cash
+# flows -- the exact IRRBB engine then ignores it while its balance stays in
+# the book. A one-week buffer keeps every maturity strictly after report_date.
+_LIVE_BUFFER_DAYS = 7
+
+
+def _earliest_live_start(maturity: str) -> pd.Timestamp:
+    # capped at report_date so very short tenors (e.g. a 7D T-bill) keep a valid window
+    return min(pd.Timestamp(config.report_date),
+               ql_date_to_pd_date(ql.Date.from_date(config.report_date) - ql.Period(maturity))
+               + pd.Timedelta(days=_LIVE_BUFFER_DAYS))
+
+
 # def generate_random_dates(start_date, end_date, n, seed=None):
 #     start = pd.to_datetime(start_date)
 #     end = pd.to_datetime(end_date)
@@ -460,7 +475,7 @@ class TermDepositsGen(ProductGen):
         balances = generate_balances(self.balance_amt, stats['mean'], stats['std_dev'],
                                      stats['lower_bound'], stats['upper_bound'], round=500)
         starting_dates = generate_random_dates(max(config.balance_start_date,
-                                ql_date_to_pd_date(ql.Date.from_date(config.report_date) - ql.Period(self.maturity))),
+                                _earliest_live_start(self.maturity)),
                                 config.report_date,
                                 len(balances))
         maturity_dates = [ql_date_to_pd_date(self.cal.advance(ql.Date.from_date(pd.Timestamp(s_dt).date()),
@@ -536,7 +551,7 @@ class LoansFixedGen(ProductGen):
 
         starting_dates_raw = generate_random_dates(
             max(config.balance_start_date,
-                ql_date_to_pd_date(ql.Date.from_date(config.report_date) - ql.Period(self.maturity))),
+                _earliest_live_start(self.maturity)),
             config.report_date,
             len(init_balances_raw)
         )
@@ -676,7 +691,7 @@ class LoansFloatGen(ProductGen):
 
         starting_dates_raw = generate_random_dates(
             max(config.balance_start_date,
-                ql_date_to_pd_date(ql.Date.from_date(config.report_date) - ql.Period(self.maturity))),
+                _earliest_live_start(self.maturity)),
             config.report_date,
             len(init_balances_raw)
         )
@@ -807,8 +822,7 @@ class BondsFixedGen(ProductGen):
         balances = generate_balances(self.balance_amt, stats['mean'], stats['std_dev'],
                                      stats['lower_bound'], stats['upper_bound'], round=5000)
         starting_dates = generate_random_bond_dates(max(config.balance_start_date,
-                                                   ql_date_to_pd_date(ql.Date.from_date(config.report_date) - ql.Period(
-                                                       self.maturity))),
+                                                   _earliest_live_start(self.maturity)),
                                                config.report_date,
                                                len(balances))
         starting_dates = [as_datetime(d) for d in starting_dates]
@@ -882,9 +896,7 @@ class BondsFloatGen(ProductGen):
         balances = generate_balances(self.balance_amt, stats['mean'], stats['std_dev'],
                                      stats['lower_bound'], stats['upper_bound'], round=5000)
         starting_dates = generate_random_bond_dates(max(config.balance_start_date,
-                                                        ql_date_to_pd_date(
-                                                            ql.Date.from_date(config.report_date) - ql.Period(
-                                                                self.maturity))),
+                                                        _earliest_live_start(self.maturity)),
                                                     config.report_date,
                                                     len(balances))
         starting_dates = [as_datetime(d) for d in starting_dates]

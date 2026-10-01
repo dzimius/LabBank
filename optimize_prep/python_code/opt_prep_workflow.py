@@ -6,7 +6,8 @@ Run order
 ---------
   Step 1 — extract_params   : build product_params.npz + SQL opt_prep.product_params
   Step 2 — extract_curves   : build curve_tensors.npz  + SQL opt_prep.monthly_curves
-  Step 3 — accuracy_check   : compare fast metrics vs exact pipeline, write Excel report
+  Step 3 — build_ftp_rates  : FTP rate per cohort (ftp_rates.npz + SQL opt_prep.ftp_rates)
+  Step 4 — accuracy_check   : compare fast metrics vs exact pipeline, write Excel report
 
 Prerequisites (must have been run first)
 -----------------------------------------
@@ -22,12 +23,14 @@ Outputs
   optimize_prep/output/params_inspection.xlsx
   optimize_prep/output/curve_tensors.npz
   optimize_prep/output/curves_inspection.xlsx
+  optimize_prep/output/ftp_rates.npz
   optimize_prep/output/approx_accuracy_report.xlsx   ← main visible result
 """
 from __future__ import annotations
 
 import sys
 import os
+import runpy
 import time
 
 # ensure project root on path
@@ -49,13 +52,22 @@ def _step(label: str) -> None:
 def run_opt_prep() -> None:
     t0 = time.time()
 
-    _step("Step 1/3 — Extract yield curve tensors")
+    _step("Step 1/4 — Extract yield curve tensors")
     build_curve_tensors()
 
-    _step("Step 2/3 — Extract product parameters (uses curve tensors)")
+    _step("Step 2/4 — Extract product parameters (uses curve tensors)")
     build_product_params()
 
-    _step("Step 3/3 — Accuracy check (fast vs exact metrics)")
+    # ftp_rates.npz is keyed on the cohort set: a regenerated product_params.npz
+    # (new balance sheet draw) makes the old cache stale, and the optimizers then
+    # silently fall back to FTP = 0 -- so rebuild it on every run.
+    _step("Step 3/4 — FTP rates per cohort (uses product params + curve tensors)")
+    _here = os.path.dirname(os.path.abspath(__file__))
+    if _here not in sys.path:
+        sys.path.insert(0, _here)
+    runpy.run_path(os.path.join(_here, "build_ftp_rates.py"), run_name="__main__")
+
+    _step("Step 4/4 — Accuracy check (fast vs exact metrics)")
     run_accuracy_check()
 
     elapsed = time.time() - t0

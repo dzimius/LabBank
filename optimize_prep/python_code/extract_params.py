@@ -73,7 +73,10 @@ _C_IN = ", ".join(f"'{c}'" for c in sorted(COHORT_PRODUCT_CODES))
 _S_IN = ", ".join(f"'{c}'" for c in sorted(SINGLE_ROW_PRODUCT_CODES))
 _COHORT_KEY = ["product_code", "bs_side", "currency", "start_year", "start_month"]
 _PROD_KEY   = ["product_code", "bs_side", "currency"]
-_AMORTISING_FLOAT_RENEWAL_PRODUCTS = {"1100", "2100"}
+# amortising floating-rate loans: effective rate / renewal tables built from the
+# exact CF schedule (beta != 1 products like 4100 need this -- the analytic
+# fallback drifts a few % from the exact NII delta)
+_AMORTISING_FLOAT_RENEWAL_PRODUCTS = {"1100", "2100", "4100"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
