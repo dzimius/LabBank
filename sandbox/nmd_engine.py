@@ -109,6 +109,9 @@ def compute_nmd_cashflows(
 
     outstanding = balance * pct_prev
     capital_cf  = balance * (pct_prev - pct)
+    # whatever is still outstanding at the last tenor runs off there -- otherwise
+    # a profile that doesn't end at 0% silently drops that principal from EVE
+    capital_cf[-1] += balance * pct[-1]
     interest_cf = outstanding * rate * period_yf
 
     return {

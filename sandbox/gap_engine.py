@@ -220,7 +220,8 @@ def compute_repricing_gap(
               edits. Omit for the shipped-baseline gap.
     """
     if report_date is None:
-        report_date = REPORT_DATE_DEFAULT
+        _rd = getattr(params, "report_date", None)
+        report_date = pd.Timestamp(_rd).date() if _rd else REPORT_DATE_DEFAULT
     try:
         nmd_models_base = _load_nmd_model(DEP_BEH_PATH)
     except Exception:

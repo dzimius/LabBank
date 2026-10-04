@@ -5,6 +5,8 @@ Run:
 """
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -74,26 +76,70 @@ def _build_stressed_nmd_for_gap(
     return result
 
 
-def _apply_bulk_nmd(pc: str, editor_key: str, seed_arr, lo: int, hi: int,
-                    value_frac: float) -> None:
-    """Button callback: set Stressed % to a flat value across tenor rows [lo, hi].
+def _nmd_outflows(pct: np.ndarray) -> np.ndarray:
+    """Per-bucket outflow (fraction of balance): pct_prev - pct, pct_prev[0] = 1."""
+    pct = np.asarray(pct, dtype=float)
+    return np.concatenate(([1.0], pct[:-1])) - pct
 
-    Runs before the rerun, so it can rewrite the editor seed *and* bump the
-    per-product seed version (which is baked into the editor's widget key) in
-    lock-step. Manual cell edits made since the last apply/reset live in the
-    data_editor's own widget state as `edited_rows`; fold those in first so the
-    bulk fill layers on top of them instead of discarding them.
+
+def _nmd_pct_from_outflows(outflow: np.ndarray) -> np.ndarray:
+    """Outstanding profile implied by per-bucket outflows. Outflows beyond the
+    100% that is there to run off are truncated (outstanding floors at 0)."""
+    return np.clip(1.0 - np.cumsum(np.asarray(outflow, dtype=float)), 0.0, 1.0)
+
+
+def _set_nmd_seed(pc: str, pct: np.ndarray) -> None:
+    """Rewrite the editor seed AND bump the seed version baked into the editor's
+    widget key, in lock-step -- the only sanctioned way to change the seed
+    (no data_editor feedback loop). The seed also outlives the editor widget,
+    so edits survive switching to the other product and back."""
+    st.session_state["nmd_editor_seed"][pc] = np.clip(np.asarray(pct, dtype=float), 0.0, 1.0)
+    st.session_state["nmd_seed_ver"][pc] = st.session_state["nmd_seed_ver"].get(pc, 0) + 1
+
+
+def _fold_nmd_edits(editor_key: str, seed_arr) -> np.ndarray:
+    """Seed + the cell edits pending in the editor's widget state.
+
+    Outstanding edits are applied as typed (neighbouring outflows absorb the
+    change); outflow edits keep every other bucket's outflow and re-derive the
+    outstanding profile from them, so later outstanding % shift accordingly.
     """
     cur = np.array(seed_arr, dtype=float).copy()
-    ws = st.session_state.get(editor_key, {})
-    for r, chg in ws.get("edited_rows", {}).items():
-        if "Stressed %" in chg and chg["Stressed %"] is not None:
+    edits = st.session_state.get(editor_key, {}).get("edited_rows", {})
+    for r, chg in edits.items():
+        if chg.get("Stressed %") is not None:
             cur[int(r)] = np.clip(float(chg["Stressed %"]) / 100.0, 0.0, 1.0)
-    cur[lo:hi + 1] = float(np.clip(value_frac, 0.0, 1.0))
-    st.session_state["nmd_editor_seed"][pc] = cur
-    st.session_state["nmd_seed_ver"][pc] = (
-        st.session_state["nmd_seed_ver"].get(pc, 0) + 1
-    )
+    flow_edits = {int(r): chg["Stressed outflow %"] for r, chg in edits.items()
+                  if chg.get("Stressed outflow %") is not None}
+    if flow_edits:
+        out = _nmd_outflows(cur)
+        for r, v in flow_edits.items():
+            out[r] = max(float(v), 0.0) / 100.0
+        cur = _nmd_pct_from_outflows(out)
+    return cur
+
+
+def _on_nmd_edit(pc: str, editor_key: str, seed_arr) -> None:
+    """data_editor on_change: commit the edit to the seed so the outstanding and
+    outflow columns are re-derived from each other on the rerun."""
+    _set_nmd_seed(pc, _fold_nmd_edits(editor_key, seed_arr))
+
+
+def _apply_bulk_nmd(pc: str, editor_key: str, seed_arr, lo: int, hi: int,
+                    value_frac: float, mode: str = "outstanding") -> None:
+    """Button callback: set a flat value across tenor rows [lo, hi], either as
+    the outstanding % (mode="outstanding") or as the per-bucket outflow %
+    (mode="outflow"; other buckets keep their outflow). Pending manual edits are
+    folded in first so the bulk fill layers on top of them."""
+    cur = _fold_nmd_edits(editor_key, seed_arr)
+    v = float(np.clip(value_frac, 0.0, 1.0))
+    if mode == "outflow":
+        out = _nmd_outflows(cur)
+        out[lo:hi + 1] = v
+        cur = _nmd_pct_from_outflows(out)
+    else:
+        cur[lo:hi + 1] = v
+    _set_nmd_seed(pc, cur)
 
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="LabBank Sandbox", page_icon="🏦", layout="wide")
@@ -126,6 +172,93 @@ def _compute_adj(bs_df: pd.DataFrame, irs_df: pd.DataFrame, total_assets: float)
     m   = run_metrics(w, params, curves, total_assets)
     ana = compute_irs_metrics(irs_df, curves)
     return apply_irs_delta(m, ana_irs_baseline, ana)
+
+
+def _nmd_overlay(bs_df: pd.DataFrame, total_assets: float) -> tuple[float, float, dict]:
+    """Analytical (ΔNII, ΔEVE_base, {scen: ΔEVE}) of the NMD Stress tab's profiles,
+    summed over all NMD products.
+
+    Each product's balance follows the Balance Sheet tab edits (new % and total
+    assets) -- the same scaled weights the Metrics tab prices the book on --
+    rather than the shipped npz balance.
+    """
+    new_pcts = {(str(r["product_code"]), str(r["bs_side"])): r["new_pct"]
+                for _, r in bs_df.iterrows()}
+    bal_arr  = compute_weights(params, new_pcts) * float(total_assets)
+    models   = load_nmd_model_df()
+    info     = get_nmd_product_info(params)
+    stressed = st.session_state.get("nmd_stressed_pct", {})
+    scens    = list(params.scenario_ids)
+
+    d_nii, d_eve_base, d_eve = 0.0, 0.0, {s: 0.0 for s in scens}
+    for pc, mdf in models.items():
+        if pc not in info:
+            continue
+        pct_old = mdf["pct"].to_numpy(dtype=float)
+        pct_new = np.asarray(stressed.get(pc, pct_old), dtype=float)
+        bal     = float(bal_arr[np.asarray(params.product_code).astype(str) == pc].sum())
+        r = compute_nmd_delta(
+            balance=bal, rate=info[pc]["rate"], sign=info[pc]["sign"],
+            pct_old=pct_old, pct_new=pct_new,
+            cum_yf=mdf["cum_yf"].to_numpy(dtype=float),
+            curves=curves, currency=info[pc]["currency"],
+            shocked_scenario_ids=scens, horizon_yf=1.0,
+        )
+        d_nii      += r["delta_nii"]
+        d_eve_base += r["delta_eve_base"]
+        for s in scens:
+            d_eve[s] += r["delta_eve"].get(s, 0.0)
+    # remember which profiles were priced -- the NMD tab (which runs after this
+    # one) reruns the script if its editor changed them in this pass
+    st.session_state["nmd_pct_priced"] = {pc: np.asarray(v, dtype=float).copy()
+                                          for pc, v in stressed.items()}
+    return d_nii, d_eve_base, d_eve
+
+
+# ── IRS book: float index drives the reset / pay frequency ───────────────────
+_IRS_INDEX_DEFAULT = "PLN_ASK_6M"
+
+
+def _index_tenor(index) -> str | None:
+    """'PLN_ASK_3M' -> '3M' (the index tenor = reset and float-pay frequency)."""
+    m = re.search(r"_(\d+[MY])$", str(index or ""))
+    return m.group(1) if m else None
+
+
+_IRS_INDEX_OPTIONS = sorted(
+    set(irs_base["float_rate_index"].dropna().astype(str))
+    | {"PLN_ASK_1M", "PLN_ASK_3M", "PLN_ASK_6M"},
+    key=lambda x: (len(_index_tenor(x) or ""), _index_tenor(x) or x),
+)
+_IRS_REQUIRED = ["notional", "maturity_date", "fixed_rate"]
+
+
+def _normalize_irs(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    """Make the edited swap table safe for the engines.
+
+    New rows come out of st.data_editor with None in every untouched cell:
+    an unticked 'Pay Fixed?' is None/NaN (and bool(NaN) is True -- the swap
+    would silently flip to pay-fixed), the PLN selects are empty and the
+    frequencies unknown. Fill the defaults, derive float_fixing_freq /
+    float_pay_freq from the index tenor (the book's convention: WIBOR 3M resets
+    and pays quarterly), give unnamed rows an id, and drop rows missing a
+    notional, maturity or fixed rate (returned as labels for a warning).
+    """
+    df = df.copy().reset_index(drop=True)
+    df["pay_fixed"] = [bool(v) if pd.notna(v) else False for v in df["pay_fixed"]]
+    for col, val in (("currency", "PLN"), ("disc_curve", "PLN_disc_curve"),
+                     ("fwd_curve", "PLN_fwd_curve"), ("float_rate_index", _IRS_INDEX_DEFAULT)):
+        df[col] = df[col].where(df[col].notna(), val)
+    # a swap with no start date starts today (its first fixing is today's, locked)
+    df["start_date"] = df["start_date"].where(df["start_date"].notna(),
+                                              pd.Timestamp(params.report_date).date())
+    tenor = df["float_rate_index"].map(_index_tenor)
+    df["float_fixing_freq"] = tenor
+    df["float_pay_freq"]    = tenor
+    no_id = df["swap_id"].isna() | (df["swap_id"].astype(str).str.strip() == "")
+    df.loc[no_id, "swap_id"] = [f"NEW_{i + 1:02d}" for i in range(int(no_id.sum()))]
+    incomplete = df[_IRS_REQUIRED].isna().any(axis=1)
+    return df[~incomplete].reset_index(drop=True), df.loc[incomplete, "swap_id"].tolist()
 
 
 def _bs_with_notional(base_df: pd.DataFrame, cur_df: pd.DataFrame, total_assets: float) -> pd.DataFrame:
@@ -175,7 +308,12 @@ def _init():
         "fund_base":           f,
         "irs_base_ed":         irs_base.copy(),
         "total_assets":        float(params.total_assets),
-        "reset_counter":       0,
+        # one reset counter PER EDITOR -- each is baked into that editor's widget
+        # key, so "↺ Reset IRS" only discards IRS edits (a shared counter used to
+        # wipe the Balance Sheet / NMD edits too)
+        "rc_bs":               0,
+        "rc_irs":              0,
+        "rc_nmd":              0,
         "t1_capital":          1_000_000_000.0,
         "_cur_asset":          a.copy(),
         "_cur_fund":           f.copy(),
@@ -189,9 +327,9 @@ def _init():
         # Balance Sheet editor follows to avoid data_editor feedback-loop desync)
         "nmd_editor_seed":     {},
         "nmd_seed_ver":        {},
-        "nmd_delta_nii":       0.0,
-        "nmd_delta_eve_base":  0.0,
-        "nmd_delta_eve_sh":    {s: 0.0 for s in _shocked},
+        # NMD pct vectors the Metrics tab last priced (see the rerun check at
+        # the end of the NMD tab)
+        "nmd_pct_priced":      None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -392,13 +530,13 @@ with tab_bs:  # tab-bar position 1
             st.session_state.fund_base     = f
             st.session_state["_cur_asset"] = a.copy()
             st.session_state["_cur_fund"]  = f.copy()
-            st.session_state.reset_counter += 1
+            st.session_state.rc_bs += 1
             st.rerun()
 
     st.info("Edit the **✏️ New %** column — type the new percentage directly. "
             "Both sides must sum to 100%.", icon="✏️")
 
-    rc = st.session_state.reset_counter
+    rc = st.session_state.rc_bs
 
     # ── editors — always receive the STABLE baseline; editor holds its own deltas
     _ECFG = {
@@ -531,7 +669,7 @@ with tab_bs:  # tab-bar position 1
         st.session_state.fund_base     = f
         st.session_state["_cur_asset"] = a.copy()
         st.session_state["_cur_fund"]  = f.copy()
-        st.session_state.reset_counter += 1
+        st.session_state.rc_bs += 1
         st.rerun()
 
 
@@ -546,7 +684,7 @@ with tab_irs:  # tab-bar position 6
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button("↺ Reset IRS", use_container_width=True):
             st.session_state.irs_base_ed = irs_base.copy()
-            st.session_state.reset_counter += 1
+            st.session_state.rc_irs += 1
             st.rerun()
 
     st.info(
@@ -555,8 +693,9 @@ with tab_irs:  # tab-bar position 6
         "the bank pays WIBOR to the IRS counterparty, offsetting WIBOR received from borrowers, "
         "leaving a fixed spread.\n\n"
         "Edit notional, fixed rate, dates or *Pay Fixed?*. Add rows with **+**; delete via row checkbox.\n\n"
-        "*Reset frequency* (`Fixing Freq`) is a fixed attribute of each swap, shown for reference only — "
-        "see the help tooltip on that column.",
+        "Pick the float leg's **index** (WIBOR 1M / 3M / 6M) — its tenor is the reset and "
+        "float-payment frequency. New rows need a notional, maturity and fixed rate; "
+        "everything else has a default.",
         icon="ℹ️",
     )
 
@@ -564,53 +703,60 @@ with tab_irs:  # tab-bar position 6
         st.session_state.irs_base_ed,        # stable base — editor holds own deltas
         num_rows="dynamic", use_container_width=True,
         column_config={
-            "swap_id":          st.column_config.TextColumn("Swap ID", width="small"),
+            "swap_id":          st.column_config.TextColumn("Swap ID", width="small",
+                                    help="Leave empty on a new row to get NEW_01, NEW_02, …"),
             "notional":         st.column_config.NumberColumn(
                                     "Notional (PLN)", min_value=0, step=1_000_000,
-                                    format="%d", width="large"),
+                                    format="%d", width="large", required=True),
             "pay_fixed":        st.column_config.CheckboxColumn(
-                                    "Pay Fixed?", width="small",
+                                    "Pay Fixed?", width="small", default=False,
                                     help="☐ = receive fixed / pay WIBOR  |  ☑ = pay fixed / receive WIBOR"),
             "currency":         st.column_config.SelectboxColumn("CCY", width="small",
-                                    options=["PLN"], required=True,
+                                    options=["PLN"], required=True, default="PLN",
                                     help="Book is PLN-only for now. Single-option list — the "
                                          "ALM-metric and gap engines look up the PLN disc/fwd "
                                          "curves regardless of this field."),
-            "start_date":       st.column_config.DateColumn("Start", width="small"),
-            "maturity_date":    st.column_config.DateColumn("Maturity", width="small"),
+            "start_date":       st.column_config.DateColumn(
+                                    "Start", width="small",
+                                    default=pd.Timestamp(params.report_date).date()),
+            "maturity_date":    st.column_config.DateColumn("Maturity", width="small",
+                                    required=True),
             "fixed_rate":       st.column_config.NumberColumn(
                                     "Fixed Rate", min_value=0.0, max_value=1.0,
-                                    step=0.0025, format="%.4f", width="small"),
-            "float_rate_index": st.column_config.TextColumn("Float Index", width="small",
-                                    disabled=True),
-            "float_pay_freq":   st.column_config.TextColumn("Float Pay Freq", width="small",
-                                    disabled=True),
-            "float_fixing_freq": st.column_config.TextColumn("Fixing Freq", width="small",
-                                    disabled=True,
-                                    help="Float-leg reset frequency — a fixed attribute of each "
-                                         "swap in the book, not a sandbox lever. The Gap Analysis "
-                                         "tab reflects it (it is a repricing-timing view); the "
-                                         "ALM-metric engine projects the float leg on forward "
-                                         "rates over a monthly grid, where reset frequency nets "
-                                         "out of both NII (same 12M average forward however the "
-                                         "resets are chunked) and EVE (float leg telescopes to "
-                                         "N·(1−DF) regardless of reset frequency)."),
+                                    step=0.0025, format="%.4f", width="small", required=True),
+            "float_rate_index": st.column_config.SelectboxColumn(
+                                    "Float Index", width="small",
+                                    options=_IRS_INDEX_OPTIONS, required=True,
+                                    default=_IRS_INDEX_DEFAULT,
+                                    help="WIBOR tenor of the float leg. Its tenor sets the reset "
+                                         "and float-payment frequency (3M → quarterly), which the "
+                                         "Gap Analysis tab shows as repricing timing. ALM Metrics "
+                                         "don't move with it: the float leg is projected on forward "
+                                         "rates over a monthly grid, where reset frequency nets out "
+                                         "of both NII (same 12M average forward however the resets "
+                                         "are chunked) and EVE (float leg telescopes to N·(1−DF))."),
             "disc_curve":       st.column_config.SelectboxColumn("Disc Curve", width="small",
                                     options=["PLN_disc_curve"], required=True,
+                                    default="PLN_disc_curve",
                                     help="Single-option list for now — PLN-only book. The sandbox "
                                          "always discounts on the PLN curve."),
             "fwd_curve":        st.column_config.SelectboxColumn("Fwd Curve", width="small",
                                     options=["PLN_fwd_curve"], required=True,
+                                    default="PLN_fwd_curve",
                                     help="Single-option list for now — PLN-only book. The sandbox "
                                          "always projects the float leg on the PLN forward curve."),
         },
         column_order=["swap_id", "notional", "pay_fixed", "currency",
                       "start_date", "maturity_date", "fixed_rate",
-                      "float_rate_index", "float_pay_freq", "float_fixing_freq",
-                      "disc_curve", "fwd_curve"],
-        hide_index=True, key=f"ed_irs_{rc}",
+                      "float_rate_index", "disc_curve", "fwd_curve"],
+        hide_index=True, key=f"ed_irs_{st.session_state.rc_irs}",
     )
+    edited_irs, _irs_incomplete = _normalize_irs(edited_irs)
     st.session_state["_cur_irs"] = edited_irs.copy()
+    if _irs_incomplete:
+        st.warning(
+            "Not priced until completed (needs notional, maturity and fixed rate): "
+            f"**{', '.join(map(str, _irs_incomplete))}**", icon="⚠️")
 
     if len(edited_irs) > 0:
         st.divider()
@@ -765,9 +911,7 @@ with tab_metrics:  # tab-bar position 2
             )
 
     # ── NMD overlay: add analytical delta from NMD stress tab ────────────────
-    _nmd_nii      = st.session_state.get("nmd_delta_nii",      0.0)
-    _nmd_eve_base = st.session_state.get("nmd_delta_eve_base", 0.0)
-    _nmd_eve_sh   = st.session_state.get("nmd_delta_eve_sh",   {})
+    _nmd_nii, _nmd_eve_base, _nmd_eve_sh = _nmd_overlay(combined_bs, ta_val)
     mod_adj["nii_base"] += _nmd_nii
     mod_adj["eve_base"] += _nmd_eve_base
     # delta_eve[s] = EVE_s − EVE_base; NMD shifts both → relative delta shifts by (Δs − Δbase)
@@ -1249,8 +1393,9 @@ with tab_gap:  # tab-bar position 3
 with tab_nmd:  # tab-bar position 5
     st.subheader("Non-Maturity Deposit — Behavioral Model Stress")
     st.caption(
-        "Edit the **✏️ Stressed %** column to change the outstanding-percentage profile. "
-        "Values represent the fraction of deposits still on-book at each tenor. "
+        "Edit either **✏️ Stressed %** (fraction of deposits still on-book at each tenor) "
+        "or **✏️ Stressed outflow %** (share of the balance running off in that bucket) — "
+        "the other column is re-derived automatically. "
         "The **1D** row captures overnight repricing (20% of the stock by default). "
         "ΔNII and ΔEVE are propagated to the **Metrics** and **Gap Analysis** tabs."
     )
@@ -1275,10 +1420,7 @@ with tab_nmd:  # tab-bar position 5
                     st.session_state["nmd_stressed_pct"][_pc] = _df["pct"].to_numpy().copy()
                 st.session_state["nmd_editor_seed"] = {}
                 st.session_state["nmd_seed_ver"]    = {}
-                st.session_state["nmd_delta_nii"]      = 0.0
-                st.session_state["nmd_delta_eve_base"] = 0.0
-                st.session_state["nmd_delta_eve_sh"]   = {s: 0.0 for s in params.scenario_ids}
-                st.session_state.reset_counter += 1
+                st.session_state.rc_nmd += 1
                 st.rerun()
 
         pc_sel   = pc_sel_label.split(" ")[0]
@@ -1288,8 +1430,6 @@ with tab_nmd:  # tab-bar position 5
         rate     = prod["rate"]
         sign     = prod["sign"]
         currency = prod["currency"]
-
-        shocked_scens = list(params.scenario_ids)
 
         st.divider()
 
@@ -1305,27 +1445,26 @@ with tab_nmd:  # tab-bar position 5
             pct_prev_base[1:] = pct_base[:-1]
         outflow_base_pct = (pct_prev_base - pct_base) * 100.0
 
-        # Seed the editor from the STABLE baseline, never from the per-rerun
-        # session_state read-back -- each product gets its own widget key
-        # (nmd_ed_{pc_sel}_{rc}_{seed_ver}) so Streamlit's per-key state already
-        # preserves edits when switching products/tabs. Feeding session_state
-        # back into `data=` with a *stable* key creates a feedback loop (this
-        # rerun's seed = last rerun's own output) -- the classic data_editor
-        # desync that needs a second identical edit before it "sticks" (same bug
-        # class the Balance Sheet editor avoids, 2026-08-15 fix).
-        #
-        # The bulk-fill helper below is the one sanctioned way to change the
-        # seed: its callback rewrites nmd_editor_seed[pc] AND bumps
-        # nmd_seed_ver[pc], so the seed only ever moves in lock-step with the
-        # key -- no feedback loop.
+        # The editor is seeded from nmd_editor_seed (baseline until the first
+        # edit) and its widget key carries a per-product seed version
+        # (nmd_ed_{pc}_{rc_nmd}_{seed_ver}). Every change -- a cell edit
+        # (on_change) or a bulk fill (on_click) -- goes through _set_nmd_seed,
+        # which rewrites the seed AND bumps the version in lock-step. That keeps
+        # the two editable columns consistent (an edit to one re-derives the
+        # other), avoids the data_editor feedback-loop desync of feeding its own
+        # output back as `data=` under a stable key (2026-08-15 BS-editor bug),
+        # and keeps edits when switching products (an unrendered editor's widget
+        # state is dropped by Streamlit; the seed is not).
         _seed_ver      = int(st.session_state["nmd_seed_ver"].get(pc_sel, 0))
         _seed_override = st.session_state["nmd_editor_seed"].get(pc_sel)
         _init_stressed = pct_base if _seed_override is None else np.asarray(_seed_override, dtype=float)
+        _ed_key        = f"nmd_ed_{pc_sel}_{st.session_state.rc_nmd}_{_seed_ver}"
         editor_df = pd.DataFrame({
-            "Tenor":          tenor_lbl,
-            "Baseline %":     (pct_base * 100.0).round(2),
-            "Stressed %":     (_init_stressed * 100.0).round(2),
-            "Outflow base %": outflow_base_pct.round(2),
+            "Tenor":              tenor_lbl,
+            "Baseline %":         (pct_base * 100.0).round(2),
+            "Outflow base %":     outflow_base_pct.round(2),
+            "Stressed %":         (_init_stressed * 100.0).round(2),
+            "Stressed outflow %": (_nmd_outflows(_init_stressed) * 100.0).round(2),
         })
 
         col_ed, col_ch = st.columns([2, 3], gap="large")
@@ -1336,36 +1475,47 @@ with tab_nmd:  # tab-bar position 5
                 f"| Balance: **{balance/1e6:,.0f} M PLN** "
                 f"| Deposit rate: **{rate*100:.4f}%**"
             )
-            edited_nmd = st.data_editor(
+            st.data_editor(
                 editor_df,
                 column_config={
                     "Tenor": st.column_config.TextColumn(
                         "Tenor", disabled=True, width="small"),
                     "Baseline %": st.column_config.NumberColumn(
                         "Baseline %", disabled=True, format="%.2f", width="small"),
+                    "Outflow base %": st.column_config.NumberColumn(
+                        "Outflow base %", disabled=True, format="%.2f", width="small"),
                     "Stressed %": st.column_config.NumberColumn(
                         "✏️ Stressed %", min_value=0.0, max_value=100.0,
                         step=1.0, format="%.2f", width="small",
-                        help="Outstanding fraction (% of balance) — edit to stress."),
-                    "Outflow base %": st.column_config.NumberColumn(
-                        "Outflow base %", disabled=True, format="%.2f", width="small"),
+                        help="Outstanding fraction (% of balance) at the end of this "
+                             "tenor. Editing it changes this bucket's and the next "
+                             "bucket's outflow."),
+                    "Stressed outflow %": st.column_config.NumberColumn(
+                        "✏️ Stressed outflow %", min_value=0.0, max_value=100.0,
+                        step=0.5, format="%.2f", width="small",
+                        help="Share of the balance running off in this bucket. Editing "
+                             "it keeps every other bucket's outflow and shifts the "
+                             "outstanding % of all later tenors."),
                 },
                 hide_index=True,
                 use_container_width=True,
-                key=f"nmd_ed_{pc_sel}_{rc}_{_seed_ver}",
+                key=_ed_key,
+                on_change=_on_nmd_edit,
+                args=(pc_sel, _ed_key, _init_stressed),
             )
 
-            pct_stressed = np.clip(
-                edited_nmd["Stressed %"].to_numpy(dtype=float) / 100.0, 0.0, 1.0
-            )
+            pct_stressed = _fold_nmd_edits(_ed_key, _init_stressed)
             # Persist this product's stressed pct so the other tabs can read it
             st.session_state["nmd_stressed_pct"][pc_sel] = pct_stressed
 
-            # ── bulk-fill helper: set a flat Stressed % across a tenor range ──
+            # ── bulk-fill helper: set a flat value across a tenor range ──
             # data_editor pastes a single copied cell into the anchor cell only,
             # so filling 20+ tenor rows by hand is tedious. This writes the whole
-            # range in one click (folding in any manual edits first).
+            # range in one click, as outstanding % or as per-bucket outflow %.
             with st.expander("⚡ Bulk-fill a tenor range"):
+                _bulk_mode = st.radio(
+                    "Fill as", ["Outstanding %", "Outflow % per bucket"],
+                    horizontal=True, key=f"nmd_bulk_mode_{pc_sel}")
                 _bc1, _bc2 = st.columns(2)
                 _lo_lbl = _bc1.selectbox("From tenor", tenor_lbl, index=0,
                                          key=f"nmd_bulk_lo_{pc_sel}")
@@ -1374,8 +1524,8 @@ with tab_nmd:  # tab-bar position 5
                                          key=f"nmd_bulk_hi_{pc_sel}")
                 _bv1, _bv2 = st.columns([2, 1])
                 _bulk_val = _bv1.number_input(
-                    "Stressed %", min_value=0.0, max_value=100.0, value=0.0,
-                    step=1.0, format="%.2f", key=f"nmd_bulk_val_{pc_sel}")
+                    _bulk_mode, min_value=0.0, max_value=100.0, value=0.0,
+                    step=0.5, format="%.2f", key=f"nmd_bulk_val_{pc_sel}")
                 _lo_i, _hi_i = tenor_lbl.index(_lo_lbl), tenor_lbl.index(_hi_lbl)
                 _bv2.markdown("<br>", unsafe_allow_html=True)
                 _bv2.button(
@@ -1383,29 +1533,36 @@ with tab_nmd:  # tab-bar position 5
                     disabled=_lo_i > _hi_i,
                     key=f"nmd_bulk_apply_{pc_sel}",
                     on_click=_apply_bulk_nmd,
-                    args=(pc_sel, f"nmd_ed_{pc_sel}_{rc}_{_seed_ver}",
-                          _init_stressed, _lo_i, _hi_i, _bulk_val / 100.0),
+                    args=(pc_sel, _ed_key, _init_stressed, _lo_i, _hi_i, _bulk_val / 100.0,
+                          "outflow" if _bulk_mode.startswith("Outflow") else "outstanding"),
                 )
                 if _lo_i > _hi_i:
                     st.caption("⚠️ 'From' tenor is after 'To' tenor.")
+                elif _bulk_mode.startswith("Outflow"):
+                    st.caption(
+                        f"Sets the outflow of **{_hi_i - _lo_i + 1}** buckets "
+                        f"({_lo_lbl} → {_hi_lbl}) to **{_bulk_val:.2f}%** of the balance "
+                        "each; other buckets keep their outflow and the outstanding % "
+                        "is re-derived. Manual edits are kept."
+                    )
                 else:
                     st.caption(
                         f"Sets **{_hi_i - _lo_i + 1}** rows "
-                        f"({_lo_lbl} → {_hi_lbl}) to **{_bulk_val:.2f}%**. "
+                        f"({_lo_lbl} → {_hi_lbl}) to **{_bulk_val:.2f}%** outstanding. "
                         "Manual edits are kept."
                     )
 
-            if K > 1 and np.any(np.diff(pct_stressed) > 0):
+            if K > 1 and np.any(np.diff(pct_stressed) > 1e-12):
                 st.warning(
                     "⚠️ Outstanding % is not monotonically decreasing at every step. "
                     "NMD models typically have pct(k) ≤ pct(k-1). Check your edits."
                 )
-
-            pct_prev_str = np.empty(K)
-            pct_prev_str[0] = 1.0
-            if K > 1:
-                pct_prev_str[1:] = pct_stressed[:-1]
-            outflow_str_pct = (pct_prev_str - pct_stressed) * 100.0
+            if pct_stressed[-1] > 1e-9:
+                st.info(
+                    f"**{pct_stressed[-1]*100:.2f}%** is still outstanding at the last "
+                    f"tenor ({tenor_lbl[-1]}) — it is treated as running off in that "
+                    "bucket.", icon="ℹ️")
+            outflow_str_pct = _nmd_outflows(pct_stressed) * 100.0
 
         with col_ch:
             fig_prof = go.Figure()
@@ -1450,36 +1607,17 @@ with tab_nmd:  # tab-bar position 5
 
         st.divider()
 
-        # ── aggregate delta across ALL NMD products ────────────────────────────
-        # Compute total ΔNII + ΔEVE for every product (using current session state pct).
-        # This total flows into the Metrics and Gap Analysis tabs.
-        _total_dnii      = 0.0
-        _total_deve_base = 0.0
-        _total_deve_sh   = {s: 0.0 for s in shocked_scens}
-
-        for _pc, _mdf in nmd_models.items():
-            if _pc not in nmd_prod_info:
-                continue
-            _prod     = nmd_prod_info[_pc]
-            _pct_old  = _mdf["pct"].to_numpy(dtype=float)
-            _pct_new  = st.session_state["nmd_stressed_pct"].get(_pc, _pct_old)
-            _cum_yf   = _mdf["cum_yf"].to_numpy(dtype=float)
-            _r = compute_nmd_delta(
-                balance=_prod["balance"], rate=_prod["rate"], sign=_prod["sign"],
-                pct_old=_pct_old, pct_new=_pct_new, cum_yf=_cum_yf,
-                curves=curves, currency=_prod["currency"],
-                shocked_scenario_ids=shocked_scens,
-                horizon_yf=1.0,
-            )
-            _total_dnii      += _r["delta_nii"]
-            _total_deve_base += _r["delta_eve_base"]
-            for _s in shocked_scens:
-                _total_deve_sh[_s] = _total_deve_sh.get(_s, 0.0) + _r["delta_eve"].get(_s, 0.0)
-
-        # Persist totals so Metrics tab reads them
-        st.session_state["nmd_delta_nii"]      = _total_dnii
-        st.session_state["nmd_delta_eve_base"] = _total_deve_base
-        st.session_state["nmd_delta_eve_sh"]   = _total_deve_sh
+        # ── keep Metrics / Gap in sync with this editor ────────────────────────
+        # This tab executes AFTER Metrics and Gap, so an edit or bulk-fill made
+        # here only reaches them on the next script pass. If the profiles they
+        # priced differ from what the editor now holds, rerun once (the second
+        # pass prices the same profiles, so it cannot loop).
+        _priced = st.session_state.get("nmd_pct_priced")
+        if _priced is not None:
+            _now = st.session_state["nmd_stressed_pct"]
+            if any(not np.array_equal(np.asarray(_now[k], dtype=float), _priced.get(k))
+                   for k in _now if k in _priced) or set(_now) != set(_priced):
+                st.rerun()
 
         st.caption(
             f"Model shown: **{pc_sel} — {NMD_PRODUCTS[pc_sel]}** | "
