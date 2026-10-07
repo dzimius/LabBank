@@ -650,14 +650,21 @@ CELL_PMARGIN_MD = md("""\
 ---
 ## 6. Product Interest Margin — Client Rate vs Market Rate
 
-**Margin** = client rate − market rate (forward/swap curve rate for that tenor).
-- Assets: positive margin = bank earns above market → pricing power / franchise value.
-- Liabilities: negative margin = bank pays below market → funding advantage (e.g. current accounts at 0% vs WIBOR).
+Assets and liabilities are shown separately, each with a margin defined so that **positive = good for the bank**:
+- **Assets** — margin = client rate − market rate (forward/swap curve rate for that tenor): the bank lends above market.
+- **Liabilities** — margin = market rate − client rate: the bank funds below market (e.g. current accounts at 0% vs WIBOR).
 
-The **contribution** column converts margin into annual PLN value: balance × margin (annualised).
+The **contribution** column converts margin into annual PLN value: balance × margin (annualised),
+so the two side totals add up to the bank's total margin value.
 """)
 
 CELL_PMARGIN = code("""\
+import sys, os
+_ROOT_DIR = os.path.normpath(os.path.join(os.getcwd(), '..'))
+if _ROOT_DIR not in sys.path:
+    sys.path.insert(0, _ROOT_DIR)
+from labbank_common.product_labels import product_label
+
 _nii_d = pd.read_sql(
     \"SELECT product_code, bs_side, rate_type, tenor_bucket, beh_outstanding, client_rt, fwd_rt, margin \"
     \"FROM cf.nii_base_scenario WHERE scenario_id='base'\",
@@ -674,37 +681,42 @@ for (pc, side, rt), g in _nii_d.groupby(['product_code','bs_side','rate_type']):
     bal = _bal_lkp.get((pc, side), 0.0)
     c_rt  = _wavg(g, 'client_rt', 'beh_outstanding') * 100
     m_rt  = _wavg(g, 'fwd_rt',    'beh_outstanding') * 100
-    marg  = c_rt - m_rt
+    marg  = (c_rt - m_rt) if side == 'A' else (m_rt - c_rt)   # positive = good for the bank on both sides
     contrib = bal * marg / 100 / 1e6   # M PLN annual
-    lbl = PROD_LABELS.get(pc, pc)
+    lbl = product_label(pc, side)
     _pm_rows.append({'Product': lbl, 'Side': side, 'Type': {'F':'Fixed','V':'Variable','A':'Admin'}.get(rt,rt),
                      'Balance (M)': round(bal/1e6,0), 'Client rt (%)': round(c_rt,2),
-                     'Market rt (%)': round(m_rt,2), 'Margin (bps)': round(marg*100,0),
-                     'Contribution (M)': round(contrib,1), '_order': 0 if side=='A' else 1})
+                     'Market rt (%)': round(m_rt,2), 'Margin (bps)': round(marg*100,0) + 0.0,
+                     'Contribution (M)': round(contrib,1) + 0.0, '_order': 0 if side=='A' else 1})
 _pm = pd.DataFrame(_pm_rows).sort_values(['_order','Margin (bps)'], ascending=[True,False]).drop(columns='_order')
 
 # ── Table ──────────────────────────────────────────────────────────────────
-def _pm_flag_color(r):
-    weak = (r['Side']=='A' and r['Margin (bps)'] < 0) or (r['Side']=='L' and r['Margin (bps)'] > 0)
-    return '#C62828' if weak else None
-
-_pm_rows = []
-for _, r in _pm.iterrows():
-    color = _pm_flag_color(r)
-    _pm_rows.append([
-        r['Product'], r['Side'], r['Type'], f"{r['Balance (M)']:,.0f}",
-        f"{r['Client rt (%)']:.2f}", f"{r['Market rt (%)']:.2f}",
-        (f"{r['Margin (bps)']:+.0f}", color),
-        (f"{r['Contribution (M)']:+.1f}", color),
-    ])
-display(html_table(
-    ['Product', 'S', 'Type', 'Bal(M)', 'Client rt%', 'Market rt%', 'Margin bps', 'Contribution M'],
-    _pm_rows,
-    aligns=['left','center','right','right','right','right','right','right'],
-    note='Red = asset priced below market or liability priced above market (margin working against the bank).',
-))
 _tot_a = _pm[_pm['Side']=='A']['Contribution (M)'].sum()
 _tot_l = _pm[_pm['Side']=='L']['Contribution (M)'].sum()
+
+for side, title, marg_hdr, tot, note in [
+    ('A', 'Assets — client rate vs market', 'Margin bps<br>(client − mkt)', _tot_a,
+     'Red = asset priced below market (margin working against the bank).'),
+    ('L', 'Liabilities — funding cost vs market', 'Margin bps<br>(mkt − client)', _tot_l,
+     'Red = liability priced above market (funding dearer than market).'),
+]:
+    _side_rows = []
+    for _, r in _pm[_pm['Side']==side].iterrows():
+        color = '#C62828' if r['Margin (bps)'] < 0 else None
+        _side_rows.append([
+            r['Product'], r['Type'], f"{r['Balance (M)']:,.0f}",
+            f"{r['Client rt (%)']:.2f}", f"{r['Market rt (%)']:.2f}",
+            (f"{r['Margin (bps)']:+.0f}", color),
+            (f"{r['Contribution (M)']:+.1f}", color),
+        ])
+    _side_bal = _pm[_pm['Side']==side]['Balance (M)'].sum()
+    display(html_table(
+        ['Product', 'Type', 'Bal(M)', 'Client rt%', 'Market rt%', marg_hdr, 'Contribution M'],
+        _side_rows,
+        aligns=['left','left','right','right','right','right','right'],
+        total_row=['Total', '', f"{_side_bal:,.0f}", '', '', '', pos_neg(tot, '+.1f')],
+        title=title, note=note,
+    ))
 display(html_table(
     ['Margin Value / Year', 'M PLN'],
     [
