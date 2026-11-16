@@ -14,9 +14,19 @@ delta_EVE — CF re-discounting with new shocked disc factors.
 """
 from __future__ import annotations
 
+import os
+import sys
+
 import numpy as np
 
 from bs_vector import BalanceSheetParams, CurveTensors, CohortRates
+
+_ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+if _ROOT_DIR not in sys.path:
+    sys.path.insert(0, _ROOT_DIR)
+from labbank_common.bank_config import get_bank  # noqa: E402
+
+HOME_CCY = get_bank().market.ccy   # the hypothetical curve replaces this currency's base curve
 
 
 # ── Hypothetical CurveTensors ─────────────────────────────────────────────────
@@ -31,13 +41,13 @@ def build_hyp_curve_tensors(
     are preserved relative to the new base.  EUR/USD scenarios are unchanged.
     """
     n_m     = curves.n_months
-    pln_idx = int(np.where(curves.currencies == "PLN")[0][0])
+    ccy_idx = int(np.where(curves.currencies == HOME_CCY)[0][0])
 
-    fwd_real_base = curves.fwd_rates[0, pln_idx, :n_m]        # (n_m,)
+    fwd_real_base = curves.fwd_rates[0, ccy_idx, :n_m]        # (n_m,)
     delta          = fwd_hyp_pln[:n_m] - fwd_real_base        # (n_m,)
 
     new_fwd  = curves.fwd_rates.copy()                         # (S, C, 360)
-    new_fwd[:, pln_idx, :n_m] += delta[None, :]
+    new_fwd[:, ccy_idx, :n_m] += delta[None, :]
     new_fwd  = np.maximum(new_fwd, 0.0)
 
     # Recompute disc factors from shifted fwd
@@ -73,7 +83,7 @@ def build_hyp_rate_matrix(
     n       = len(params.product_code)
     n_m     = hyp_curves.n_months
     n_scen  = cr.n_rate_scen
-    pln_idx = int(np.where(hyp_curves.currencies == "PLN")[0][0])
+    ccy_idx = int(np.where(hyp_curves.currencies == HOME_CCY)[0][0])
 
     tenor_idx = np.clip(params.repricing_tenor_m.astype(int) - 1, 0, n_m - 1)  # (n,)
     t_first   = np.clip(params.cohort_t_first_m.astype(int), 0, 12)             # (n,)
@@ -96,7 +106,7 @@ def build_hyp_rate_matrix(
         # the wrong curve (2026-08-15 fix -- this previously scrambled every
         # shock's label, e.g. "own" was actually built from the par_dn curve).
         curve_idx   = hyp_curves.scenario_index(str(cr.rate_scenario_ids[rs]))
-        fwd_s       = hyp_curves.fwd_rates[curve_idx, pln_idx, :n_m]                 # (n_m,)
+        fwd_s       = hyp_curves.fwd_rates[curve_idx, ccy_idx, :n_m]                 # (n_m,)
         client_rate = np.clip(safe_a * fwd_s[tenor_idx] + safe_b, safe_floor, safe_cap)  # (n,)
 
         for m in range(12):
@@ -147,8 +157,8 @@ def compute_nii_hyp(
     the delta-of-deltas.  When hyp == market this reproduces ``delta_nii_unit``
     exactly.
     """
-    pln_idx      = int(np.where(curves.currencies == "PLN")[0][0])
-    fwd_mkt_pln  = curves.fwd_rates[0, pln_idx, :curves.n_months]
+    ccy_idx      = int(np.where(curves.currencies == HOME_CCY)[0][0])
+    fwd_mkt_pln  = curves.fwd_rates[0, ccy_idx, :curves.n_months]
 
     # Both re-priced through the identical code path so the delta-of-deltas below
     # isolates purely the effect of swapping the base curve.
@@ -229,11 +239,11 @@ def compute_eve_hyp(
     the floor re-binding (see ``compute_nii_hyp``).
     """
     n_m      = curves.n_months
-    pln_idx  = int(np.where(curves.currencies == "PLN")[0][0])
-    fwd_base = curves.fwd_rates[0, pln_idx, :n_m]
+    ccy_idx  = int(np.where(curves.currencies == HOME_CCY)[0][0])
+    fwd_base = curves.fwd_rates[0, ccy_idx, :n_m]
 
     par_up_scen_idx = curves.scenario_index("par_up")
-    fwd_par_up      = curves.fwd_rates[par_up_scen_idx, pln_idx, :n_m]
+    fwd_par_up      = curves.fwd_rates[par_up_scen_idx, ccy_idx, :n_m]
 
     # Map each product's modified duration (years) → month index in curve arrays
     d_mod_yrs  = np.abs(params.d_mod)                                     # (n,)

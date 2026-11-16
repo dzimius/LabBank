@@ -12,8 +12,8 @@ Usage
     from metrics import AllMetrics, compute_all_metrics, load_params_and_curves
 
     params, curves = load_params_and_curves(
-        params_path="optimize_prep/output/product_params.npz",
-        curves_path="optimize_prep/output/curve_tensors.npz",
+        params_path="runs/pln/optimize_prep/product_params.npz",
+        curves_path="runs/pln/optimize_prep/curve_tensors.npz",
     )
 
     # weights: fraction of total_assets per product (same length as bs_structure rows)
@@ -40,25 +40,31 @@ from lcr_fast  import compute_lcr_fast, worst_lcr
 from nsfr_fast import compute_nsfr_fast, worst_nsfr
 from rwa_fast  import compute_rwa_fast
 from bias_store import load_bias_corrections, apply_eve_bias, apply_nii_bias
+import sys
+sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")))
+from labbank_common.bank_config import get_bank
+BANK_OUT_DIR = str(get_bank().output_dir("optimize_prep"))   # runs/<bank_id>/optimize_prep
 
 # Lazy-loaded once per process — avoids disk hit on every sandbox callback
 _bias_cache: tuple | None = None
+_bias_path: str | None = None           # None = the bank of this process (LABBANK_BANK)
 
 def _get_bias() -> tuple:
     global _bias_cache
     if _bias_cache is None:
-        _bias_cache = load_bias_corrections()
+        _bias_cache = load_bias_corrections(_bias_path)
     return _bias_cache
 
 
-def reset_bias_cache() -> None:
+def reset_bias_cache(path: str | None = None) -> None:
     """Drop the lazily-loaded bias_corrections.npz cache so the next call to
     _get_bias() re-reads from disk. Needed after regenerating the balance
     sheet (cohort count/order in product_params.npz can change), since this
     cache lives outside Streamlit's own cache_data/cache_resource and is not
-    cleared by them."""
-    global _bias_cache
-    _bias_cache = None
+    cleared by them. path: read another bank's file (release_check checks every bank in one
+    process; the default path is fixed at import by LABBANK_BANK)."""
+    global _bias_cache, _bias_path
+    _bias_cache, _bias_path = None, path
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -251,10 +257,9 @@ def load_params_and_curves(
 ) -> tuple[BalanceSheetParams, CurveTensors]:
     """Load BalanceSheetParams and CurveTensors from disk.
 
-    Defaults to output/ relative to this file's directory.
+    Defaults to runs/<bank_id>/optimize_prep/ of the active bank.
     """
-    here = os.path.dirname(os.path.abspath(__file__))
-    out_dir = os.path.join(here, "..", "output")
+    out_dir = BANK_OUT_DIR
 
     if params_path is None:
         params_path = os.path.join(out_dir, "product_params.npz")
@@ -268,7 +273,6 @@ def load_params_and_curves(
 
 def load_cohort_rates(params_path: str | None = None) -> CohortRates:
     """Load CohortRates (cr_* arrays) from product_params.npz."""
-    here = os.path.dirname(os.path.abspath(__file__))
     if params_path is None:
-        params_path = os.path.join(here, "..", "output", "product_params.npz")
+        params_path = os.path.join(BANK_OUT_DIR, "product_params.npz")
     return CohortRates.load(params_path)

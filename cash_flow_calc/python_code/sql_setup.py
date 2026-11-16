@@ -1,24 +1,23 @@
 from __future__ import annotations
 
+import os
+import sys
 import math
 from typing import Generator, Iterator, Optional
 
 import numpy as np
 import pandas as pd
-from sqlalchemy import create_engine, event, MetaData, Table, Column
+from sqlalchemy import event, MetaData, Table, Column
 from sqlalchemy import Integer, String, ForeignKey, Date, text, DECIMAL
 from sqlalchemy.engine import Engine
 
 import config
 
 
-engine = create_engine(
-    "mssql+pyodbc://maciek_d/bank_gen"
-    "?driver=ODBC+Driver+17+for+SQL+Server"
-    "&Trusted_Connection=yes",
-    fast_executemany=True,
-    future=True,
-)
+sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')))
+from labbank_common.bank_config import get_engine
+
+engine = get_engine()   # active bank's database (LABBANK_BANK, default eur)
 metadata = MetaData()
 
 # cf schema — single wide table combining contractual and behavioural cash flows.
@@ -34,7 +33,7 @@ Products_d = Table(
     Column("product_code",     String(4),      nullable=False),
     Column("currency",         String(3),      nullable=False),
     Column("bs_side",          String(1),      nullable=False),
-    Column("rate_index",       String(10),     nullable=True),
+    Column("rate_index",       String(16),     nullable=True),
     Column("fixing_dt",        Date,           nullable=True),
     Column("cf_start_dt",      Date,           primary_key=True, nullable=False),
     Column("cf_end_dt",        Date,           nullable=False),
@@ -81,7 +80,20 @@ Products_d_liq = Table(
     schema="cf",
 )
 
-_CF_TABLES    = ["products", "products_liq"]
+# cf.products_scen — scenario variants of the behavioural schedule for contracts whose
+# behaviour depends on the shock scenario (EBA RTS 2024/857 Art. 9-10): retail fixed-rate
+# loans (CPR x gamma) and retail fixed-rate term deposits (TDRR x gamma).  Same layout as
+# cf.products plus gamma; one full copy of each in-scope schedule per gamma in
+# labbank_common.irrbb_behaviour.VARIANT_GAMMAS.  Baseline (gamma = 1) stays in cf.products.
+Products_d_scen = Table(
+    "products_scen", metadata,
+    *[Column(c.name, c.type, primary_key=c.primary_key, nullable=c.nullable)
+      for c in Products_d.columns],
+    Column("gamma", DECIMAL(4, 2), primary_key=True, nullable=False),
+    schema="cf",
+)
+
+_CF_TABLES    = ["products", "products_liq", "products_scen"]
 _IRRBB_TABLES = ["liq_gap_orig", "liq_gap_beh", "ir_gap_orig", "ir_gap_beh", "ir_gap_beh_a"]
 
 
@@ -207,6 +219,18 @@ def sql_get_uniq_curves(tables: list[str], curve_type: str) -> pd.DataFrame:
     """
     return pd.read_sql_query(query, engine)
 
+_CURVE_NAMES: frozenset | None = None
+
+
+def sql_curve_names() -> frozenset:
+    """Curve names in mkt.curves on the report date (cached per run)."""
+    global _CURVE_NAMES
+    if _CURVE_NAMES is None:
+        q = text("SELECT DISTINCT curve_name FROM mkt.curves WHERE curve_date = :rd")
+        _CURVE_NAMES = frozenset(pd.read_sql_query(q, engine, params={"rd": config.report_date})["curve_name"])
+    return _CURVE_NAMES
+
+
 def sql_select_specific_curve(curve_name: str) -> pd.DataFrame:
     query = text("""
         SELECT curve_name, n_days, year_frac, zero_rate, d_f
@@ -239,6 +263,19 @@ def sql_select_models_deposit_ir() -> pd.DataFrame:
         FROM bs.models_deposit_ir
         WHERE report_date = :report_date
         ORDER BY product_code, tenor
+    """)
+    return pd.read_sql_query(query, engine, params={"report_date": config.report_date})
+
+
+def sql_select_models_deposit_tdrr() -> pd.DataFrame:
+    """Baseline cumulative term-deposit redemption rate per product; empty if the table is absent."""
+    query = text("""
+        IF OBJECT_ID('bs.models_deposit_tdrr', 'U') IS NOT NULL
+            SELECT product_code, CAST(tdrr AS FLOAT) AS tdrr
+            FROM bs.models_deposit_tdrr
+            WHERE report_date = :report_date
+        ELSE
+            SELECT CAST(NULL AS VARCHAR(4)) AS product_code, CAST(NULL AS FLOAT) AS tdrr WHERE 1 = 0
     """)
     return pd.read_sql_query(query, engine, params={"report_date": config.report_date})
 
@@ -366,8 +403,10 @@ def compute_liq_gap(report_date: pd.Timestamp) -> tuple[pd.DataFrame, pd.DataFra
     Columns: currency, bs_side, tenor_bucket, cf_end_dt, gap_cf.
 
     Behavioural LIQ gap uses separate models per product type:
-      - Deposits : LIQ behavioral model from cf.products_liq
-      - Loans / fin_inst: IR behavioral model from cf.products (no separate LIQ model)
+      - Deposits with a LIQ model (non-maturity deposits): cf.products_liq
+      - Every other product -- loans, fin_inst, term deposits, interbank placements and
+        deposits without a LIQ model: IR behavioural schedule from cf.products (term
+        deposits and SME current accounts used to be missing from the behavioural gap)
     """
     params = {"rd": report_date}
 
@@ -396,7 +435,7 @@ def compute_liq_gap(report_date: pd.Timestamp) -> tuple[pd.DataFrame, pd.DataFra
                beh_interest_pmt AS int_pmt
         FROM cf.products
         WHERE cf_end_dt > :rd
-          AND product_type IN ('L', 'F')
+          AND product_code NOT IN (SELECT DISTINCT product_code FROM cf.products_liq)
           AND COALESCE(beh_total_pmt, 0) <> 0
     """)
 
@@ -633,6 +672,6 @@ def compute_ir_gap(report_date: pd.Timestamp) -> tuple[pd.DataFrame, pd.DataFram
         ca_agg, on=["currency", "bs_side", "tenor_bucket", "cf_end_dt"], how="left"
     )
     ir_gap_beh["gap_cf_ca"]  = ir_gap_beh["gap_cf_ca"].fillna(0.0)
-    ir_gap_beh["gap_cf_irs"] = 0.0  # filled in by irs_workflow
+    ir_gap_beh["gap_cf_irs"] = 0.0  # filled in by swap_workflow
 
     return ir_gap_orig, ir_gap_beh, ir_gap_beh_a

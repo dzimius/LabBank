@@ -30,6 +30,10 @@ from __future__ import annotations
 
 import numpy as np
 from bs_vector import BalanceSheetParams, CurveTensors
+import os
+import sys
+sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")))
+from labbank_common.bank_config import home_ccy
 
 HORIZON_YF = 1.0
 _HORIZON_M = 12.0
@@ -101,7 +105,7 @@ def compute_nii(
     params: BalanceSheetParams,
     curves: CurveTensors,
     horizon_yf: float = HORIZON_YF,
-    currency: str = "PLN",
+    currency: str | None = None,
 ) -> float:
     """NII for a single base scenario (base curves == shocked curves).
 
@@ -114,6 +118,7 @@ def compute_nii(
 
     Returns scalar NII in PLN.
     """
+    currency = currency or home_ccy()
     return float(np.dot(amounts, params.nii_unit_rate))
 
 
@@ -122,7 +127,7 @@ def compute_nii_scenarios(
     params: BalanceSheetParams,
     curves: CurveTensors,
     horizon_yf: float = HORIZON_YF,
-    currency: str = "PLN",
+    currency: str | None = None,
 ) -> dict[str, float]:
     """NII for base and all shocked scenarios.
 
@@ -135,6 +140,7 @@ def compute_nii_scenarios(
 
     Returns dict: 'base' -> NII in PLN, scenario_id -> delta_NII in PLN.
     """
+    currency = currency or home_ccy()
     horizon_m = int(round(horizon_yf * _HORIZON_M))   # 12
     base_disc = curves.get_disc_curve("base", currency)
 
@@ -233,13 +239,14 @@ def compute_nii_all_scenarios(
     params,
     curves=None,
     horizon_yf: float = HORIZON_YF,
-    currency: str = "PLN",
+    currency: str | None = None,
 ) -> dict[str, float]:
     """NII for all scenarios.
 
     Uses schedule-based delta NII for cohort products when curves is provided.
     Falls back to calibrated delta_nii_unit for all products when curves is None.
     """
+    currency = currency or home_ccy()
     if curves is None or not params.is_cohort.any():
         base = float(np.dot(amounts, params.nii_unit_rate))
         result: dict[str, float] = {"base": base}
@@ -253,7 +260,7 @@ def compute_nii_schedule_base_by_product(
     amounts: np.ndarray,
     params: BalanceSheetParams,
     curves: CurveTensors,
-    currency: str = "PLN",
+    currency: str | None = None,
 ) -> dict[tuple, float]:
     """Base NII per (product_code, bs_side, currency) using the schedule formula.
 
@@ -269,6 +276,7 @@ def compute_nii_schedule_base_by_product(
     The difference  exact_base − schedule_base  is the per-product bias that can
     be applied to shift shocked-scenario NII estimates.
     """
+    currency = currency or home_ccy()
     base_disc = curves.get_disc_curve("base", currency)
     disc_len  = len(base_disc)
     floor_arr = np.where(np.isfinite(params.client_floor), params.client_floor, -np.inf)

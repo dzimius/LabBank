@@ -1,8 +1,10 @@
 from dagster import asset, MaterializeResult, MetadataValue
+from dagster_pipeline.partitions import BANK_PARTITIONS
 from dagster_pipeline.runner import PROJECT_ROOT, run_workflow
 
 
 @asset(
+    partitions_def=BANK_PARTITIONS,
     deps=["balance_add_data"],
     group_name="cash_flows",
     compute_kind="python",

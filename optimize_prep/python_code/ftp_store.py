@@ -64,9 +64,13 @@ from __future__ import annotations
 import os
 import numpy as np
 import pandas as pd
+import sys
+sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")))
+from labbank_common.bank_config import get_bank
+BANK_OUT_DIR = str(get_bank().output_dir("optimize_prep"))   # runs/<bank_id>/optimize_prep
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-FTP_PATH = os.path.normpath(os.path.join(_HERE, "..", "output", "ftp_rates.npz"))
+FTP_PATH = os.path.join(BANK_OUT_DIR, "ftp_rates.npz")
 
 # ns_curve_model.py (historical Nelson-Siegel fit) lives alongside this file
 # (moved here from bs_optimization/python_code 2026-08-14, same move as
@@ -75,7 +79,7 @@ FTP_PATH = os.path.normpath(os.path.join(_HERE, "..", "output", "ftp_rates.npz")
 
 LIQUIDITY_CAP_BPS    = 50.0    # 0.50% at 10Y+
 LIQUIDITY_CAP_MONTHS = 120.0   # 10Y
-REPORT_DATE          = pd.Timestamp("2026-06-30")   # matches extract_params.REPORT_DATE
+REPORT_DATE          = pd.Timestamp(get_bank().report_date)   # matches extract_params.REPORT_DATE
 
 # NMD (current/savings accounts) -- identified by product_name, not product_code,
 # to match the same naming convention b_s_gen_objects.compute_deposit_client_rt
@@ -129,26 +133,117 @@ def _historical_zero_rate(ns_ts, tenor_years: float, months_ago: int, tau: float
     return rate_bps / 10000.0
 
 
+# ── product terms (2026-10-28 review fixes) ──────────────────────────────────
+# The FTP of a cohort has two parts with different tenors:
+#   rate component      -- the period the client rate is fixed for: the fixing period (fixed products with a
+#                          fixing_freq, e.g. a 25Y mortgage fixed for 10Y), else the contract's original term
+#                          (bullet fixed bonds, loans, term deposits); for floating products the reset period.
+#                          Fixed: the historical rate at the LAST reset (origination, or the latest re-fixing
+#                          of a fixing period), for that tenor. Floating: today's term rate for the reset period.
+#   liquidity component -- how long the funding is used: the repayment profile of the original contract
+#                          (bullet: the term; amortising: half the term; revolving cards: 1 / monthly principal).
+# Before: repricing_tenor_m (the FULL fixing period for fixed products with a fixing_freq) + the cohort's age
+# was used for both, so a 5Y bond aged 4Y was priced at a 9Y rate, and a 5Y floating loan resetting on 3M
+# paid the 3M liquidity spread; floating rates took the one-month forward in the reset month, not the
+# term rate from today.
+_MONTHS = {"D": 1.0 / 30.44, "W": 7.0 / 30.44, "M": 1.0, "Y": 12.0}
+
+
+def _tenor_months(s) -> float | None:
+    if s is None or (isinstance(s, float) and np.isnan(s)):
+        return None
+    s = str(s).strip().upper()
+    if not s or s == "NM" or s[-1] not in _MONTHS:
+        return None
+    try:
+        return float(s[:-1]) * _MONTHS[s[-1]]
+    except ValueError:
+        return None
+
+
+_TERMS: dict | None = None
+
+
+def product_terms() -> dict:
+    """(product_code, bs_side) -> dict(rate_type, fix_m, mat_m, liq_m) from bs_structure incl. the catalogue
+    variants (labbank_common.catalogue.read_bs_structure)."""
+    global _TERMS
+    if _TERMS is None:
+        from labbank_common.catalogue import read_bs_structure
+        bs = read_bs_structure(get_bank().balance_dir() / "bank_data.xlsx")
+        out = {}
+        for r in bs.itertuples():
+            mat = _tenor_months(r.maturity)
+            amort = float(r.amort_type) if pd.notna(r.amort_type) else 0.0
+            if mat is None:
+                liq = None
+            elif amort == 3.0 and pd.notna(getattr(r, "card_monthly_principal_rate", np.nan)) \
+                    and float(r.card_monthly_principal_rate) > 0:
+                liq = min(mat, 1.0 / float(r.card_monthly_principal_rate))      # revolving: principal turns over
+            elif amort == 0.0:
+                liq = mat                                                       # bullet
+            else:
+                liq = mat / 2.0                                                 # amortising: average life
+            out[(str(int(r.product_code)) if not isinstance(r.product_code, str) else r.product_code, r.bs_side)] = dict(
+                rate_type=str(r.rate_type) if pd.notna(r.rate_type) else "", fix_m=_tenor_months(r.fixing_freq),
+                mat_m=mat, liq_m=liq)
+        _TERMS = out
+    return _TERMS
+
+
+def _terms_of(params, i) -> dict:
+    t = product_terms().get((str(params.product_code[i]), str(params.bs_side[i])))
+    if t is None:
+        raise KeyError(f"[ftp_store] no bs_structure row for {params.product_code[i]}/{params.bs_side[i]}")
+    return t
+
+
+def _liq_tenor(params, i) -> float:
+    t = _terms_of(params, i)
+    if t["liq_m"] is not None:
+        return t["liq_m"]
+    return float(params.repricing_tenor_m[i])
+
+
+FTP_HORIZON_M = 12     # the NII horizon: nii_unit_rate projects 12 months of income along the forwards
+
+
+def _term_rate(fwd: np.ndarray, months: float, start_m: int = 0) -> float:
+    """Annualised term rate for `months` starting at month `start_m`, from the monthly forward curve
+    (compounded monthly)."""
+    k = int(np.clip(np.round(months), 1, len(fwd) - start_m))
+    return float((np.prod(1.0 + fwd[start_m:start_m + k] / 12.0) - 1.0) * 12.0 / k)
+
+
+def _reset_rate_over_horizon(fwd: np.ndarray, reset_m: float, horizon_m: int = FTP_HORIZON_M) -> float:
+    """Average FTP base rate of a position that re-fixes every `reset_m` months over the NII horizon: the
+    forward term rate of each fixing period, weighted by the months it covers. A floating product's FTP
+    resets with its client rate, so it follows the same forward path as nii_unit_rate (taking only
+    today's fixing would give every floater the forward curve's slope as margin)."""
+    k = max(int(round(reset_m)), 1)
+    starts = list(range(0, horizon_m, k))
+    w = [min(k, horizon_m - s) for s in starts]
+    return float(np.average([_term_rate(fwd, k, s) for s in starts], weights=w))
+
+
 def floating_ftp_components(params, is_float: np.ndarray, curve_tensors) -> tuple[np.ndarray, np.ndarray]:
-    """(market_rt, liq_spread), each (n,), for FLOATING cohorts only, refixed
-    to `curve_tensors`'s base scenario at each cohort's fixing tenor. Zero
-    elsewhere (fixed/equity/other cohorts -- caller combines with those
-    separately). Split out of floating_ftp_rate() so callers that need the
-    market-rate / liquidity-spread breakdown (e.g. SQL persistence) don't
-    have to re-derive it from the summed rate."""
+    """(market_rt, liq_spread), each (n,), for FLOATING cohorts only: the forward term rate of the reset
+    period over the NII horizon, from `curve_tensors`'s base scenario, and the liquidity spread for the
+    repayment profile. Zero elsewhere. Split out of floating_ftp_rate() so callers that need the breakdown
+    don't re-derive it."""
     n = len(params.cohort_id)
     market_rt = np.zeros(n, dtype=float)
     liq_spread = np.zeros(n, dtype=float)
     base_idx = curve_tensors.scenario_index("base")
     for ccy in np.unique(params.currency):
-        ccy_mask = (params.currency == ccy) & is_float
-        if not ccy_mask.any():
+        idx = np.where((params.currency == ccy) & is_float)[0]
+        if not len(idx):
             continue
         fwd = curve_tensors.fwd_rates[base_idx, curve_tensors.currency_index(str(ccy))]
-        tenor_m = np.clip(params.repricing_tenor_m[ccy_mask], 1.0, 360.0)
-        idx = np.clip(np.round(tenor_m).astype(int) - 1, 0, 359)
-        market_rt[ccy_mask] = fwd[idx]
-        liq_spread[ccy_mask] = _liquidity_spread(tenor_m)
+        for i in idx:
+            reset_m = _terms_of(params, i)["fix_m"] or float(params.repricing_tenor_m[i])
+            market_rt[i] = _reset_rate_over_horizon(fwd, reset_m)
+            liq_spread[i] = float(_liquidity_spread(np.array([_liq_tenor(params, i)]))[0])
     return market_rt, liq_spread
 
 
@@ -164,54 +259,137 @@ def floating_ftp_rate(params, is_float: np.ndarray, curve_tensors) -> np.ndarray
     return market_rt + liq_spread
 
 
+def _panel_for(ccy: str):
+    """Historical fixing panel (bps) of a currency: the bank's own file for the home currency, the foreign
+    currency's file otherwise (labbank_common.fx.foreign_input_dir)."""
+    from ns_curve_model import load_historical_panel
+    if ccy == get_bank().market.ccy:
+        return load_historical_panel()
+    from labbank_common.fx import foreign_input_dir
+    return load_historical_panel(str(foreign_input_dir(ccy) / "fixing_input.xlsx"), ccy=ccy)
+
+
+def _nmd_profiles() -> tuple[dict, dict]:
+    """(rate profile, liquidity profile): product_code -> survival S(m) at m = 0 (1D), 1, 2, ... months, from
+    dep_beh_models_ir.xlsx (core) and dep_beh_models_liq.xlsx (stable). A product without a column is
+    overnight money (S = 0)."""
+    d = get_bank().models_dir()
+    out = []
+    for f in ("dep_beh_models_ir.xlsx", "dep_beh_models_liq.xlsx"):
+        x = pd.read_excel(d / f)
+        prof = {}
+        for c in x.columns:
+            if str(c) in ("report_date", "tenor"):
+                continue
+            s = x[c].astype(float).dropna().to_numpy()
+            prof[str(c)] = s
+        out.append(prof)
+    return out[0], out[1]
+
+
+def _nmd_tranche_weights(s: np.ndarray) -> tuple[float, np.ndarray]:
+    """Survival S(0..M) -> (overnight weight 1 - S(0), weights of tranches maturing at months 1..M, the last
+    holding what survives the profile)."""
+    s = np.clip(np.asarray(s, dtype=float), 0.0, 1.0)
+    w = np.append(s[:-1] - s[1:], s[-1])            # month k = 1..M
+    return 1.0 - s[0], w
+
+
 def compute_ftp_components(params, curve_tensors) -> tuple[np.ndarray, np.ndarray]:
-    """(market_rt, liq_spread), each (n,), decimal, per cohort. Zero for
-    equity (equity has no client rate / FTP concept in this model -- its
-    cost is already captured separately via cost of capital). Split out of
-    compute_ftp_rates() so callers (e.g. build_ftp_rates.py's SQL write)
-    can persist market_rt/liq_spread as separate columns alongside the
-    summed ftp_rate, rather than only the combined figure."""
+    """(market_rt, liq_spread), each (n,), decimal, per cohort. Zero for equity and for derivatives
+    (products 0000/0100 -- their carry is in the swap result). Split out of compute_ftp_rates() so callers
+    (e.g. build_ftp_rates.py's SQL write) can persist market_rt/liq_spread as separate columns."""
+    from ns_curve_model import DIEBOLD_LI_TAU, fit_ns_timeseries, ns_design_matrix
+
     n = len(params.cohort_id)
     market_rt = np.zeros(n, dtype=float)
     liq_spread = np.zeros(n, dtype=float)
-    is_float = (params.rate_type == "V") & ~params.is_equity
-    is_fixed = (params.rate_type == "F") & ~params.is_equity
-    is_nmd = np.isin(params.product_name.astype(str), NMD_PRODUCT_NAMES)
+    pcs = params.product_code.astype(str)
+    is_deriv = np.isin(pcs, ("0000", "0100"))
+    is_nmd = np.isin(params.product_name.astype(str), NMD_PRODUCT_NAMES) & ~params.is_equity
+    is_float = (params.rate_type == "V") & ~params.is_equity & ~is_nmd & ~is_deriv
+    is_fixed = (params.rate_type == "F") & ~params.is_equity & ~is_nmd & ~is_deriv
+    # cash, ECB deposits and other single-row positions without F/V: priced at the overnight rate
+    is_on = ~params.is_equity & ~is_nmd & ~is_deriv & ~is_float & ~is_fixed
 
-    n_other = int((~params.is_equity & ~is_float & ~is_fixed & ~is_nmd).sum())
-    if n_other > 0:
-        print(f"  [ftp_store] {n_other} non-equity cohort(s) have no F/V rate_type "
-              f"(e.g. IRS product '0000', or 'single-row' aggregate products) -- "
-              f"FTP=0 for these, margin == client rate unchanged")
-
-    # ── Floating: refixes to today's (report-date) curve at the fixing tenor ──
     f_market, f_liq = floating_ftp_components(params, is_float, curve_tensors)
     market_rt += f_market
     liq_spread += f_liq
 
-    # ── Fixed / NMD both need the historical fixing panel -- load once ────────
-    fixed_idx = np.where(is_fixed)[0]
-    nmd_idx = np.where(is_nmd)[0]
-    if len(fixed_idx) > 0 or len(nmd_idx) > 0:
-        from ns_curve_model import DIEBOLD_LI_TAU, fit_ns_timeseries, load_historical_panel
+    panels, ns = {}, {}
 
-        panel = load_historical_panel()
+    def ns_of(ccy):
+        if ccy not in ns:
+            panels[ccy] = _panel_for(ccy)
+            ns[ccy] = fit_ns_timeseries(panels[ccy], DIEBOLD_LI_TAU)
+        return ns[ccy]
 
-        # ── Fixed: locked at origination, historical curve, original tenor ──
-        if len(fixed_idx) > 0:
-            ns_ts = fit_ns_timeseries(panel, DIEBOLD_LI_TAU)
-            for i in fixed_idx:
-                elapsed_m = _elapsed_months_since_origination(str(params.cohort_id[i]))
-                original_tenor_m = max(float(params.repricing_tenor_m[i]) + elapsed_m, 1.0)
-                rate = _historical_zero_rate(ns_ts, original_tenor_m / 12.0, elapsed_m, DIEBOLD_LI_TAU)
-                market_rt[i] = rate
-                liq_spread[i] = float(_liquidity_spread(np.array([original_tenor_m]))[0])
+    def ns_rate(ccy, tenor_m, months_ago):
+        ts = ns_of(ccy)
+        d = REPORT_DATE - pd.DateOffset(months=int(months_ago))
+        pos = int(min(max(ts.index.searchsorted(d), 0), len(ts) - 1))
+        beta = ts.iloc[pos][["beta0", "beta1", "beta2"]].to_numpy(dtype=float)
+        return float((ns_design_matrix(np.array([tenor_m / 12.0]), DIEBOLD_LI_TAU) @ beta)[0]) / 10000.0
 
-        # ── NMD: trailing 12M moving average of the 1Y market rate ──────────
-        if len(nmd_idx) > 0:
-            nmd_market = _trailing_market_rate_avg(panel)
-            market_rt[nmd_idx] = nmd_market
-            liq_spread[nmd_idx] = _liquidity_spread(params.repricing_tenor_m[nmd_idx])
+    def on_rate(ccy):
+        # overnight money re-prices continuously: the monthly forwards over the NII horizon, the same basis
+        # as the income these positions are projected to earn
+        fwd = curve_tensors.fwd_rates[curve_tensors.scenario_index("base"), curve_tensors.currency_index(ccy)]
+        return _reset_rate_over_horizon(fwd, 1)
+
+    # ── Fixed: the historical rate at the last reset, for the fixing period (or the original term) ──
+    for i in np.where(is_fixed)[0]:
+        t = _terms_of(params, i)
+        age = _elapsed_months_since_origination(str(params.cohort_id[i])) if params.is_cohort[i] else 0
+        if t["fix_m"]:                                   # re-fixes every fix_m months: last reset age % fix_m ago
+            tenor_m, ago = t["fix_m"], age % max(int(round(t["fix_m"])), 1)
+        elif t["mat_m"]:                                 # fixed to maturity: the original term at origination
+            tenor_m, ago = t["mat_m"], age
+        else:
+            tenor_m, ago = max(float(params.repricing_tenor_m[i]) + age, 1.0), age
+        locked = ns_rate(str(params.currency[i]), tenor_m, ago)
+        # a fixing that ends inside the NII horizon is renewed (re-fixed) at the forward term rate, as the
+        # NII engine renews it (labbank_common.curves.renewal_market_rate): blend over the horizon
+        rem = max(tenor_m - ago, 0.0)
+        if rem < FTP_HORIZON_M:
+            fwd = curve_tensors.fwd_rates[curve_tensors.scenario_index("base"),
+                                          curve_tensors.currency_index(str(params.currency[i]))]
+            r0 = int(round(rem))
+            k = max(int(round(tenor_m)), 1)
+            starts = list(range(r0, FTP_HORIZON_M, k))
+            w = [min(k, FTP_HORIZON_M - s) for s in starts]
+            ren = sum(wi * _term_rate(fwd, k, s) for wi, s in zip(w, starts))
+            locked = (r0 * locked + ren) / (r0 + sum(w))
+        market_rt[i] = locked
+        liq_spread[i] = float(_liquidity_spread(np.array([_liq_tenor(params, i)]))[0])
+
+    # ── Overnight positions ──
+    for i in np.where(is_on)[0]:
+        market_rt[i] = on_rate(str(params.currency[i]))
+
+    # ── NMD: a replicating portfolio from the deposit models, per product and currency ──
+    # overnight part at today's overnight rate; core tranches maturing in month k at the trailing
+    # NMD_LOOKBACK_MONTHS average of the k-month rate (smoothing, as a rolling tranche ladder would);
+    # liquidity from the stable profile. The rate and liquidity profiles stay separate.
+    if is_nmd.any():
+        prof_ir, prof_liq = _nmd_profiles()
+        cache = {}
+        for i in np.where(is_nmd)[0]:
+            pc, ccy = pcs[i], str(params.currency[i])
+            if (pc, ccy) not in cache:
+                ts = ns_of(ccy)
+                win = ts.loc[(ts.index > REPORT_DATE - pd.DateOffset(months=NMD_LOOKBACK_MONTHS)) & (ts.index <= REPORT_DATE)]
+                if win.empty:
+                    raise ValueError(f"[ftp_store] no {ccy} fixings in the {NMD_LOOKBACK_MONTHS}M window to {REPORT_DATE.date()}")
+                w_on, w = _nmd_tranche_weights(prof_ir.get(pc, np.array([0.0])))
+                k = np.arange(1, len(w) + 1, dtype=float)
+                X = ns_design_matrix(k / 12.0, DIEBOLD_LI_TAU)
+                avg = (X @ win[["beta0", "beta1", "beta2"]].to_numpy(dtype=float).T).mean(axis=1) / 10000.0
+                rate = w_on * on_rate(ccy) + float(w @ avg)
+                l_on, lw = _nmd_tranche_weights(prof_liq.get(pc, np.array([0.0])))
+                liq = float(lw @ _liquidity_spread(np.arange(1, len(lw) + 1, dtype=float)))
+                cache[(pc, ccy)] = (rate, liq)
+            market_rt[i], liq_spread[i] = cache[(pc, ccy)]
 
     return market_rt, liq_spread
 
@@ -283,15 +461,19 @@ def save_ftp_rates(
           f"mean {float(np.mean(ftp_rate[ftp_rate > 0]))*100:.2f}%)")
 
 
-def load_ftp_rates(cohort_id: np.ndarray, path: str = FTP_PATH) -> np.ndarray | None:
-    """Load cached FTP rates, re-aligned to the given cohort_id order.
-    Returns None if the cache is missing or its cohort set doesn't match
-    (e.g. product_params.npz was regenerated) -- callers should degrade
-    gracefully (zero FTP) rather than fail when this happens."""
-    if not os.path.exists(path):
+def load_ftp_rates(cohort_id: np.ndarray, path: str = FTP_PATH, strict: bool = True) -> np.ndarray | None:
+    """Load cached FTP rates for the given cohort_id order.
+    A missing cache or one built for another cohort set (product_params.npz regenerated without
+    build_ftp_rates.py) raises: an optimiser that silently ran with FTP = 0 would rank products on
+    client rates (2026-10-28). strict=False returns None instead, for display-only callers."""
+    def _fail(msg):
+        if strict:
+            raise RuntimeError(f"[ftp_store] {msg} -- run optimize_prep/python_code/build_ftp_rates.py")
         return None
+    if not os.path.exists(path):
+        return _fail(f"no FTP cache at {path}")
     data = np.load(path, allow_pickle=True)
     cached_ids = data["cohort_id"]
     if len(cached_ids) != len(cohort_id) or not np.array_equal(cached_ids, cohort_id):
-        return None
+        return _fail("FTP cache does not match product_params.npz")
     return data["ftp_rate"].astype(float)

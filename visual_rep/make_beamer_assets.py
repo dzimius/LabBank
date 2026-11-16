@@ -2,9 +2,10 @@
 """
 Generate all PNG assets for the LabBank Beamer presentation.
 Run from the visual_rep/ directory:  python make_beamer_assets.py
-Outputs go to visual_rep/beamer_assets/
+Outputs go to runs/<bank_id>/visual_rep/beamer_assets/ (LABBANK_BANK, default eur)
 """
 
+import sys
 import os
 import warnings
 warnings.filterwarnings('ignore')
@@ -16,22 +17,23 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import matplotlib.ticker as mticker
 from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 
 # ── Config ────────────────────────────────────────────────────────────────────
-OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'beamer_assets')
+sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')))
+from labbank_common.bank_config import get_bank, get_engine
+
+BANK   = get_bank()          # LABBANK_BANK, default eur
+ENGINE = get_engine(BANK)
+
+# generated charts per bank: runs/<bank_id>/visual_rep/beamer_assets/
+# (hand-made diagrams/icons stay shared in visual_rep/beamer_assets/)
+OUT = str(BANK.output_dir('visual_rep') / 'beamer_assets')
 os.makedirs(OUT, exist_ok=True)
 
-REPORT_DATE = pd.to_datetime('2026-06-30')
-CCY = 'PLN'
+REPORT_DATE = pd.Timestamp(get_bank().report_date)
+CCY = BANK.market.ccy
 RD  = REPORT_DATE
-
-ENGINE = create_engine(
-    'mssql+pyodbc://maciek_d/bank_gen'
-    '?driver=ODBC+Driver+17+for+SQL+Server'
-    '&Trusted_Connection=yes',
-    future=True,
-)
 
 # ── Colours (match existing reports) ─────────────────────────────────────────
 C_A   = '#1565C0'
@@ -144,7 +146,7 @@ def make_pipeline():
 
     boxes = [
         (0.4, 2.0, 2.2, 1.5, '#E3F2FD', '#1565C0',
-         'Input Data\n(Excel)', 'bank_data.xlsx\nirs_input.xlsx'),
+         'Input Data\n(Excel)', 'bank_data.xlsx\nderivatives.xlsx'),
         (3.2, 2.0, 2.4, 1.5, '#E8F5E9', '#2E7D32',
          'Balance Sheet\nGeneration', 'dbo.transactions\nschemat.loans/deposits'),
         (6.2, 2.75, 2.3, 1.5, '#FFF3E0', '#E65100',
@@ -250,8 +252,8 @@ def make_bs_structure():
         ax.set_ylim(-0.6, 0.6)
         ax.set_yticks([])
         ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f'{v:.1f}B'))
-        ax.set_xlabel('B PLN')
-        ax.set_title(f'{title}\n(total {total/1e9:.1f} B PLN)')
+        ax.set_xlabel(f'B {CCY}')
+        ax.set_title(f'{title}\n(total {total/1e9:.1f} B {CCY})')
 
     stacked_h(ax1, assets, tot_a, 'Assets', C_A, True)
     stacked_h(ax2, liabs,  tot_l + eq, 'Liabilities + Equity', C_L, False)
@@ -296,8 +298,8 @@ def make_rate_type():
         ax.set_xticks(x)
         ax.set_xticklabels([RT_LABELS.get(rt, rt) for rt in grp['rate_type']], fontsize=10)
         ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f'{v:.1f}B'))
-        ax.set_ylabel('B PLN')
-        ax.set_title(f'{title}  (total {tot/1e9:.1f} B PLN)')
+        ax.set_ylabel(f'B {CCY}')
+        ax.set_title(f'{title}  (total {tot/1e9:.1f} B {CCY})')
         ax.legend(handles=[mpatches.Patch(color=RT_COLORS[k], label=v)
                             for k, v in RT_LABELS.items() if k in grp['rate_type'].values],
                   fontsize=8)
@@ -354,7 +356,7 @@ def make_nii_waterfall():
     ax.set_xticks(x)
     ax.set_xticklabels(wf_labels, rotation=30, ha='right', fontsize=8)
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f'{v:.0f}M'))
-    ax.set_ylabel('M PLN')
+    ax.set_ylabel(f'M {CCY}')
     fig.tight_layout()
     save(fig, 'nii_waterfall.png')
 
@@ -394,7 +396,7 @@ def make_nii_bridge():
     ax2.axhline(0, color='black', lw=0.8)
     ax2.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f'{v:.0f}M'))
     ax2.set_title('Aggregate Components')
-    ax2.set_ylabel('M PLN')
+    ax2.set_ylabel(f'M {CCY}')
 
     tot_int = vals[0] + vals[2]
     tot_ren = vals[1] + vals[3]
@@ -413,7 +415,7 @@ def make_nii_bridge():
     ax1.set_xticklabels(bridge_lbls, fontsize=10)
     ax1.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f'{v:.0f}M'))
     ax1.set_title('NII Decomposition')
-    ax1.set_ylabel('M PLN')
+    ax1.set_ylabel(f'M {CCY}')
     ax1.text(2.55, net_nii * 0.6,
              f'Locked\nimmune to\nrate shocks\n\nRenewal\nreprices\nwith market',
              fontsize=8, color='#555', bbox=dict(boxstyle='round,pad=0.4',
@@ -458,7 +460,7 @@ def make_repricing_gap():
     ax.set_xticks(x)
     ax.set_xticklabels(grp.index, fontsize=9)
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f'{v:.1f}B'))
-    ax.set_ylabel('B PLN')
+    ax.set_ylabel(f'B {CCY}')
     ax.set_title('Net Repricing Gap by Tenor Bucket, Balance Sheet + IRS  (positive = asset-sensitive)')
     ax.legend(handles=[
         mpatches.Patch(color=C_A, alpha=0.8, label='Asset-sensitive (+)'),
@@ -475,10 +477,10 @@ def make_shock_curves():
             SELECT scenario_id, n_days, zero_rt
             FROM irrbb.curves
             WHERE report_date=:rd
-              AND curve_name='PLN_disc_curve'
+              AND curve_name=:curve
               AND scenario_id IN ('base','par_up','par_dn','steep','flat','sr_up','sr_dn')
             ORDER BY scenario_id, n_days
-        ''', rd=RD)
+        ''', rd=RD, curve=BANK.market.disc_curve)
     except Exception:
         print('  [shock_curves] irrbb.curves not available — skipping')
         return
@@ -488,7 +490,7 @@ def make_shock_curves():
         return
 
     fig, ax = plt.subplots(figsize=(11, 5))
-    fig.suptitle(f'EBA IRRBB Shock Scenarios — PLN Yield Curves  |  {RD.date()}',
+    fig.suptitle(f'EBA IRRBB Shock Scenarios — {CCY} Yield Curves  |  {RD.date()}',
                  fontsize=12, fontweight='bold')
 
     for sid, grp in crv.groupby('scenario_id'):
@@ -562,7 +564,7 @@ def make_nii_scenarios():
 
     _scenario_bar(sc, 'nii_tot', 'base',
                   f'NII by Scenario  |  {CCY}  |  {RD.date()}',
-                  'M PLN', 'nii_scenarios.png')
+                  f'M {CCY}', 'nii_scenarios.png')
 
 
 # ── 10. EVE BY SCENARIO ───────────────────────────────────────────────────────
@@ -581,7 +583,7 @@ def make_eve_results():
 
     _scenario_bar(ev, 'eve', 'base',
                   f'Economic Value of Equity (EVE) by Scenario  |  {CCY}  |  {RD.date()}',
-                  'M PLN', 'eve_results.png')
+                  f'M {CCY}', 'eve_results.png')
 
 
 # ── 11. EBA SOT ───────────────────────────────────────────────────────────────
@@ -689,7 +691,7 @@ def make_lcr_nsfr():
     axes[0].set_xticks(range(2))
     axes[0].set_xticklabels(comp_lbls, fontsize=9)
     axes[0].yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f'{v:.1f}B'))
-    axes[0].set_ylabel('B PLN')
+    axes[0].set_ylabel(f'B {CCY}')
     axes[0].set_title(f'LCR Components\n(aggregate: {lcr_agg:.0f}%)')
 
     axes[1].axis('off')
@@ -767,7 +769,7 @@ def make_liq_gap():
     ax1.set_xticks(x)
     ax1.set_xticklabels(agg.index, fontsize=9)
     ax1.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f'{v:.1f}B'))
-    ax1.set_ylabel('B PLN')
+    ax1.set_ylabel(f'B {CCY}')
     ax1.set_title('Periodic Net Cash Flow by Tenor Bucket  (positive = net inflow)')
     fig.tight_layout()
     save(fig, 'liq_gap.png')

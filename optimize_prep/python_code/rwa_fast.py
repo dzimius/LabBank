@@ -27,4 +27,5 @@ def compute_rwa_fast(
     -------
     RWA in PLN
     """
-    return float(np.dot(amounts, params.rwa_factor))
+    # + undrawn committed facilities without a drawn product (CCF x risk weight)
+    return float(np.dot(amounts, params.rwa_factor)) + params.commit_rwa * params.commit_scale(amounts)

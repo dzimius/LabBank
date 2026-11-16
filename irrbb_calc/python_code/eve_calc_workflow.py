@@ -16,7 +16,7 @@ Produces
 1. irrbb.curves (SQL)         — base + 6 EBA SOT + own shocked discount curves
                                 (same table as NII; overwritten if NII was run first)
 2. irrbb.eve_results (SQL)    — schedule-level PV for base + all shocked scenarios
-3. output/eve_results.xlsx    — EVE outputs:
+3. output/<bank>/eve_results.xlsx    — EVE outputs:
      EVE_base_detail   / EVE_base_summary    — base EVE by (currency, source)
      EVE_shocked_detail / EVE_shocked_summary — ΔEVE under each EBA SOT scenario
 """
@@ -25,23 +25,27 @@ import pandas as pd
 
 import config
 import sql_setup
+from labbank_common.bank_config import get_bank   # sql_setup puts the project root on sys.path
 import eve_calc_objects as eve_obj
 import eba_shock_curves as esc
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(BASE_DIR)
+OUT_DIR = get_bank().output_dir('irrbb_calc')
 
-config.report_date = pd.to_datetime("2026-06-30")
+config.report_date = pd.Timestamp(get_bank().report_date)
 
-CURRENCY      = "PLN"           # primary currency for EBA shock calibration
+CURRENCY      = get_bank().market.ccy   # home currency of the bank: EBA shock calibration
 OWN_SHOCK_BPS = -100.0          # own scenario: -100 bps parallel
-EVE_FLOOR     = 0.0             # 0 % floor on forward rates (EBA standard)
+CURVE_FLOOR   = None            # post-shock curve floor: EBA lower bound (Reg. 2024/856 Art. 3(7))
+EVE_FLOOR     = float('-inf')   # no floor on PROJECTED index rates: product floors/caps come from
+                                # the rate model (bs.models_rate), the curve floor from CURVE_FLOOR
 
 # Map currency → discount curve name
 DISC_CURVE_MAP = {
     "PLN": "PLN_disc_curve",
     "EUR": "EUR_disc_curve",
-    "USD": "USD_disc_curve"
+    "USD": "USD_disc_curve", "GBP": "GBP_disc_curve"
 }
 
 # Per-product client-rate model (beta, spread, floors, caps) from bs.models_rate --
@@ -49,6 +53,7 @@ DISC_CURVE_MAP = {
 import sys
 sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")))
 from labbank_common import rate_models
+from labbank_common import irrbb_behaviour as beh_scen
 CAPS_MAP, FLOORS_MAP, COEFF_A_MAP, COEFF_B_MAP = rate_models.rate_maps(
     rate_models.load_rate_models(
         sql_setup.engine, config.report_date,
@@ -68,9 +73,31 @@ if mkt_df.empty:
                        "Run cash_flow_calc workflow first.")
 
 shocked_df = esc.build_all_shocked_curves(
-    mkt_df, config.report_date, CURRENCY, OWN_SHOCK_BPS, EVE_FLOOR
+    mkt_df, config.report_date, CURRENCY, OWN_SHOCK_BPS, CURVE_FLOOR
 )
 esc.write_irrbb_curves(sql_setup.engine, shocked_df, config.report_date)
+
+# Multi-curve bank (tenor projection curves in mkt.curves, labbank_common/curves.py): discount
+# on DISC_CURVE_MAP, measure floating-rate moves on each currency's projection curve.
+from labbank_common.curves import projection_curve_map
+_MULTI_CURVE = mkt_df["curve_name"].str.contains("_fwd_curve_").any()
+PROJ_CURVE_MAP = ({c: n for c, n in projection_curve_map(DISC_CURVE_MAP).items()
+                   if n in set(mkt_df["curve_name"])} if _MULTI_CURVE else {})
+LOAD_CURVE_MAP = {**{f"disc_{c}": n for c, n in DISC_CURVE_MAP.items()},
+                  **{f"proj_{c}": n for c, n in PROJ_CURVE_MAP.items()}}
+if PROJ_CURVE_MAP:
+    eve_obj.set_projection_curves(PROJ_CURVE_MAP, pd.concat(
+        [esc.load_irrbb_disc_curve(sql_setup.engine, n, "base", config.report_date)
+         for n in PROJ_CURVE_MAP.values()]).sort_index())
+    print(f"  Multi-curve: discount {DISC_CURVE_MAP}, rate moves on {PROJ_CURVE_MAP}")
+else:
+    # single curve: rate moves measured as base fwd_rt + (shocked - base) forward on the
+    # discount curve itself (anchored, exact at zero shock -- e.g. a fixed mortgage's
+    # post-reset coupons, projected by cash_flow_calc over its own block convention)
+    _own = {c: n for c, n in DISC_CURVE_MAP.items() if n in set(mkt_df["curve_name"])}
+    eve_obj.set_projection_curves(_own, pd.concat(
+        [esc.load_irrbb_disc_curve(sql_setup.engine, n, "base", config.report_date)
+         for n in _own.values()]).sort_index())
 print(f"  Written {len(shocked_df):,} rows to irrbb.curves "
       f"({len(esc.ALL_SCENARIO_IDS)} scenarios × "
       f"{mkt_df.groupby('curve_name').ngroups} curves)")
@@ -88,6 +115,12 @@ all_beh = pd.concat([beh_df, swap_df], ignore_index=True) if not swap_df.empty e
 
 print(f"  Loaded {len(all_beh):,} CF rows across "
       f"{all_beh['schedule_id'].nunique()} schedules")
+
+# Scenario variants of retail fixed-rate loans (CPR x gamma) and term deposits
+# (TDRR x gamma), EBA RTS 2024/857 Art. 9-10 -- swapped in per shocked scenario
+scen_beh = sql_setup.load_beh_variants(config.report_date)
+print(f"  Loaded {len(scen_beh):,} scenario-variant CF rows (cf.products_scen); "
+      f"EBA CPR/TDRR multipliers {'ON' if beh_scen.APPLY_EBA_BEHAVIOUR else 'OFF (baseline behaviour)'}")
 
 # ── 3. Base EVE ───────────────────────────────────────────────────────────────
 print("Computing base EVE...")
@@ -117,7 +150,7 @@ for scenario_id in esc.ALL_SCENARIO_IDS:
         continue
 
     disc_series_parts = []
-    for ccy, curve_name in DISC_CURVE_MAP.items():
+    for ccy, curve_name in LOAD_CURVE_MAP.items():
         try:
             s = esc.load_irrbb_disc_curve(
                 sql_setup.engine, curve_name, scenario_id, config.report_date
@@ -131,9 +164,10 @@ for scenario_id in esc.ALL_SCENARIO_IDS:
         continue
 
     shocked_disc = pd.concat(disc_series_parts).sort_index()
+    beh_s = beh_scen.apply_variant(all_beh, scen_beh, scenario_id)
 
     det, _ = eve_obj.compute_eve_shocked(
-        all_beh,
+        beh_s,
         shocked_disc_df = shocked_disc,
         disc_curve_map  = DISC_CURVE_MAP,
         scenario_id     = scenario_id,
@@ -146,7 +180,7 @@ for scenario_id in esc.ALL_SCENARIO_IDS:
     shocked_detail_parts.append(det)
 
     shocked_sched = eve_obj.compute_eve_shocked_schedule(
-        all_beh,
+        beh_s,
         shocked_disc_df = shocked_disc,
         disc_curve_map  = DISC_CURVE_MAP,
         scenario_id     = scenario_id,
@@ -205,7 +239,7 @@ for _t in ("eve_base_scenario", "eve_par_scenarios",
 # Base scenario
 _base_cf = eve_obj.compute_base_cf_detail(all_beh, scenario_id="base")
 _base_disc_parts = []
-for ccy, curve_name in DISC_CURVE_MAP.items():
+for ccy, curve_name in LOAD_CURVE_MAP.items():
     try:
         _base_disc_parts.append(
             esc.load_irrbb_disc_curve(sql_setup.engine, curve_name, "base", config.report_date)
@@ -231,7 +265,7 @@ _EVE_GROUPS = [
 for _eve_table, _scenario_ids in _EVE_GROUPS:
     for _scenario_id in _scenario_ids:
         _disc_parts = []
-        for ccy, curve_name in DISC_CURVE_MAP.items():
+        for ccy, curve_name in LOAD_CURVE_MAP.items():
             try:
                 _disc_parts.append(
                     esc.load_irrbb_disc_curve(
@@ -246,7 +280,7 @@ for _eve_table, _scenario_ids in _EVE_GROUPS:
 
         _shocked_disc = pd.concat(_disc_parts).sort_index()
         _cf_detail = eve_obj.compute_shocked_cf_detail(
-            all_beh,
+            beh_scen.apply_variant(all_beh, scen_beh, _scenario_id),
             shocked_disc_df = _shocked_disc,
             disc_curve_map  = DISC_CURVE_MAP,
             scenario_id     = _scenario_id,
@@ -271,7 +305,7 @@ for _eve_table, _scenario_ids in _EVE_GROUPS:
 sql_setup.reset_shocked_cf_products("eve_own_scenarios", table_type="eve")
 
 # Build own shocked curves and append to irrbb.curves (replace=False keeps EBA curves intact)
-_own_curves_df = esc.build_own_shocked_curves(mkt_df, config.report_date, nii_floor_rate=EVE_FLOOR)
+_own_curves_df = esc.build_own_shocked_curves(mkt_df, config.report_date, nii_floor_rate=CURVE_FLOOR)
 esc.write_irrbb_curves(sql_setup.engine, _own_curves_df, config.report_date, replace=False)
 print(f"  Own scenario curves written to irrbb.curves "
       f"({len(esc.OWN_SCENARIO_IDS)} scenarios: {esc.OWN_SCENARIO_IDS})")
@@ -285,10 +319,12 @@ sql_setup.write_shocked_cf_products(
 )
 print(f"  eve_own_scenarios: {len(_base_cf):,} CF rows (base)")
 
-# Write 4 own shocked scenarios to eve_own_scenarios
-for _scenario_id in esc.OWN_SCENARIO_IDS:
+# Write the own shocked scenarios to eve_own_scenarios: the 4 sensitivities plus the
+# SOT 'own' scenario (-100 bp), so the fast layer reads its PV -- incl. the EBA
+# behavioural variant -- from here like every other scenario
+for _scenario_id in ["own"] + esc.OWN_SCENARIO_IDS:
     _disc_parts = []
-    for ccy, curve_name in DISC_CURVE_MAP.items():
+    for ccy, curve_name in LOAD_CURVE_MAP.items():
         try:
             _disc_parts.append(
                 esc.load_irrbb_disc_curve(
@@ -302,7 +338,7 @@ for _scenario_id in esc.OWN_SCENARIO_IDS:
         continue
     _shocked_disc = pd.concat(_disc_parts).sort_index()
     _cf_detail = eve_obj.compute_shocked_cf_detail(
-        all_beh,
+        beh_scen.apply_variant(all_beh, scen_beh, _scenario_id),
         shocked_disc_df = _shocked_disc,
         disc_curve_map  = DISC_CURVE_MAP,
         scenario_id     = _scenario_id,
@@ -319,10 +355,11 @@ for _scenario_id in esc.OWN_SCENARIO_IDS:
         table_type="eve",
     )
     print(f"  eve_own_scenarios: {len(_cf_detail):,} CF rows "
-          f"(scenario: {_scenario_id}  [{esc.OWN_SCENARIO_LABELS[_scenario_id]}])")
+          f"(scenario: {_scenario_id}  "
+          f"[{esc.OWN_SCENARIO_LABELS.get(_scenario_id, esc.SCENARIO_LABELS.get(_scenario_id))}])")
 
 # ── 7. Write to Excel ──────────────────────────────────────────────────────────
-output_path = "output/eve_results.xlsx"
+output_path = str(OUT_DIR / "eve_results.xlsx")
 with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
     base_detail.to_excel(writer,  sheet_name="EVE_base_detail",    index=False)
     base_summary.to_excel(writer, sheet_name="EVE_base_summary",   index=False)

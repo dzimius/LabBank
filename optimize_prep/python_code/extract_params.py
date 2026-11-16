@@ -23,6 +23,9 @@ import sys
 import numpy as np
 import pandas as pd
 from sqlalchemy import text
+sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")))
+from labbank_common.bank_config import get_bank, total_assets
+BANK_OUT_DIR = str(get_bank().output_dir("optimize_prep"))   # runs/<bank_id>/optimize_prep
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.join(BASE_DIR, "..", "..")
@@ -32,32 +35,57 @@ import sql_setup as opt_sql
 
 sys.path.insert(0, os.path.normpath(ROOT_DIR))
 from labbank_common import rate_models  # noqa: E402
+from labbank_common.curves import renew_months, renewal_market_rate  # noqa: E402
 
 engine = opt_sql.engine
 
 # ── configuration ──────────────────────────────────────────────────────────────
-REPORT_DATE     = pd.to_datetime("2026-06-30")
-TOTAL_ASSETS    = 10_000_000_000
+REPORT_DATE     = pd.Timestamp(get_bank().report_date)
+TOTAL_ASSETS    = total_assets()   # the bank's own book size (bank_config.total_assets)
 HORIZON_DAYS    = 365
 HORIZON_30D     = 30
 PAR_SHOCK_RATE  = 0.02
 HORIZON_END     = REPORT_DATE + pd.Timedelta(days=HORIZON_DAYS)
 HORIZON_30D_END = REPORT_DATE + pd.Timedelta(days=HORIZON_30D)
 
-BS_PATH       = os.path.join(ROOT_DIR, "balance_generate", "input_data", "bank_data.xlsx")
-NPZ_OUT       = os.path.join(BASE_DIR, "..", "output", "product_params.npz")
-EXCEL_OUT     = os.path.join(BASE_DIR, "..", "output", "params_inspection.xlsx")
+BS_PATH       = str(get_bank().balance_dir() / "bank_data.xlsx")
+NPZ_OUT       = os.path.join(BANK_OUT_DIR, "product_params.npz")
+EXCEL_OUT     = os.path.join(BANK_OUT_DIR, "params_inspection.xlsx")
 
 SHOCKED_SCENARIO_IDS = ["par_up", "par_dn", "steep", "flat", "sr_up", "sr_dn", "own"]
 
 # Monthly cohort products — have meaningful start_date and scheduled cash flows
-COHORT_PRODUCT_CODES = frozenset({"1000", "1100", "2000", "2100", "4100",
-                                   "3000", "3100", "3200", "7060", "7900", "5000"})
+COHORT_PRODUCT_CODES = frozenset({"1000", "1100", "2000", "2100", "2200", "2210", "4000", "4100", "4150", "4200",
+                                   "3000", "3100", "3200", "3300", "3310", "3320", "3330",
+                                   "7060", "7900", "5000"})
 # Single-row products — behavioural models, no maturity, or equity
-SINGLE_ROW_PRODUCT_CODES = frozenset({"3500", "6000", "8000", "6300",
+SINGLE_ROW_PRODUCT_CODES = frozenset({"3500", "3510", "6000", "8000", "6300", "6350",
                                        "5300", "5100", "5400"})
-# IRS/derivatives — balance from schemat.ir_swaps.notional (separate table)
-IRS_PRODUCT_CODES = frozenset({"0000"})
+# Derivatives — balance from schemat.ir_swaps.notional (separate table):
+# 0000 = swap book legs, 0100 = FX deal legs (one per deal and currency)
+IRS_PRODUCT_CODES = frozenset({"0000", "0100"})
+
+# Any other bank_data product joins the right set by its product_name (generator class),
+# so a product added in bank_data.xlsx -- e.g. a catalogue product at 0% -- is never dropped.
+_COHORT_PRODUCT_NAMES = {"mortgage_fixed", "mortgage_float", "cash_loan_fixed", "cash_loan_float",
+                         "credit_card_revolver", "credit_card_transactor", "investment_loan_fixed",
+                         "investment_loan_float", "bond_fixed", "bond_float", "issued_bond", "t_bill",
+                         "term_deposit"}
+_SINGLE_ROW_PRODUCT_NAMES = {"cash", "current_account", "saving_account",
+                             "retained_earnings", "common_shares", "risk_reserves"}
+
+
+def _codes_by_name() -> tuple[frozenset, frozenset]:
+    from labbank_common import catalogue as _cat
+    _bs = _cat.read_bs_structure(BS_PATH)
+    _pc = _bs["product_code"].astype(str)
+    return (frozenset(_pc[_bs["product_name"].isin(_COHORT_PRODUCT_NAMES)]),
+            frozenset(_pc[_bs["product_name"].isin(_SINGLE_ROW_PRODUCT_NAMES)]))
+
+
+_coh_named, _sng_named = _codes_by_name()
+COHORT_PRODUCT_CODES = COHORT_PRODUCT_CODES | (_coh_named - SINGLE_ROW_PRODUCT_CODES)
+SINGLE_ROW_PRODUCT_CODES = SINGLE_ROW_PRODUCT_CODES | (_sng_named - COHORT_PRODUCT_CODES)
 
 # Approximate Δrate per EBA scenario (used for duration-based NII/EVE sensitivity)
 SCENARIO_RATE_SHOCKS: dict[str, float] = {
@@ -76,7 +104,11 @@ _PROD_KEY   = ["product_code", "bs_side", "currency"]
 # amortising floating-rate loans: effective rate / renewal tables built from the
 # exact CF schedule (beta != 1 products like 4100 need this -- the analytic
 # fallback drifts a few % from the exact NII delta)
-_AMORTISING_FLOAT_RENEWAL_PRODUCTS = {"1100", "2100", "4100"}
+_AMORTISING_FLOAT_RENEWAL_PRODUCTS = {"1100", "2100", "2200", "2210", "4100", "4150", "4200"}
+# catalogue variants (bank_data sheet catalogue) behave like their parent product
+from labbank_common import catalogue as _cat_v  # noqa: E402
+_AMORTISING_FLOAT_RENEWAL_PRODUCTS |= {v for v, p in _cat_v.parent_map(path=BS_PATH).items()
+                                       if p in _AMORTISING_FLOAT_RENEWAL_PRODUCTS}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -129,7 +161,8 @@ def _try_query(q, params=None) -> pd.DataFrame:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _load_bs_structure() -> pd.DataFrame:
-    df = pd.read_excel(BS_PATH, sheet_name="bs_structure")
+    from labbank_common import catalogue
+    df = catalogue.read_bs_structure(BS_PATH)   # catalogue variants: 0% rows (catalogue_params.py)
     df["sign"]         = df["bs_side"].map({"A": 1.0, "L": -1.0, "E": -1.0}).fillna(-1.0)
     df["full_pct"]     = df["bs_percentage"].fillna(0.0)
     df["product_code"] = df["product_code"].astype(str)
@@ -592,7 +625,7 @@ def _interp_disc(nd: np.ndarray, ldf: np.ndarray, yf: float) -> float:
 
 
 # Standard currency → irrbb curve name
-_CCY_CURVE = {"PLN": "PLN_disc_curve", "EUR": "EUR_disc_curve", "USD": "USD_disc_curve"}
+_CCY_CURVE = {"PLN": "PLN_disc_curve", "EUR": "EUR_disc_curve", "USD": "USD_disc_curve", "GBP": "GBP_disc_curve"}
 
 
 def _cohort_pv(cf_m: pd.DataFrame, curves: dict, scenario_id: str, ccy: str) -> float:
@@ -627,11 +660,81 @@ def _load_cohort_nii_irrbb() -> pd.DataFrame:
         WHERE report_date = :rd
           AND CAST(product_code AS VARCHAR(4)) IN ({_C_IN})
         GROUP BY product_code, bs_side, currency, scenario_id
+        OPTION (MAXDOP 1)
     """)
     df = _try_query(q, {"rd": REPORT_DATE})
     if not df.empty:
         df["product_code"] = df["product_code"].astype(str)
     return df
+
+
+def _load_cohort_nii_irrbb_by_vintage(plan_start: pd.Timestamp) -> pd.DataFrame:
+    """Like _load_cohort_nii_irrbb, split by vintage on a rolled-forward bank: nb = 1 for contracts started
+    after the base bank's report date (the plan year's new business), 0 for the seasoned book -- the same
+    split as product_map.plan_year_cohorts and the article's exact check.
+
+    Returns: product_code, bs_side, currency, nb, scenario_id, nii_total
+    """
+    q = text(f"""
+        SELECT CAST(r.product_code AS VARCHAR(4)) AS product_code, r.bs_side, r.currency,
+               ISNULL(s.nb, 0) AS nb, r.scenario_id, SUM(r.nii_total) AS nii_total
+        FROM irrbb.nii_results r LEFT JOIN (
+             SELECT pt, schedule_id, CASE WHEN start_date > :py THEN 1 ELSE 0 END nb FROM (
+                 SELECT 'L' pt, schedule_id, start_date FROM sched.loans UNION ALL
+                 SELECT 'D', schedule_id, start_date FROM sched.deposits UNION ALL
+                 SELECT 'F', schedule_id, start_date FROM sched.fin_inst) u) s
+          ON s.pt = r.product_type AND s.schedule_id = r.schedule_id
+        WHERE r.report_date = :rd
+          AND CAST(r.product_code AS VARCHAR(4)) IN ({_C_IN})
+        GROUP BY r.product_code, r.bs_side, r.currency, ISNULL(s.nb, 0), r.scenario_id
+        OPTION (MAXDOP 1)
+    """)
+    df = _try_query(q, {"rd": REPORT_DATE, "py": plan_start.date()})
+    if not df.empty:
+        df["product_code"] = df["product_code"].astype(str)
+    return df
+
+
+def _vintage_nii_maps(coh_bal: pd.DataFrame, name_of) -> tuple[dict, dict, dict, set]:
+    """Plan-year / seasoned NII per product on a rolled-forward bank (empty elsewhere).
+
+    The optimiser moves a product through its plan-year contracts (product_map: seasoned book fixed,
+    plan-year cohorts scaled), so their NII per unit must be their own, not the product average: after a
+    rate rise the plan-year contracts carry higher coupons than the seasoned book (eur_y1 fixed mortgages
+    4.90% vs 3.61%, product average 3.82%), and pricing a cut at the average under-stated the NII given up
+    (2026-11-11: ALM proposal 12M NII +9.7m vs the exact repricing).
+
+    Returns (base, scen, bal, keys): base[(pc, sid, ccy, nb)] NII, scen[(pc, sid, ccy, nb, scen)] NII,
+    bal[(pc, sid, ccy, nb)] balance, keys = products with both vintages (split products).
+    """
+    from product_map import plan_year_start, MARKETABLE_NAMES, DERIVATIVE_CODES
+    start = plan_year_start(REPORT_DATE)
+    if start is None or coh_bal.empty:
+        return {}, {}, {}, set()
+    df = _load_cohort_nii_irrbb_by_vintage(start)
+    if df.empty:
+        return {}, {}, {}, set()
+    b = coh_bal.copy()
+    b["nb"] = ((b["start_year"].astype(int) * 12 + b["start_month"].astype(int))
+               > start.year * 12 + start.month).astype(int)
+    bal = {(str(k[0]), str(k[1]), str(k[2]), int(k[3])): float(v)
+           for k, v in b.groupby(_PROD_KEY + ["nb"])["balance_amt"].sum().items()}
+    base, scen = {}, {}
+    for r in df.itertuples(index=False):
+        k = (str(r.product_code), str(r.bs_side), str(r.currency), int(r.nb))
+        if str(r.scenario_id) == "base":
+            base[k] = float(r.nii_total)
+        else:
+            scen[k + (str(r.scenario_id),)] = float(r.nii_total)
+    keys = set()
+    for (pc, sid, ccy, nb), v in bal.items():
+        k3 = (pc, sid, ccy)
+        if (nb == 1 and v > 0 and bal.get(k3 + (0,), 0.0) > 1e-6
+                and str(name_of(pc, sid, ccy)) not in MARKETABLE_NAMES
+                and pc not in DERIVATIVE_CODES
+                and k3 + (0,) in base and k3 + (1,) in base):
+            keys.add(k3)
+    return base, scen, bal, keys
 
 
 def _load_cohort_eve_irrbb() -> pd.DataFrame:
@@ -647,6 +750,7 @@ def _load_cohort_eve_irrbb() -> pd.DataFrame:
         WHERE report_date = :rd
           AND CAST(product_code AS VARCHAR(4)) IN ({_C_IN})
         GROUP BY product_code, bs_side, currency, scenario_id
+        OPTION (MAXDOP 1)
     """)
     df = _try_query(q, {"rd": REPORT_DATE})
     if not df.empty:
@@ -1202,22 +1306,28 @@ def _load_cohort_effective_nii_tables(
         WITH sched_key AS (
             SELECT CAST(schedule_id AS VARCHAR(8)) AS schedule_id, 'L' AS src,
                    CAST(product_code AS VARCHAR(4)) AS product_code,
-                   bs_side, currency, start_date
+                   bs_side, currency, start_date, ISNULL(rate_type, 'V') AS rate_type,
+                   CAST(fixing_freq AS VARCHAR(8)) AS fixing_freq,
+                   DATEDIFF(month, start_date, maturity_date) AS term_months
             FROM sched.loans
             WHERE CAST(product_code AS VARCHAR(4)) IN ({codes_in})
             UNION ALL
             SELECT CAST(schedule_id AS VARCHAR(8)), 'D',
-                   CAST(product_code AS VARCHAR(4)), bs_side, currency, start_date
+                   CAST(product_code AS VARCHAR(4)), bs_side, currency, start_date,
+                   ISNULL(rate_type, 'V'), CAST(fixing_freq AS VARCHAR(8)),
+                   DATEDIFF(month, start_date, maturity_date)
             FROM sched.deposits
             WHERE CAST(product_code AS VARCHAR(4)) IN ({codes_in})
             UNION ALL
             SELECT CAST(schedule_id AS VARCHAR(8)), 'F',
-                   CAST(product_code AS VARCHAR(4)), bs_side, currency, start_date
+                   CAST(product_code AS VARCHAR(4)), bs_side, currency, start_date,
+                   ISNULL(rate_type, 'F'), CAST(fixing_freq AS VARCHAR(8)),
+                   DATEDIFF(month, start_date, maturity_date)
             FROM sched.fin_inst
             WHERE CAST(product_code AS VARCHAR(4)) IN ({codes_in})
         )
         SELECT
-            s.product_code, s.bs_side, s.currency,
+            s.product_code, s.bs_side, s.currency, s.rate_type, s.fixing_freq, s.term_months,
             YEAR(s.start_date) AS start_year,
             MONTH(s.start_date) AS start_month,
             DATEDIFF(month, :rd, p.cf_end_dt) AS m_end,
@@ -1261,7 +1371,6 @@ def _load_cohort_effective_nii_tables(
     locked = (df["cf_start_dt"] < REPORT_DATE) | (
         df["fixing_dt"].notna() & (df["fixing_dt"] < REPORT_DATE)
     )
-    before_curve = df["cf_start_dt"] < REPORT_DATE
 
     pcs = df["product_code"].astype(str)
     a_v = pcs.map(ir_coeff["coeff_a"].to_dict()).fillna(1.0).to_numpy(dtype=float)
@@ -1305,13 +1414,11 @@ def _load_cohort_effective_nii_tables(
         return np.maximum(idx_floor_v, np.nan_to_num(fwd, nan=0.0, posinf=0.0, neginf=0.0))
 
     cf_yf = df["cf_yf"].to_numpy(dtype=float)
-    yf_from_report = ((df["cf_end_dt"] - REPORT_DATE).dt.days / 365.0).clip(lower=0.0).to_numpy(dtype=float)
     base_fwd = df["base_fwd"].to_numpy(dtype=float)
     contracted = df["contracted_rt"].to_numpy(dtype=float)
     int_w = df["int_w"].to_numpy(dtype=float)
     cap_remain_w = df["cap_remain_w"].to_numpy(dtype=float)
     locked_arr = locked.to_numpy(dtype=bool)
-    before_arr = before_curve.to_numpy(dtype=bool)
 
     keys_df = df[_COHORT_KEY].drop_duplicates().reset_index(drop=True)
     key_to_gid = {
@@ -1333,37 +1440,42 @@ def _load_cohort_effective_nii_tables(
     np.add.at(int_w_all, (gid, midx), int_w)
     np.add.at(cap_remain_all, (gid, midx), cap_remain_w)
 
+    # Same rules as the exact engine (nii_calc_objects): floating interest anchored to the base
+    # forward derived from the base CURVE the same way as the shocked one (locked periods do not
+    # move); renewal = forward from cf_end_dt to the horizon end on the scenario's curve
+    # (nii_calc_objects.renewal_forward) -- one formula for base and every shock.
+    base_fwd_curve = np.where(locked_arr, base_fwd, _fwd_between("base", df["cf_start_dt"], df["cf_end_dt"], cf_yf))
+    remain_ren = ((horizon_end - df["cf_end_dt"]).dt.days / 365.0).to_numpy(dtype=float)
+    _hor = pd.Series([horizon_end] * len(df), index=df.index)
+
+    ren_months = renew_months(df["fixing_freq"], df["rate_type"], df["term_months"])
+    ccy_ren = df["currency"].astype(str).to_numpy()
+
+    def _renewal_fwd(scen: str) -> np.ndarray:
+        # same rule as nii_calc_objects.renewal_forward (labbank_common.curves.renewal_market_rate)
+        f = np.zeros(len(df))
+        for ccy in np.unique(ccy_ren):
+            mask = ccy_ren == ccy
+            nd_ldf = curves.get(scen, {}).get(_CCY_CURVE.get(ccy, "PLN_disc_curve"))
+            if nd_ldf is None:
+                continue
+            nd, ldf = nd_ldf
+
+            def _df_at(dates, nd=nd, ldf=ldf):
+                days = (pd.to_datetime(pd.Series(dates)) - REPORT_DATE).dt.days.to_numpy(dtype=float)
+                return np.where(days <= 0.0, 1.0, np.exp(np.interp(days, nd, ldf, left=ldf[0], right=ldf[-1])))
+
+            f[mask] = renewal_market_rate(df.loc[mask, "cf_end_dt"], horizon_end, ren_months[mask], _df_at, -np.inf)
+        return np.where(remain_ren > 0, np.maximum(idx_floor_v, f), 0.0)
+
     for s_idx, scen in enumerate(scen_all):
         if scen == "base":
             eff_interest = contracted.copy()
-            # Base renewal follows compute_nii_base_schedule: use fwd_rt for
-            # future-start CFs, override only already-started periods with the
-            # report-date-to-end base curve rate.
-            fwd_ren = base_fwd.copy()
-            if before_arr.any():
-                dfe = _lookup_df("base", df["cf_end_dt"])
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    fwd_report_end = np.where(
-                        (dfe > 0.0) & (yf_from_report > 0.0),
-                        (1.0 / dfe - 1.0) / yf_from_report,
-                        0.0,
-                    )
-                fwd_ren[before_arr] = np.maximum(idx_floor_v[before_arr], np.nan_to_num(fwd_report_end[before_arr], nan=0.0))
         else:
             fwd_sh = _fwd_between(scen, df["cf_start_dt"], df["cf_end_dt"], cf_yf)
             fwd_interest = np.where(locked_arr, base_fwd, fwd_sh)
-            eff_interest = contracted + a_v * (fwd_interest - base_fwd)
-
-            fwd_ren = fwd_sh.copy()
-            if before_arr.any():
-                dfe = _lookup_df(scen, df["cf_end_dt"])
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    fwd_report_end = np.where(
-                        (dfe > 0.0) & (yf_from_report > 0.0),
-                        (1.0 / dfe - 1.0) / yf_from_report,
-                        0.0,
-                    )
-                fwd_ren[before_arr] = np.maximum(idx_floor_v[before_arr], np.nan_to_num(fwd_report_end[before_arr], nan=0.0))
+            eff_interest = contracted + a_v * (fwd_interest - base_fwd_curve)
+        fwd_ren = _renewal_fwd(scen)
 
         eff_interest = np.minimum(cap_v, np.maximum(floor_v, eff_interest))
         ren_rate = np.minimum(cap_v, np.maximum(floor_v, a_v * fwd_ren + b_v))
@@ -1458,6 +1570,11 @@ def _query_cohort_cf_schedule() -> pd.DataFrame:
         return df
 
     df["product_code"] = df["product_code"].astype(str)
+    # NMD outstanding keeps today's rate (its IR profile is the repricing profile) --
+    # the same rule as irrbb_calc fixing_engine.effective_rate_type
+    _nmd = (df["product_code"].isin(rate_models.nmd_product_codes(engine, REPORT_DATE))
+            & df["product_type"].astype(str).eq("D"))
+    df.loc[_nmd, "rate_type"] = "F"
     for c in ["cf_start_dt", "cf_end_dt", "fixing_dt"]:
         df[c] = pd.to_datetime(df[c], errors="coerce")
     for c in ["m_idx", "cf_yf", "base_fwd", "base_df", "outstanding", "capital", "interest"]:
@@ -1634,8 +1751,8 @@ def _compute_cohort_eve_pv(
             lock_var = locked & is_var
             if lock_var.any():
                 int_s[lock_var] = interest[lock_var]
-            if is_admin.any():   # administered rate: rate-model formula on the shocked index
-                adm_rt = np.minimum(cap_v, np.maximum(floor_v, a_v * fwd_sh + b_v))
+            if is_admin.any():   # administered rate: today's rate + beta x index move (as the exact engine)
+                adm_rt = np.minimum(cap_v, np.maximum(floor_v, contracted + a_v * (fwd_sh - base_fwd_ref)))
                 int_s[is_admin] = outstanding[is_admin] * adm_rt[is_admin] * cf_yf[is_admin]
             df_end = _lookup_df(scen, df["cf_end_dt"])
 
@@ -1680,6 +1797,7 @@ def _load_cohort_effective_eve_pv_tables(
         ("eve_par_scenarios",       ["par_up", "par_dn"]),
         ("eve_short_scenarios",     ["sr_up", "sr_dn"]),
         ("eve_step_flat_scenarios", ["steep", "flat"]),
+        ("eve_own_scenarios",       ["own"]),
     ]
     for table_name, table_scenarios in exact_sources:
         scen_in = ", ".join(f"'{s}'" for s in table_scenarios if s in scen_all)
@@ -1839,7 +1957,7 @@ def _load_single_balance() -> pd.DataFrame:
         GROUP BY product_code, bs_side, currency
         UNION ALL
         SELECT CAST(product_code AS VARCHAR(4)), 'E' AS bs_side,
-               ISNULL(currency, 'PLN') AS currency,
+               ISNULL(currency, '{get_bank().market.ccy}') AS currency,
                SUM(CAST(balance_amt AS FLOAT))
         FROM schemat.equity WHERE report_date = :rd
           AND CAST(product_code AS VARCHAR(4)) IN ({_S_IN})
@@ -1861,7 +1979,7 @@ def _load_irs_balance() -> pd.DataFrame:
                SUM(CAST(notional AS FLOAT)) AS balance_amt
         FROM schemat.ir_swaps
         WHERE report_date = :rd
-          AND CAST(product_code AS VARCHAR(4)) = '0000'
+          AND CAST(product_code AS VARCHAR(4)) IN ('0000', '0100')
         GROUP BY product_code, bs_side, currency
     """)
     df = _try_query(q, {"rd": REPORT_DATE})
@@ -1948,6 +2066,7 @@ def _load_single_nii() -> pd.DataFrame:
                bs_side, currency, scenario_id, SUM(nii_total) AS nii_total
         FROM irrbb.nii_results WHERE report_date = :rd
         GROUP BY product_code, bs_side, currency, scenario_id
+        OPTION (MAXDOP 1)
     """)
     df = pd.read_sql_query(q, engine, params={"rd": REPORT_DATE})
     df["product_code"] = df["product_code"].astype(str)
@@ -1960,6 +2079,7 @@ def _load_single_eve() -> pd.DataFrame:
                bs_side, currency, scenario_id, SUM(pv_total) AS pv_total
         FROM irrbb.eve_results WHERE report_date = :rd
         GROUP BY product_code, bs_side, currency, scenario_id
+        OPTION (MAXDOP 1)
     """)
     df = pd.read_sql_query(q, engine, params={"rd": REPORT_DATE})
     df["product_code"] = df["product_code"].astype(str)
@@ -1981,7 +2101,7 @@ def build_product_params() -> None:
         f"bs_structure has product_code(s) {sorted(_uncovered)} not covered by "
         "COHORT_PRODUCT_CODES / SINGLE_ROW_PRODUCT_CODES / IRS_PRODUCT_CODES — "
         "add the new product to the right set (here, and in every hand-copied "
-        "mirror: diagnose_accuracy.py, cohort_cf_drill.py) before it silently "
+        "mirror: diagnostics/diagnose_accuracy.py, diagnostics/cohort_cf_drill.py) before it silently "
         "vanishes from product_params.npz."
     )
 
@@ -2108,6 +2228,13 @@ def build_product_params() -> None:
     def _meta(pc, sid, ccy, field, default=None):
         return bs_meta.get((str(pc), str(sid), str(ccy)), {}).get(field, default)
 
+    # Committed facilities (bank_data.xlsx sheet commitments; cards are one line of it):
+    # a line linked to a drawn product is encoded per unit of that product's drawn balance
+    # (undrawn moves with the drawn amount at fixed utilisation); a line without drawings is
+    # a fixed total (commit_* scalars below).
+    from labbank_common import commitments as _cmt
+    _fac_terms = _cmt.terms_by_drawn_product(_cmt.read_commitments(BS_PATH))
+
     # ── LCR: per-product effective runoff rates for term deposits ─────────────
     # The exact LCR uses contractual maturity dates from schemat.deposits (not
     # behavioural CFs from cf.products) to split deposits into within-30d (100%
@@ -2146,13 +2273,17 @@ def build_product_params() -> None:
             try:
                 _td_split_pp = _try_query(_q_td, {"rd": REPORT_DATE})
                 _td_split_pp["product_code"] = _td_split_pp["product_code"].astype(str)
+                from labbank_common import lcr_rules as _lr
+                _td_meta = {str(int(r.product_code)): r for r in _td_rows.itertuples()}
                 for _, _r in _td_split_pp.iterrows():
                     _pc  = str(_r["product_code"])
                     _tot = float(_r["total_bal"] or 0.0)
                     _w30 = float(_r["within_30d"] or 0.0)
-                    if _tot > 0:
-                        _frac_30 = _w30 / _tot
-                        _td_eff_lcr[_pc] = _frac_30 * 1.0 + (1.0 - _frac_30) * td_default_weight
+                    if _tot > 0 and _pc in _td_meta:
+                        # same counterparty rule as liq_calc (financial: within-30d share,
+                        # retail: product rate) -- no pooled default weight any more
+                        _td_eff_lcr[_pc] = _lr.term_deposit_runoff(
+                            _td_meta[_pc].LCR, _td_meta[_pc].client_type_id, _w30 / _tot)
             except Exception as _e:
                 print(f"  [warn] TD per-product maturity split: {_e}")
 
@@ -2163,15 +2294,22 @@ def build_product_params() -> None:
     # cf.products already has product_code/bs_side/currency — no JOIN needed.
     # Joining sched.loans UNION ALL sched.fin_inst inflates counts when a
     # schedule_id appears in both tables (different product attribution).
+    from labbank_common.lcr_rules import non_inflow_codes as _non_inflow_codes
+    from labbank_common.lcr_rules import inflow_rate as _inflow_rate
+    from labbank_common.lcr_rules import hqla_market_value_ratio as _hqla_mv, hqla_product_codes as _hqla_codes
+    from labbank_common.lcr_rules import market_spreads_bp as _mv_spreads
+    _HQLA_MV = _hqla_mv(engine, REPORT_DATE, _hqla_codes(bs), _mv_spreads(bs))     # market value / book, as liq_calc
+    _NO_INFLOW_IN = ", ".join(f"'{c}'" for c in _non_inflow_codes(bs))   # HQLA + cards
     _q_lcr_inflow = text(f"""
         SELECT CAST(product_code AS VARCHAR(4)) AS product_code,
                bs_side, currency,
-               SUM(COALESCE(CAST(beh_capital_pmt AS FLOAT), 0.0)
-                   + COALESCE(CAST(beh_interest_pmt AS FLOAT), 0.0)) AS inflow_amt
+               SUM(COALESCE(CAST(con_capital_pmt AS FLOAT), 0.0)
+                   + COALESCE(CAST(con_interest_pmt AS FLOAT), 0.0)) AS inflow_amt
         FROM cf.products
         WHERE bs_side = 'A'
+          AND CAST(product_code AS VARCHAR(4)) NOT IN ({_NO_INFLOW_IN})
           AND cf_end_dt > :rd AND cf_end_dt <= :h30
-          AND COALESCE(beh_total_pmt, 0) <> 0
+          AND COALESCE(con_total_pmt, 0) <> 0
           AND CAST(product_code AS VARCHAR(4)) IN ({_C_IN})
         GROUP BY product_code, bs_side, currency
     """)
@@ -2208,6 +2346,21 @@ def build_product_params() -> None:
     _dep_bal_keys = [(str(r.product_code), str(r.bs_side), str(r.currency), int(r.start_year), int(r.start_month)) for _, r in _dep_bal.iterrows()]
     print(f"  [diag] deposit keys expected from coh_bal: {_dep_bal_keys[:5]}")
 
+    # ── plan-year / seasoned NII per product (rolled-forward bank only) ───────
+    vint_nii_base, vint_nii_scen, vint_bal, vint_keys = _vintage_nii_maps(
+        coh_bal, lambda pc, sid, ccy: _meta(pc, sid, ccy, "product_name", pc))
+    if vint_keys:
+        print(f"  NII per unit by vintage (plan year / seasoned) for {len(vint_keys)} products")
+
+    def _vint_of(pc, sid, ccy, sy, sm):
+        """(pc, sid, ccy, nb) of a cohort of a split product, else None."""
+        k3 = (str(pc), str(sid), str(ccy))
+        if k3 not in vint_keys:
+            return None
+        from product_map import plan_year_start
+        st = plan_year_start(REPORT_DATE)
+        return k3 + (int(int(sy) * 12 + int(sm) > st.year * 12 + st.month),)
+
     # ── irrbb NII lookup maps for cohort products ─────────────────────────────
     coh_nii_base_map: dict = {}   # (pc, sid, ccy) → base nii_total
     coh_nii_scen_map: dict = {}   # (pc, sid, ccy, scen) → shocked nii_total
@@ -2230,10 +2383,57 @@ def build_product_params() -> None:
             else:
                 coh_eve_scen_map[k3 + (str(r["scenario_id"]),)] = float(r["pv_total"])
 
+    # ── catalogue products (bank_data bs_percentage 0, nothing held) ─────────
+    # One balance-0 row each with per-unit parameters of a new-business cohort originated
+    # on the report date (catalogue_params.py), so the optimizers can grow them from 0.
+    import catalogue_params as _cat
+    from bs_vector import CurveTensors as _CT
+    from labbank_common import fx as _fx_cat
+    _held = {(str(r.product_code), str(r.bs_side), str(r.currency))
+             for r in pd.concat([coh_bal[_PROD_KEY], sng_bal[_PROD_KEY]]).itertuples()}
+    cat_bs = _cat.catalogue_rows(bs, _held)
+    cat_coh_units: dict = {}     # cohort key -> unit_cohort(...)
+    cat_sng_units: dict = {}     # product key -> unit_single(...)
+    if not cat_bs.empty:
+        print(f"Catalogue products (0% in bank_data, nothing held): "
+              f"{sorted(cat_bs['product_code'] + '/' + cat_bs['bs_side'])}")
+        _ct_cat = _CT.load(os.path.join(BANK_OUT_DIR, "curve_tensors.npz"))
+        _rm_cat = rate_models.load_rate_models(engine, REPORT_DATE)
+        _fix_cat = _fx_cat.read_market_input("fixing_input.xlsx", get_bank())
+        _fix_cat["date"] = pd.to_datetime(_fix_cat["date"])
+        _cat_scen = ["base"] + SHOCKED_SCENARIO_IDS
+        for _, crow in cat_bs.iterrows():
+            pc, sid, ccy = str(crow["product_code"]), str(crow["bs_side"]), str(crow["currency"])
+            pr = _cat.price(crow, _rm_cat.loc[pc] if pc in _rm_cat.index else None, _fix_cat,
+                            REPORT_DATE, get_bank().generation.new_business_margin_map)
+            if pc in SINGLE_ROW_PRODUCT_CODES:
+                cat_sng_units[(pc, sid, ccy)] = _cat.unit_single(crow, pr, float(crow["sign"]))
+                sng_bal = pd.concat([sng_bal, pd.DataFrame([{"product_code": pc, "bs_side": sid,
+                                                             "currency": ccy, "balance_amt": 0.0}])],
+                                    ignore_index=True)
+                print(f"  [warn] {pc}/{sid}: single-row catalogue product -- NII at today's client rate, "
+                      f"EVE at face value, NO behavioural (NMD) rate / run-off sensitivity")
+                continue
+            ci = _ct_cat.currency_index(ccy)
+            discs = {s: _ct_cat.disc_factors[_ct_cat.scenario_index(s), ci] for s in _cat_scen}
+            u = _cat.unit_cohort(crow, pr, discs, _cat_scen, float(crow["sign"]))
+            ck = (pc, sid, ccy, REPORT_DATE.year, REPORT_DATE.month)
+            cat_coh_units[ck] = u
+            cohort_float_margins[ck] = u["margin"]                 # rate_matrix / renewal margin
+            monthly_effective_eve_pv[ck] = u["eve_eff"]           # per-unit PV per scenario
+            print(f"  {pc}/{sid} {ccy}: {u['rate_type']} rate {pr['client_rt']*100:.3f}% "
+                  f"(index {pr['index']*100:.3f}% + spread {pr['spread']*100:.2f}%), "
+                  f"NII {u['nii_unit_rate']*100:.3f}%/unit, EVE {u['eve_pv_factor']:.4f}/unit, "
+                  f"dEVE par_up {u['delta_eve'][1]*100:+.2f}%")
+
     # ═════════════════════════════════════════════════════════════════════════
     # Build cohort rows
     # ═════════════════════════════════════════════════════════════════════════
     coh_rows = []
+
+    if cat_coh_units:
+        coh_bal = pd.concat([coh_bal, pd.DataFrame(
+            [dict(zip(_COHORT_KEY, ck), balance_amt=0.0) for ck in cat_coh_units])], ignore_index=True)
 
     # merge CF stats and repricing into balance frame
     coh = (coh_bal
@@ -2264,6 +2464,9 @@ def build_product_params() -> None:
         # Balance share guarantees Σ(nii_unit × bal) = prod_nii_base exactly.
         prod_nii_base = coh_nii_base_map.get(prod_key, 0.0)
         nii_unit = prod_nii_base / prod_bal if prod_bal > 0 else 0.0
+        _vk = _vint_of(pc, sid, ccy, row["start_year"], row["start_month"]) if bal > 0 else None
+        if _vk is not None and vint_bal.get(_vk, 0.0) > 0:      # split product: its vintage's own NII
+            nii_unit = vint_nii_base.get(_vk, 0.0) / vint_bal[_vk]
 
         # ── EVE base: distribute product-level irrbb EVE by balance share ───────
         # pv_total in irrbb.eve_results is already signed (+A, -L/E).
@@ -2309,6 +2512,7 @@ def build_product_params() -> None:
 
         # LCR/NSFR regulatory parameters
         hqla_f = float(_meta(pc, sid, ccy, "hqla_factor", 0.0) or 0.0) if sid == "A" else 0.0
+        hqla_f *= _HQLA_MV.get(str(pc), 1.0) if hqla_f else 1.0      # HQLA at market value
         asf_f  = float(_meta(pc, sid, ccy, "ASF",         0.0) or 0.0) if sid in ("L", "E") else 0.0
         rsf_f  = float(_meta(pc, sid, ccy, "RSF",         0.0) or 0.0) if sid == "A" else 0.0
         rwa_f  = float(_meta(pc, sid, ccy, "rwa_weight",  0.0) or 0.0) if sid == "A" else 0.0
@@ -2333,21 +2537,41 @@ def build_product_params() -> None:
             if pc in _td_product_codes:
                 # Term deposits: use effective LCR rate derived from contractual maturity split
                 # (within_30d @ 100% + after_30d @ td_default_weight), calibrated per product.
-                lcr_r = _td_eff_lcr.get(pc, td_default_weight if _td_eff_lcr else base_lcr)
+                if pc in _td_eff_lcr:
+                    lcr_r = _td_eff_lcr[pc]
+                else:
+                    # catalogue / new-business TD (no balance yet): the same counterparty rule on its
+                    # own terms -- not the pooled weight of all TD rows, which mixes in the 100%
+                    # interbank rows (a new retail 6M deposit got 23% instead of its 5%)
+                    from labbank_common import lcr_rules as _lr
+                    from catalogue_params import _months as _cat_months
+                    _short = _cat_months(_meta(pc, sid, ccy, "maturity", None)) <= 1
+                    lcr_r = _lr.term_deposit_runoff(base_lcr, _meta(pc, sid, ccy, "client_type_id", None),
+                                                    1.0 if _short else 0.0)
             else:
                 # Non-term-deposit liabilities: exact LCR applies base_lcr to full balance.
                 lcr_r = base_lcr
         else:
             lcr_r = 0.0
 
-        # Inflows: all A-side CFs within 30 days, matching liq_calc formula exactly.
-        # The exact liq_calc includes ALL A-side assets (including HQLA bonds)
-        # in the raw inflow sum — HQLA assets are NOT excluded here.
-        # L/E products have no inflows.
+        # Undrawn commitment of a facility line linked to this product, per unit of DRAWN
+        # balance, so the linear optimizer scales both exposures together at fixed utilisation.
+        terms = _fac_terms.get(pc) if sid == "A" else None
+        if terms is not None:
+            # LCR: only while the line is still drawable (same rule as the register)
+            lcr_r += terms.undrawn_per_drawn * terms.undrawn_lcr * float(terms.drawable)
+            rsf_f += terms.undrawn_per_drawn * terms.undrawn_rsf
+            rwa_f *= terms.ead_multiplier
+
+        # Inflows: A-side CFs within 30 days, matching liq_calc formula exactly --
+        # HQLA products and cards excluded (labbank_common.lcr_rules; HQLA already
+        # counts in the buffer). L/E products have no inflows.
         if sid == "A":
             _prod_inflow = _lcr_inflow_map.get((pc, sid, ccy), 0.0)
             _prod_bal_val = float(prod_total_bal.get((pc, sid, ccy), 0.0) or 0.0)
-            inflow_frac = _prod_inflow / _prod_bal_val if _prod_bal_val > 0 else 0.0
+            # recognised inflow: contractual receipts x counterparty rate (lcr_rules)
+            inflow_frac = (_prod_inflow / _prod_bal_val * _inflow_rate(_meta(pc, sid, ccy, "client_type_id"))
+                           if _prod_bal_val > 0 else 0.0)
         else:
             inflow_frac = 0.0
 
@@ -2495,7 +2719,8 @@ def build_product_params() -> None:
             "coeff_b":             coeff_b,
             "client_floor":        cli_floor,
             "client_cap":          cli_cap,
-            "pd_rate":             pd_r,
+            "pd_rate":             float(_meta(pc, sid, ccy, "PD", 0.0) or 0.0),
+            "ead_multiplier":      terms.ead_multiplier if terms is not None else 1.0,
             "lgd_rate":            lgd_r,
             "vol_elasticity":      vol_elast,
             "fee_unit_rate":       fee_r,
@@ -2515,6 +2740,20 @@ def build_product_params() -> None:
             "cohort_effective_renewal_rate_m": effective_renewal_rate_m,
             "cohort_has_real_monthly_schedule": bool(_has_real_monthly_schedule),
         }
+        u = cat_coh_units.get(ck)
+        if u is not None:            # catalogue product: per-unit new-business cohort
+            _infl = (u["first_30d"] * _inflow_rate(_meta(pc, sid, ccy, "client_type_id"))
+                     if sid == "A" and pc not in set(_non_inflow_codes(bs)) else 0.0)
+            entry.update({
+                "nii_unit_rate": u["nii_unit_rate"], "eve_pv_factor": u["eve_pv_factor"],
+                "d_mod": u["d_mod"], "inflow_30d_frac": _infl, "amort_frac_1y": u["amort_1y"],
+                "nii_reprice_frac": u["amort_1y"],
+                "repricing_tenor_m": u["repricing_tenor_m"], "rate_type": u["rate_type"],
+                "coupon_rate": u["coupon_rate"],
+                "cohort_outstanding_m": u["out_m"], "cohort_capital_m": u["cap_m"],
+                "cohort_interest_yf_m": u["interest_yf_m"], "cohort_capital_remain_m": u["cap_remain_m"],
+                "cohort_locked_rate": u["locked_rate"], "cohort_t_first_m": u["t_first_m"],
+            })
         coh_rows.append(entry)
 
     # ═════════════════════════════════════════════════════════════════════════
@@ -2566,7 +2805,8 @@ def build_product_params() -> None:
         bs_pct = _meta(pc, sid, ccy, "full_pct", 0.0)
         # IRS notionals not in bs_structure: derive bs_pct from notional / (2 × total_assets)
         if bs_pct == 0.0 and pc in IRS_PRODUCT_CODES and bal > 0:
-            bs_pct = bal / (2.0 * TOTAL_ASSETS) * 100.0
+            from labbank_common import fx as _fx      # FX legs can be in a foreign currency
+            bs_pct = bal * _fx.to_home(get_bank(), REPORT_DATE)[ccy] / (2.0 * TOTAL_ASSETS) * 100.0
         hqla_f    = _meta(pc, sid, ccy, "hqla_factor",   0.0) or 0.0 if sid == "A" else 0.0
         lcr_r     = _meta(pc, sid, ccy, "LCR",           0.0) or 0.0 if sid == "L" else 0.0
         asf_f     = _meta(pc, sid, ccy, "ASF",           0.0) or 0.0 if sid in ("L","E") else 0.0
@@ -2656,6 +2896,8 @@ def build_product_params() -> None:
             "cohort_effective_renewal_rate_m": np.zeros((12, len(["base"] + SHOCKED_SCENARIO_IDS))),
             "cohort_has_real_monthly_schedule": False,
         }
+        if k in cat_sng_units:       # catalogue product (see catalogue_params.unit_single)
+            entry.update(cat_sng_units[k])
         sng_rows.append(entry)
 
     # ═════════════════════════════════════════════════════════════════════════
@@ -2698,10 +2940,18 @@ def build_product_params() -> None:
             prod_bal_i  = max(prod_total_bal.get(prod_key_i, bal_i), 1.0)
             nii_b_i     = coh_nii_base_map.get(prod_key_i, 0.0)
             eve_b_i     = coh_eve_base_map.get(prod_key_i, 0.0)
+            _vk = (_vint_of(pc, sid, ccy, row["start_year"], row["start_month"])
+                   if row["balance_amt"] > 0 else None)
+            if _vk is not None and vint_bal.get(_vk, 0.0) > 0:   # split product: its vintage's own deltas
+                _vb = vint_bal[_vk]; _nb0 = vint_nii_base.get(_vk, 0.0)
+                for s_idx, scen in enumerate(SHOCKED_SCENARIO_IDS):
+                    nii_s = vint_nii_scen.get(_vk + (scen,), np.nan)
+                    if not np.isnan(nii_s):
+                        delta_nii_unit[i, s_idx] = (nii_s - _nb0) / _vb
 
             for s_idx, scen in enumerate(SHOCKED_SCENARIO_IDS):
                 nii_s = coh_nii_scen_map.get(prod_key_i + (scen,), np.nan)
-                if not np.isnan(nii_s):
+                if not np.isnan(nii_s) and _vk is None:
                     delta_nii_unit[i, s_idx] = (nii_s - nii_b_i) / prod_bal_i
 
                 eve_s = coh_eve_scen_map.get(prod_key_i + (scen,), np.nan)
@@ -2722,6 +2972,15 @@ def build_product_params() -> None:
     # Catch any residual NaN (missing scenario / zero-balance edge cases)
     np.nan_to_num(delta_nii_unit, copy=False, nan=0.0)
     np.nan_to_num(delta_eve_unit, copy=False, nan=0.0)
+
+    # catalogue cohorts: shocked minus base of their own unit cohort (single-row ones stay 0)
+    for i, row in enumerate(all_rows):
+        if row["is_cohort"]:
+            u = cat_coh_units.get((row["product_code"], row["bs_side"], row["currency"],
+                                   int(row["start_year"]), int(row["start_month"])))
+            if u is not None:
+                delta_nii_unit[i, :] = u["delta_nii"][1:]       # unit arrays: base first, then
+                delta_eve_unit[i, :] = u["delta_eve"][1:]       # SHOCKED_SCENARIO_IDS order
 
     # ─────────────────────────────────────────────────────────────────────────
     # Write to SQL
@@ -2872,7 +3131,7 @@ def build_product_params() -> None:
     # ─────────────────────────────────────────────────────────────────────────
     from bs_vector import CurveTensors
 
-    NPZ_CURVES = os.path.join(BASE_DIR, "..", "output", "curve_tensors.npz")
+    NPZ_CURVES = os.path.join(BANK_OUT_DIR, "curve_tensors.npz")
     _cr_rate_scen = ["base"] + SHOCKED_SCENARIO_IDS          # base always index 0
     _cr_n_scen    = len(_cr_rate_scen)
 
@@ -3180,6 +3439,9 @@ def build_product_params() -> None:
                 continue
             eff_eve = _eve_eff_grps[i]
             bal = float(row["balance_amt"])
+            if bal <= 0 and (row["product_code"], row["bs_side"], row["currency"],
+                             int(row["start_year"]), int(row["start_month"])) in cat_coh_units:
+                bal = 1.0            # catalogue cohort: its PVs are already per unit
             if eff_eve is not None and bal > 0:
                 m_idx_eff, pv_eff = eff_eve
                 m_idx_eff = np.asarray(m_idx_eff, dtype=int)
@@ -3262,6 +3524,37 @@ def build_product_params() -> None:
     # ─────────────────────────────────────────────────────────────────────────
     # Save .npz
     # ─────────────────────────────────────────────────────────────────────────
+    # Every per-unit quantity above is a ratio of two amounts in the row's own currency;
+    # the one absolute amount, balance_arr, goes out in the HOME currency so the fast
+    # layer adds currencies up correctly (bs_pct_current is already a home-currency share).
+    from labbank_common import fx
+    balance_arr = balance_arr * fx.to_home_series(params_df["currency"], get_bank(), REPORT_DATE).to_numpy()
+
+    # Committed facilities without a drawn product: fixed totals (home ccy) from the register
+    # (read strictly: a failed read must not silently drop the exposure)
+    from labbank_common import commitments as _cmt
+    _tot = _cmt.standalone_totals(_cmt.read_register(engine), fx.to_home(get_bank(), REPORT_DATE))
+    commit_lcr, commit_rsf, commit_rwa, commit_el = _tot["lcr"], _tot["rsf"], _tot["rwa"], _tot["el"]
+    if any(_tot.values()):
+        print(f"  Standalone committed facilities: LCR outflow {commit_lcr/1e6:,.1f}M, "
+              f"RSF {commit_rsf/1e6:,.1f}M, RWA {commit_rwa/1e6:,.1f}M, EL {commit_el/1e6:,.2f}M")
+
+    # Their expected loss scales with the bank like the commit_* totals (commit_scale =
+    # non-derivative assets / total_assets), i.e. exactly commit_el / total_assets per unit
+    # of such an asset -- folded into el_unit so every EP consumer (fast layer, all
+    # optimizers incl. the LP coefficients, finance report) includes it without changes.
+    el_unit = (params_df["pd_rate"].fillna(0.0) * params_df["lgd_rate"].fillna(0.0)
+               * params_df.get("ead_multiplier", pd.Series(1.0, index=params_df.index)).fillna(1.0)
+               ).to_numpy(dtype=float)
+    if commit_el:
+        _carry = ((params_df["bs_side"] == "A")
+                  & ~params_df["product_code"].astype(str).isin(["0000", "0100"])).to_numpy()
+        el_unit = el_unit + np.where(_carry, commit_el / TOTAL_ASSETS, 0.0)
+
+    # only banks with standalone facilities carry the keys (BalanceSheetParams defaults to 0)
+    _commit_npz = ({"commit_lcr_outflow": np.array([commit_lcr]), "commit_rsf": np.array([commit_rsf]),
+                    "commit_rwa": np.array([commit_rwa]), "commit_el": np.array([commit_el])}
+                   if any(_tot.values()) else {})
     os.makedirs(os.path.dirname(NPZ_OUT), exist_ok=True)
     np.savez(
         NPZ_OUT,
@@ -3287,7 +3580,7 @@ def build_product_params() -> None:
         rwa_factor        = params_df["rwa_factor"].to_numpy(dtype=float),
         pd_rate           = params_df["pd_rate"].fillna(0.0).to_numpy(dtype=float),
         lgd_rate          = params_df["lgd_rate"].fillna(0.0).to_numpy(dtype=float),
-        el_unit           = (params_df["pd_rate"].fillna(0.0) * params_df["lgd_rate"].fillna(0.0)).to_numpy(dtype=float),
+        el_unit           = el_unit,                    # incl. standalone facility EL (above)
         fee_unit_rate     = params_df["fee_unit_rate"].fillna(0.0).to_numpy(dtype=float),
         acq_cost_rate     = params_df["acq_cost_rate"].fillna(0.0).to_numpy(dtype=float),
         coc_rate          = np.array([coc_rate]),
@@ -3326,6 +3619,7 @@ def build_product_params() -> None:
                             ),
         scenario_ids         = np.array(SHOCKED_SCENARIO_IDS),
         total_assets         = np.array([TOTAL_ASSETS]),
+        **_commit_npz,
         report_date          = np.array([str(REPORT_DATE.date())]),
         balance_arr          = balance_arr,
         cohort_outstanding_m = cohort_outstanding_m,

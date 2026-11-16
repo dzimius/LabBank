@@ -22,9 +22,13 @@ from __future__ import annotations
 
 import os
 import numpy as np
+import sys
+sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")))
+from labbank_common.bank_config import get_bank
+BANK_OUT_DIR = str(get_bank().output_dir("optimize_prep"))   # runs/<bank_id>/optimize_prep
 
 _HERE      = os.path.dirname(os.path.abspath(__file__))
-BIAS_PATH  = os.path.normpath(os.path.join(_HERE, "..", "output", "bias_corrections.npz"))
+BIAS_PATH  = os.path.join(BANK_OUT_DIR, "bias_corrections.npz")
 
 
 def save_bias_corrections(
@@ -44,14 +48,15 @@ def save_bias_corrections(
 
 
 def load_bias_corrections(
-    path: str = BIAS_PATH,
+    path: str | None = None,
 ) -> tuple[np.ndarray | None, np.ndarray | None, list[str] | None]:
-    """Load bias corrections.
+    """Load bias corrections (path None = this process's bank, LABBANK_BANK).
 
     Returns
     -------
     (bias_eve_unit, bias_nii_unit, scenario_ids) or (None, None, None) if file not found.
     """
+    path = path or BIAS_PATH
     if not os.path.exists(path):
         return None, None, None
     data = np.load(path, allow_pickle=True)

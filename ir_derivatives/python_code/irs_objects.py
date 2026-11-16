@@ -9,13 +9,18 @@ import numpy as np
 import pandas as pd
 import QuantLib as ql
 
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.normpath(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "..")))
+from labbank_common.curves import fixing_asof  # noqa: E402
+
 
 # ── QuantLib helpers (mirrors cash_flow_calc/cf_calc_objects.py) ──────────────
 
 def get_calendar_from_currency(curr: str) -> ql.Calendar:
     return {"PLN": ql.Poland(),
             "EUR": ql.TARGET(),
-            "USD": ql.UnitedStates(ql.UnitedStates.NYSE)}.get(curr, ql.TARGET())
+            "USD": ql.UnitedStates(ql.UnitedStates.NYSE),
+            "GBP": ql.UnitedKingdom()}.get(curr, ql.TARGET())
 
 
 def get_dc_conv_from_str(s: str) -> ql.DayCounter:
@@ -60,6 +65,7 @@ def gen_fixed_leg_schedule(
     No notional exchange in a vanilla IRS — capital_pmt = 0 for all periods
     (consistent with the floating leg).  The notional repricing at maturity is
     handled inside compute_ir_swap_gap via outstanding_bal, not capital_pmt.
+    A CIRS leg (notional_exchange = 1) repays its notional at maturity: _exchange_notional.
     All fixing_dt values are set to swap start - 2D (always <= report_date) so
     the repricing-gap logic treats this leg as fixed-rate (is_floating = 0).
     """
@@ -114,7 +120,29 @@ def gen_fixed_leg_schedule(
             "total_pmt":      int_pmt,
         })
 
-    return pd.DataFrame(rows)
+    return _exchange_notional(pd.DataFrame(rows), row, report_date, disc_df)
+
+
+def _exchange_notional(df: pd.DataFrame, row, report_date: pd.Timestamp, disc_df: pd.Series) -> pd.DataFrame:
+    """CIRS legs (notional_exchange = 1): the notional is repaid on the last payment date, and
+    the opposite exchange at the start date is added when that is still ahead (forward start), as
+    for FX deal legs. IRS legs are returned unchanged."""
+    exch = getattr(row, "notional_exchange", 0)
+    if df is None or df.empty or pd.isna(exch) or int(exch) != 1:
+        return df
+    df = df.copy()
+    last = df["cf_end_dt"].idxmax()
+    n = float(row.notional)
+    df.loc[last, "capital_pmt"] = n
+    df.loc[last, "total_pmt"] = df.loc[last, "int_pmt"] + n
+    start = pd.Timestamp(row.start_date)
+    if start > report_date:
+        first = df.loc[df["cf_end_dt"].idxmin()].copy()
+        first.update({"cf_start_dt": report_date, "cf_end_dt": start, "cf_yf": 0.0,
+                      "d_f": disc_df.get((row.disc_curve, start), np.nan),
+                      "capital_pmt": -n, "int_pmt": 0.0, "total_pmt": -n})
+        df = pd.concat([pd.DataFrame([first]), df], ignore_index=True)
+    return df
 
 
 def gen_float_leg_schedule(
@@ -194,12 +222,9 @@ def gen_float_leg_schedule(
     # Override with historical fixings for past periods
     mask = result["fixing_dt"] <= report_date
     if mask.any():
-        fix_idx = pd.MultiIndex.from_arrays(
-            [result.loc[mask, "fixing_dt"].to_numpy(),
-             result.loc[mask, "rate_index"].to_numpy()],
-            names=["fixing_date", "rate_index"],
-        )
-        result.loc[mask, "fwd_rt"] = fix_df.reindex(fix_idx).to_numpy() / 100.0
+        # last quote on or before the fixing date (a TARGET day can have no quote)
+        result.loc[mask, "fwd_rt"] = fixing_asof(
+            fix_df, result.loc[mask, "fixing_dt"], result.loc[mask, "rate_index"]) / 100.0
 
     result = result.drop(columns=["join_dt"])
 
@@ -208,7 +233,52 @@ def gen_float_leg_schedule(
     result["int_pmt"]         = notional * (result["fwd_rt"] + spread) * result["cf_yf"]
     result["total_pmt"]       = result["int_pmt"]
 
-    return result
+    return _exchange_notional(result, row, report_date, disc_df)
+
+
+# ── FX deal legs (labbank_common/derivatives.py: one leg per deal and currency) ──
+
+def gen_fx_leg_schedule(
+    row,
+    report_date: pd.Timestamp,
+    disc_df: pd.Series,          # MultiIndex (curve_name, node_date) -> d_f
+) -> Optional[pd.DataFrame]:
+    """Cash flows of one currency of an FX deal, on that currency's curve.
+
+    The outstanding exchange is a zero-coupon position: the principal (``outstanding_bal``
+    = the near amount) comes back at maturity with ``int_pmt`` = far - near amount (the
+    swap points; 0 on the currency whose amount is the same at both dates). A deal whose
+    near exchange is still ahead also gets the near exchange as a capital flow of the
+    opposite sign. fixing_dt <= report_date: the leg is fixed-rate for the gap logic.
+    """
+    start  = pd.Timestamp(row.start_date)
+    end    = pd.Timestamp(row.maturity_date)
+    if end <= report_date:
+        return None
+    dc     = get_dc_conv_from_str(row.dc_conv)
+    yf     = dc.yearFraction(ql.Date.from_date(start.date()), ql.Date.from_date(end.date())) if end > start else 0.0
+    out    = float(row.outstanding_bal)
+    intr   = float(row.interest)
+    rows = [{
+        "schedule_id":     str(row.schedule_id),
+        "bs_side":         row.bs_side,
+        "rate_index":      "FIXED",
+        "fixing_dt":       min(start, report_date) - pd.Timedelta(days=2),
+        "cf_start_dt":     start if start < end else report_date,
+        "cf_end_dt":       end,
+        "cf_yf":           yf,
+        "d_f":             disc_df.get((row.disc_curve, end), np.nan),
+        "fwd_rt":          intr / (out * yf) if out and yf else 0.0,
+        "outstanding_bal": out,
+        "capital_pmt":     out,
+        "int_pmt":         intr,
+        "total_pmt":       out + intr,
+    }]
+    if float(row.near_amount) != 0.0 and start > report_date:     # forward-starting deal
+        rows.insert(0, {**rows[0], "cf_start_dt": report_date, "cf_end_dt": start, "cf_yf": 0.0,
+                        "d_f": disc_df.get((row.disc_curve, start), np.nan), "fwd_rt": 0.0,
+                        "capital_pmt": -out, "int_pmt": 0.0, "total_pmt": -out})
+    return pd.DataFrame(rows)
 
 
 # ── IR repricing gap computation ──────────────────────────────────────────────
@@ -331,7 +401,7 @@ def compute_ir_swap_gap(
         leg_type  = grp["leg_type"].iloc[0]
         grp       = grp.sort_values("cf_end_dt").reset_index(drop=True)
 
-        if leg_type == "FIXED":
+        if leg_type in ("FIXED", "FX"):        # FX deal legs: fixed zero-coupon positions
             # Interest locked at fixed rate → each coupon reprices at its payment date.
             # Notional reprices at maturity (last row) via outstanding_bal — no capital
             # exchange in the CF table but the full notional is at risk until swap end.

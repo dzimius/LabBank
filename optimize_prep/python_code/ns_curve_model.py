@@ -1,8 +1,8 @@
 """ns_curve_model.py
 ===================
 Dynamic Nelson-Siegel (Diebold-Li) calibration on historical PLN fixings,
-used to Monte-Carlo simulate interest-rate curve scenarios for Phase A
-(stochastic single-period balance sheet optimization).
+used to Monte-Carlo simulate interest-rate curve scenarios for the
+balance sheet optimisation checks.
 
 Pipeline
 --------
@@ -36,11 +36,12 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+import sys
+sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")))
+from labbank_common.bank_config import get_bank
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_FIXING_PATH = os.path.normpath(
-    os.path.join(_HERE, "..", "..", "balance_gen_add_data", "input", "fixing_input.xlsx")
-)
+DEFAULT_FIXING_PATH = str(get_bank().market_dir() / "fixing_input.xlsx")
 
 TENOR_YEARS = {"1D": 1.0 / 365.0, "1M": 1.0 / 12.0, "3M": 0.25, "6M": 0.5, "1Y": 1.0, "5Y": 5.0, "7Y": 7.0}
 
@@ -76,14 +77,15 @@ def ns_design_matrix(t: np.ndarray, tau: float) -> np.ndarray:
 # 1. Historical panel
 # ─────────────────────────────────────────────────────────────────────────────
 
-def load_historical_panel(path: str = DEFAULT_FIXING_PATH) -> pd.DataFrame:
-    """Load PLN fixing history -> wide panel indexed by date, columns = tenor labels.
+def load_historical_panel(path: str = DEFAULT_FIXING_PATH, ccy: str | None = None) -> pd.DataFrame:
+    """Load a fixing history -> wide panel indexed by date, columns = tenor labels. ccy: the currency
+    to keep (default the bank's home currency; a foreign currency reads its own file).
 
     Values are mid rates (average of ASK/BID) in **basis points** (rate_pct * 100),
     matching the units of eba_shock_curves.shock_bps_at_tenors().
     """
     df = pd.read_excel(path)
-    df = df[df["currency"] == "PLN"]
+    df = df[df["currency"] == (ccy or get_bank().market.ccy)]
     mid = df.groupby(["date", "tenor"])["rate"].mean().mul(100.0)  # % -> bps
     panel = mid.unstack("tenor").sort_index()
     panel = panel[[c for c in TENOR_YEARS if c in panel.columns]]
@@ -273,7 +275,7 @@ def simulate_mean_reverting_shocks(
 
     Returns (N, 3) shocks RELATIVE TO today_beta -- a drop-in replacement for
     simulate_factor_shocks()'s output wherever it's consumed (e.g.
-    stochastic_optimizer.build_scenario_ep_matrix(),
+    
     curve_scenario_bank.build_mc_scenario_bank()) -- those callers don't need
     to change at all, only how `factor_draws` itself gets generated.
     """

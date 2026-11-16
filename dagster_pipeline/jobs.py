@@ -8,7 +8,9 @@ from dagster_pipeline.assets import (
     nii_results,
     eve_results,
     eba_sot_results,
+    csrbb_results,
     lcr_nsfr_results,
+    off_balance_results,
     optimize_prep_tensors,
     hyp_scenario_curves,
 )
@@ -18,7 +20,7 @@ from dagster_pipeline.assets import (
 # ir_swaps runs here so IRS positions (schemat.ir_swaps, cf.ir_swap_*) are
 # visible immediately after BS generation. The IRS gap merge into
 # irrbb.ir_gap_beh is deferred gracefully until cash_flows has been run.
-# ir_swaps is skipped entirely when irs_input.xlsx has no active swaps.
+# ir_swaps is skipped entirely when derivatives.xlsx has no active swaps.
 balance_sheet_job = define_asset_job(
     name="balance_sheet_job",
     selection=AssetSelection.assets(
@@ -30,12 +32,12 @@ balance_sheet_job = define_asset_job(
         "Full balance sheet generation: synthetic transactions → market data "
         "(curves, fixings, behavioral models, schedule tables) → IRS positions. "
         "IRS gap merge is deferred until cash_flows is run. "
-        "ir_swaps skipped when irs_input.xlsx has no active swaps."
+        "ir_swaps skipped when derivatives.xlsx has no active swaps."
     ),
 )
 
 # ── Full run (balance sheet → cash flows → IRS → IRRBB + Liquidity) ───────────
-# ir_swaps skips gracefully when irs_input.xlsx has no active swaps.
+# ir_swaps skips gracefully when derivatives.xlsx has no active swaps.
 full_run_job = define_asset_job(
     name="full_run_job",
     selection=AssetSelection.assets(
@@ -46,19 +48,21 @@ full_run_job = define_asset_job(
         nii_results,
         eve_results,
         eba_sot_results,
+        csrbb_results,
         lcr_nsfr_results,
+        off_balance_results,
     ),
     description=(
         "Complete ALM pipeline: generate balance sheet → load market data → "
         "build cash flows → process IRS → compute IRRBB (NII, EVE, EBA SOT) "
         "and Liquidity (LCR, NSFR). "
-        "ir_swaps is a no-op when irs_input.xlsx has no active swaps."
+        "ir_swaps is a no-op when derivatives.xlsx has no active swaps."
     ),
 )
 
 # ── IRS update → recompute IRRBB ──────────────────────────────────────────────
 # Use when IRS trades change but the balance sheet and cash flows are unchanged.
-# Reads irs_input.xlsx, re-merges swap gap into irrbb.ir_gap_beh, then reruns
+# Reads derivatives.xlsx, re-merges swap gap into irrbb.ir_gap_beh, then reruns
 # NII, EVE, and EBA SOT. lcr_nsfr_results is unaffected and not rerun.
 irs_update_job = define_asset_job(
     name="irs_update_job",
@@ -69,7 +73,7 @@ irs_update_job = define_asset_job(
         eba_sot_results,
     ),
     description=(
-        "IRS trade update workflow: reload swaps from irs_input.xlsx, "
+        "IRS trade update workflow: reload swaps from derivatives.xlsx, "
         "merge new swap gap into irrbb.ir_gap_beh, then recompute "
         "NII, EVE, and EBA SOT. Balance sheet and cash flows are unchanged."
     ),
@@ -115,8 +119,8 @@ optimize_prep_job = define_asset_job(
 )
 
 # ── LabBank data refresh (full_run_job + optimize_prep in one job) ────────────
-# Use this after editing balance_generate/input_data/bank_data.xlsx (and/or
-# irs_input.xlsx) to regenerate your own balance sheet AND refresh the npz
+# Use this after editing inputs/<bank>/balance/bank_data.xlsx (and/or
+# derivatives.xlsx) to regenerate your own balance sheet AND refresh the npz
 # tensors that sandbox/app.py (LabBank) reads. One job instead of running
 # full_run_job then optimize_prep_job separately.
 labbank_data_job = define_asset_job(
@@ -129,13 +133,15 @@ labbank_data_job = define_asset_job(
         nii_results,
         eve_results,
         eba_sot_results,
+        csrbb_results,
         lcr_nsfr_results,
+        off_balance_results,
         optimize_prep_tensors,
         hyp_scenario_curves,
     ),
     description=(
         "Full pipeline + optimizer prep in one job: regenerate the balance "
-        "sheet from balance_generate/input_data/bank_data.xlsx, run the "
+        "sheet from inputs/<bank>/balance/bank_data.xlsx, run the "
         "complete ALM pipeline, then rebuild the npz tensors LabBank "
         "(sandbox/app.py) reads. Run this after editing the input Excel "
         "files, then click 'Reload my data' in the running Streamlit app."
@@ -154,7 +160,9 @@ recalc_from_sql_job = define_asset_job(
         nii_results,
         eve_results,
         eba_sot_results,
+        csrbb_results,
         lcr_nsfr_results,
+        off_balance_results,
         optimize_prep_tensors,
         hyp_scenario_curves,
     ),

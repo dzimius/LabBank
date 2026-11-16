@@ -3,7 +3,7 @@
 Pre-compute the sandbox's 15 stylised hypothetical yield curves and the exact
 per-product IRRBB metrics for each.
 
-Produces sandbox/scenario_curves.npz with:
+Produces runs/<bank>/sandbox/scenario_curves.npz with:
   - 15 forward-rate curves (5 shapes × 3 levels) + discount-factor arrays
   - Per-product IRRBB unit metrics for each curve:
       hyp_nii_unit_rate  (15, n)      NII / balance at the hypothetical base
@@ -33,6 +33,12 @@ from __future__ import annotations
 import os
 import sys
 import numpy as np
+_ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+if _ROOT_DIR not in sys.path:
+    sys.path.insert(0, _ROOT_DIR)
+from labbank_common.bank_config import get_bank  # noqa: E402
+
+HOME_CCY = get_bank().market.ccy   # hypothetical curves replace the bank's home-currency curve
 
 # ── tenor grid ────────────────────────────────────────────────────────────────
 N_MONTHS = 360
@@ -112,11 +118,11 @@ def _blend_to_target(r0: float, target: np.ndarray, t: np.ndarray) -> np.ndarray
 
 # ── curve generation ──────────────────────────────────────────────────────────
 
-def build_scenario_curves(real_fwd_pln: np.ndarray) -> dict:
-    """real_fwd_pln: (360,) today's actual PLN base forward curve (from
+def build_scenario_curves(real_fwd: np.ndarray) -> dict:
+    """real_fwd: (360,) today's actual home-currency base forward curve (from
     curve_tensors.npz) -- every hypothetical curve is anchored to its short
     end via _blend_to_target() instead of starting at the stylised level."""
-    r0 = float(real_fwd_pln[0])   # today's ~1-month rate, the common anchor
+    r0 = float(real_fwd[0])   # today's ~1-month rate, the common anchor
     fwd_list, disc_list, scen_ids = [], [], []
     for ctype in CURVE_TYPES:
         fn = _SHAPE_FN[ctype]
@@ -211,7 +217,7 @@ def build_hyp_irrbb_metrics(params, cr, curves, sc_data: dict) -> dict:
     nii_fb_b     = np.nan_to_num(params.coeff_b,      nan=0.0)
     nii_fb_floor = np.nan_to_num(params.client_floor, nan=-1.0)
     nii_fb_cap   = np.nan_to_num(params.client_cap,   nan=1.0)
-    real_fwd_pln = curves.get_fwd_curve("base", "PLN")
+    real_fwd = curves.get_fwd_curve("base", HOME_CCY)
 
     def _client_rate(fwd: np.ndarray) -> np.ndarray:
         return np.clip(
@@ -219,7 +225,7 @@ def build_hyp_irrbb_metrics(params, cr, curves, sc_data: dict) -> dict:
             nii_fb_floor[nii_fb_mask], nii_fb_cap[nii_fb_mask],
         )
 
-    nii_fb_rate_real = _client_rate(real_fwd_pln)
+    nii_fb_rate_real = _client_rate(real_fwd)
 
     n_hyp = len(sc_data["scenario_ids"])
     all_nii_unit       = np.zeros((n_hyp, n),          dtype=float)
@@ -315,7 +321,7 @@ def build_hyp_irrbb_metrics(params, cr, curves, sc_data: dict) -> dict:
 # EXACT per-product IRRBB for every hypothetical curve
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_hyp_irrbb_metrics_exact(params, sc_data, report_date):
+def build_hyp_irrbb_metrics_exact(params, sc_data, report_date, disc_m_out: list | None = None):
     """Per-product NII + EVE (base + 7 EBA shocks) for each of the 15 hypothetical
     curves, computed with the **production** re-pricing functions.
 
@@ -347,8 +353,9 @@ def build_hyp_irrbb_metrics_exact(params, sc_data, report_date):
 
     HORIZON_YF  = 1.0
     horizon_end = _cfg.report_date + pd.Timedelta(days=round(HORIZON_YF * 365.25))
-    DISC_MAP    = {"PLN": "PLN_disc_curve", "EUR": "EUR_disc_curve", "USD": "USD_disc_curve"}
+    DISC_MAP    = {"PLN": "PLN_disc_curve", "EUR": "EUR_disc_curve", "USD": "USD_disc_curve", "GBP": "GBP_disc_curve"}
     OWN_BPS     = -100.0
+    PROJ_FLOOR  = float("-inf")   # projected index rates unfloored, as the production run (products floor via the rate model)
 
     # client-rate model from bs.models_rate -- same source as the production IRRBB run
     if _root not in sys.path:
@@ -374,8 +381,8 @@ def build_hyp_irrbb_metrics_exact(params, sc_data, report_date):
     print(f"  CF rows: EVE {len(eve_beh):,}  NII {len(nii_beh):,}")
 
     mkt_df   = _sql.load_mkt_curves(_cfg.report_date)          # curve_name, n_days, d_f
-    pln_mask = mkt_df["curve_name"] == DISC_MAP["PLN"]
-    pln_days = mkt_df.loc[pln_mask, "n_days"].to_numpy(dtype=float)
+    home_mask = mkt_df["curve_name"] == DISC_MAP[HOME_CCY]
+    home_days = mkt_df.loc[home_mask, "n_days"].to_numpy(dtype=float)
 
     n   = len(params.product_code)
     key = np.array([f"{params.product_code[i]}|{params.bs_side[i]}" for i in range(n)])
@@ -402,30 +409,53 @@ def build_hyp_irrbb_metrics_exact(params, sc_data, report_date):
             parts.append(daily.set_index(["curve_name", "node_date"])["d_f"].sort_index())
         return pd.concat(parts).sort_index()
 
+    # NII level on a hypothetical curve is measured against TODAY's curve: the CF tables carry
+    # today's fixings and the engine moves a floating / administered coupon by (curve - base
+    # curve), so with the hypothetical curve as its own base every floating coupon stayed at
+    # today's level while only renewals moved (NII rose on lower curves). Deltas per shock stay
+    # against the hypothetical curve's own base.
+    _sh_today = _esc.build_all_shocked_curves(mkt_df, _cfg.report_date, HOME_CCY, OWN_BPS, None)   # None = EBA lower bound, as the production IRRBB run
+    disc_today = _daily_disc(_sh_today[_sh_today["scenario_id"] == "base"])
+
     for i, sid in enumerate(sc_data["scenario_ids"]):
         fwd_hyp  = np.asarray(sc_data["fwd_rates"][i], dtype=float)[:N_M]     # annualised, monthly
         df_hyp_m = np.exp(-np.cumsum(fwd_hyp / 12.0))
         z_hyp_m  = -np.log(np.clip(df_hyp_m, 1e-12, None)) / yr
-        z_nodes  = np.interp(pln_days / 365.25, yr, z_hyp_m, left=z_hyp_m[0], right=z_hyp_m[-1])
-        df_nodes = np.where(pln_days > 0, np.exp(-z_nodes * (pln_days / 365.25)), 1.0)
+        z_nodes  = np.interp(home_days / 365.25, yr, z_hyp_m, left=z_hyp_m[0], right=z_hyp_m[-1])
+        df_nodes = np.where(home_days > 0, np.exp(-z_nodes * (home_days / 365.25)), 1.0)
 
         hyp_mkt = mkt_df.copy()
-        hyp_mkt.loc[pln_mask, "d_f"] = df_nodes
+        hyp_mkt.loc[home_mask, "d_f"] = df_nodes
 
-        shocked = _esc.build_all_shocked_curves(hyp_mkt, _cfg.report_date, "PLN", OWN_BPS, 0.0)
+        shocked = _esc.build_all_shocked_curves(hyp_mkt, _cfg.report_date, HOME_CCY, OWN_BPS, None)   # None = EBA lower bound, as the production IRRBB run
+
+        if disc_m_out is not None:      # home-currency DF at month k = 1..360 per scenario (base + shocks)
+            _days = np.round(np.arange(1, 361) * 365.25 / 12.0)
+            _row = []
+            for scen in _esc.ALL_SCENARIO_IDS:
+                _g = shocked[(shocked["scenario_id"] == scen) & (shocked["curve_name"] == DISC_MAP[HOME_CCY])]
+                _d = _esc._log_interp_daily_df(_g["n_days"].to_numpy(), _g["d_f"].to_numpy(), int(_g["n_days"].max()))
+                _row.append(np.interp(_days, _d["n_days"].to_numpy(dtype=float), _d["d_f"].to_numpy(dtype=float)))
+            disc_m_out.append(np.array(_row))
 
         p_nii, p_eve = {}, {}
+        disc_base = _daily_disc(shocked[shocked["scenario_id"] == "base"])
         for scen in _esc.ALL_SCENARIO_IDS:
-            disc = _daily_disc(shocked[shocked["scenario_id"] == scen])
+            disc = disc_base if scen == "base" else _daily_disc(shocked[shocked["scenario_id"] == scen])
             es = _eve.compute_eve_shocked_schedule(
-                eve_beh, disc, DISC_MAP, scen, 0.0, CAPS, FLOORS, A_MAP, B_MAP)
+                eve_beh, disc, DISC_MAP, scen, PROJ_FLOOR, CAPS, FLOORS, A_MAP, B_MAP)
             ns = _nii.compute_nii_shocked_schedule(
-                nii_beh, disc, DISC_MAP, _cfg.report_date, scen, HORIZON_YF, 0.0,
-                CAPS, FLOORS, A_MAP, B_MAP)
+                nii_beh, disc, DISC_MAP, _cfg.report_date, scen, HORIZON_YF, PROJ_FLOOR,
+                CAPS, FLOORS, A_MAP, B_MAP, base_disc_df=disc_base)
             es["k"] = es["product_code"].astype(str) + "|" + es["bs_side"].astype(str)
             ns["k"] = ns["product_code"].astype(str) + "|" + ns["bs_side"].astype(str)
             p_eve[scen] = es.groupby("k")["pv_total"].sum().to_dict()
             p_nii[scen] = ns.groupby("k")["nii_total"].sum().to_dict()
+        nl = _nii.compute_nii_shocked_schedule(
+            nii_beh, disc_base, DISC_MAP, _cfg.report_date, "base", HORIZON_YF, PROJ_FLOOR,
+            CAPS, FLOORS, A_MAP, B_MAP, base_disc_df=disc_today)
+        nl["k"] = nl["product_code"].astype(str) + "|" + nl["bs_side"].astype(str)
+        nii_level = nl.groupby("k")["nii_total"].sum().to_dict()
 
         for j in range(n):
             k  = key[j]
@@ -435,13 +465,13 @@ def build_hyp_irrbb_metrics_exact(params, sc_data, report_date):
             eb = p_eve["base"].get(k, 0.0)
             nb = p_nii["base"].get(k, 0.0)
             out_eve[i, j] = eb / pb
-            out_nii[i, j] = nb / pb
+            out_nii[i, j] = nii_level.get(k, 0.0) / pb
             for kk, s in enumerate(shock_ids):
                 out_deve[i, j, kk] = (p_eve[s].get(k, 0.0) - eb) / pb
                 out_dnii[i, j, kk] = (p_nii[s].get(k, 0.0) - nb) / pb
 
         print(f"  [{i+1:2d}/{n_hyp}] {sid:16s}  EVE base {sum(p_eve['base'].values())/1e6:+8.0f} M   "
-              f"NII base {sum(p_nii['base'].values())/1e6:+7.0f} M")
+              f"NII base {sum(nii_level.values())/1e6:+7.0f} M")
 
     return {
         "hyp_nii_unit_rate":  out_nii,
@@ -464,9 +494,9 @@ if __name__ == "__main__":
 
     from bs_vector import BalanceSheetParams, CohortRates, CurveTensors  # noqa: E402
 
-    PARAMS_NPZ = os.path.join(_ROOT, "optimize_prep", "output", "product_params.npz")
-    CURVES_NPZ = os.path.join(_ROOT, "optimize_prep", "output", "curve_tensors.npz")
-    OUT_PATH   = os.path.join(_HERE, "scenario_curves.npz")
+    PARAMS_NPZ = str(get_bank().output_dir("optimize_prep") / "product_params.npz")
+    CURVES_NPZ = str(get_bank().output_dir("optimize_prep") / "curve_tensors.npz")
+    OUT_PATH   = str(get_bank().output_dir("sandbox") / "scenario_curves.npz")
 
     print("Loading pipeline params & curves...")
     params = BalanceSheetParams.load(PARAMS_NPZ)
@@ -475,9 +505,9 @@ if __name__ == "__main__":
     print(f"  Products: {len(params.product_code)}"
           f"  |  EBA scenarios: {[s for s in curves.scenario_ids if s != 'base']}")
 
-    print("\nBuilding scenario curves (anchored to today's real PLN short rate)...")
-    real_fwd_pln = curves.get_fwd_curve("base", "PLN")
-    sc_data = build_scenario_curves(real_fwd_pln)
+    print("\nBuilding scenario curves (anchored to today's real {HOME_CCY} short rate)...")
+    real_fwd = curves.get_fwd_curve("base", HOME_CCY)
+    sc_data = build_scenario_curves(real_fwd)
     print(f"  {len(sc_data['scenario_ids'])} scenarios: {list(sc_data['scenario_ids'])}")
 
     _report_date = str(params.report_date)

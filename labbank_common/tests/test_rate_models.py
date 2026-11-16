@@ -74,3 +74,56 @@ def test_normalise_rejects_bad_input():
 def test_shipped_excel_is_valid():
     df = rm.read_rate_excel()
     assert not df.empty and df["beta"].notna().all()
+
+
+# ── beta-adjusted repricing gap ──────────────────────────────────────────────
+
+def test_effective_beta_plain_floor_and_cap():
+    from labbank_common.rate_models import effective_beta
+    assert effective_beta(0.03, 0.0, 0.6, client_floor=0.0) == pytest.approx(0.6)
+    # PLN 6300: beta 0.1 capped at 0.1% -> already at the cap at a 3.8% index
+    assert effective_beta(0.038, 0.0, 0.1, client_floor=0.0, client_cap=0.001) == pytest.approx(0.0)
+    # client floor binding (index far below zero) -> no sensitivity
+    assert effective_beta(-0.02, 0.0, 0.5, client_floor=0.0) == pytest.approx(0.0)
+
+
+def test_beta_adjusted_gap_nmd_vs_term():
+    from labbank_common.rate_models import beta_adjusted_gap, is_nmd
+    gap = np.array([100.0, 50.0, 0.0, 850.0])
+    # NMDs follow their repricing profile like any other product (no first-bucket lump)
+    np.testing.assert_allclose(beta_adjusted_gap(gap, 0.6), 0.6 * gap)
+    np.testing.assert_allclose(beta_adjusted_gap(gap, 0.8), 0.8 * gap)
+    assert is_nmd("current_account") and is_nmd("saving_account") and not is_nmd("term_deposit")
+
+
+# ── shocked client rate = anchored change of the FULL formula ────────────────
+
+def _shock_helper():
+    sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..",
+                                                     "irrbb_calc", "python_code")))
+    from nii_calc_objects import _apply_rt_limits
+    return _apply_rt_limits
+
+
+def test_shocked_rate_respects_index_floor_and_client_cap():
+    f = _shock_helper()
+    pcs = pd.Series(["1100", "6300"])
+    floors = rm.LimitMap({"6300": 0.0}, {"1100": 0.0})          # loan: index floor 0
+    caps = rm.LimitMap({"6300": 0.001})                          # account: capped at 0.1%
+    a, b = {"6300": 0.1}, {"1100": 0.02}
+    # loan: index -1% -> +1%, spread 2%: base 2% (floored index), shocked 3% (was 4%)
+    # account: beta 0.1 capped at 0.1%: index 3.8% -> 1.3% stays at the cap (was 0%)
+    out = f(np.array([0.01, 0.013]), pcs, caps, floors, a, b,
+            base_eff_rate=np.array([0.02, 0.001]), base_fwd_rt=np.array([-0.01, 0.038]))
+    np.testing.assert_allclose(out, [0.03, 0.001])
+    # zero shock reproduces the base exactly, even off the formula (administered anchor)
+    out0 = f(np.array([-0.01, 0.038]), pcs, caps, floors, a, b,
+             base_eff_rate=np.array([0.0215, 0.0007]), base_fwd_rt=np.array([-0.01, 0.038]))
+    np.testing.assert_allclose(out0, [0.0215, 0.0007])
+
+
+def test_rate_maps_carry_index_limits():
+    caps, floors, _, _ = rm.rate_maps(MODEL)
+    assert isinstance(floors, rm.LimitMap) and floors.index.get("3200") == 0.0
+    import pickle
+    assert pickle.loads(pickle.dumps(floors)).index == floors.index

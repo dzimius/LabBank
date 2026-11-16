@@ -1,17 +1,16 @@
 from __future__ import annotations
 
+import os
+import sys
 import numpy as np
 import pandas as pd
-from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, Date, text
+from sqlalchemy import MetaData, Table, Column, Integer, String, Date, text
 from sqlalchemy.dialects.mssql import DECIMAL
 
-engine = create_engine(
-    "mssql+pyodbc://maciek_d/bank_gen"
-    "?driver=ODBC+Driver+17+for+SQL+Server"
-    "&Trusted_Connection=yes",
-    fast_executemany=True,
-    future=True,
-)
+sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')))
+from labbank_common.bank_config import get_engine
+
+engine = get_engine()   # active bank's database (LABBANK_BANK, default eur)
 
 metadata = MetaData(schema=None)
 
@@ -23,17 +22,17 @@ IRSwaps = Table(
     Column("report_date",   Date,           nullable=False),
     Column("swap_id",       String(13),     nullable=False),   # parent swap reference
     Column("leg_id",        String(16),     primary_key=True, nullable=False),
-    Column("product_code",  String(4),      nullable=False),   # always '0000' for IRS
-    Column("leg_type",      String(5),      nullable=False),   # FIXED / FLOAT
+    Column("product_code",  String(4),      nullable=False),   # '0000' swap book, '0100' FX deals
+    Column("leg_type",      String(5),      nullable=False),   # FIXED / FLOAT / FX
     Column("bs_side",       String(1),      nullable=False),   # A / L
-    Column("swap_type",     String(4),      nullable=False),   # IRS / OIS / CIRS
+    Column("swap_type",     String(4),      nullable=False),   # IRS / OIS / CIRS / FXS (FX deal)
     Column("notional",      DECIMAL(18, 2), nullable=False),
     Column("currency",      String(3),      nullable=False),
     Column("start_date",    Date,           nullable=False),
     Column("maturity_date", Date,           nullable=False),
     Column("pay_freq",      String(4),      nullable=False),
     Column("fixing_freq",   String(4),      nullable=True),    # NULL for FIXED leg
-    Column("rate_index",    String(11),     nullable=False),   # 'FIXED' or e.g. 'WIBOR3M'
+    Column("rate_index",    String(16),     nullable=False),   # 'FIXED' or e.g. 'WIBOR3M'
     Column("dc_conv",       String(7),      nullable=False),
     Column("b_day_conv",    String(25),     nullable=False),
     Column("fixed_rate",    DECIMAL(9, 6),  nullable=True),    # NULL for FLOAT leg
@@ -50,7 +49,7 @@ IrSwapOrig = Table(
     "ir_swap_orig", metadata,
     Column("schedule_id",    String(8),      primary_key=True, nullable=False),
     Column("bs_side",        String(1),      nullable=False),
-    Column("rate_index",     String(10),     nullable=False),
+    Column("rate_index",     String(16),     nullable=False),
     Column("fixing_dt",      Date,           nullable=False),
     Column("cf_start_dt",    Date,           primary_key=True, nullable=False),
     Column("cf_end_dt",      Date,           nullable=False),
@@ -68,7 +67,7 @@ IrSwapBeh = Table(
     "ir_swap_beh", metadata,
     Column("schedule_id",    String(8),      primary_key=True, nullable=False),
     Column("bs_side",        String(1),      nullable=False),
-    Column("rate_index",     String(10),     nullable=False),
+    Column("rate_index",     String(16),     nullable=False),
     Column("fixing_dt",      Date,           nullable=False),
     Column("cf_start_dt",    Date,           primary_key=True, nullable=False),
     Column("cf_end_dt",      Date,           nullable=False),
@@ -131,6 +130,11 @@ def _build_legs_df(df_swaps: pd.DataFrame) -> pd.DataFrame:
     for _, row in df_swaps.iterrows():
         fixed_side = "L" if int(row.pay_fixed) == 1 else "A"
         float_side = "A" if int(row.pay_fixed) == 1 else "L"
+        # CIRS: the float leg is in its own currency and notional, on its currency's curves
+        fl_ccy = row.get("float_currency") if pd.notna(row.get("float_currency")) else row.currency
+        fl_not = row.get("float_notional") if pd.notna(row.get("float_notional")) else row.notional
+        two_ccy = fl_ccy != row.currency
+        exch = int(row.get("notional_exchange")) if pd.notna(row.get("notional_exchange")) else 0
 
         # Fixed leg
         rows.append({
@@ -155,6 +159,7 @@ def _build_legs_df(df_swaps: pd.DataFrame) -> pd.DataFrame:
             "disc_curve":    row.disc_curve,
             "fwd_curve":     row.fwd_curve,
             "schedule_id":   sched_id,
+            "notional_exchange": exch,
         })
         sched_id += 1
 
@@ -167,8 +172,8 @@ def _build_legs_df(df_swaps: pd.DataFrame) -> pd.DataFrame:
             "leg_type":      "FLOAT",
             "bs_side":       float_side,
             "swap_type":     row.swap_type,
-            "notional":      float(row.notional),
-            "currency":      row.currency,
+            "notional":      float(fl_not),
+            "currency":      fl_ccy,
             "start_date":    row.start_date,
             "maturity_date": row.maturity_date,
             "pay_freq":      row.float_pay_freq,
@@ -178,9 +183,10 @@ def _build_legs_df(df_swaps: pd.DataFrame) -> pd.DataFrame:
             "b_day_conv":    row.float_b_day_conv,
             "fixed_rate":    None,
             "float_spread":  float(row.float_spread) if pd.notna(row.float_spread) else 0.0,
-            "disc_curve":    row.disc_curve,
-            "fwd_curve":     row.fwd_curve,
+            "disc_curve":    f"{fl_ccy}_disc_curve" if two_ccy else row.disc_curve,
+            "fwd_curve":     f"{fl_ccy}_fwd_curve" if two_ccy else row.fwd_curve,
             "schedule_id":   sched_id,
+            "notional_exchange": exch,
         })
         sched_id += 1
 
@@ -190,10 +196,65 @@ def _build_legs_df(df_swaps: pd.DataFrame) -> pd.DataFrame:
     return legs
 
 
-def load_and_insert_ir_swaps(df_swaps: pd.DataFrame) -> pd.DataFrame:
-    """Expand swap-level DataFrame to leg-level, write to schemat.ir_swaps
-    and sched.ir_swaps, and return the legs DataFrame for in-memory use."""
-    legs = _build_legs_df(df_swaps)
+def _build_fx_legs_df(fx_legs: pd.DataFrame, report_date: pd.Timestamp,
+                      first_schedule_id: int) -> pd.DataFrame:
+    """FX deal legs (labbank_common.derivatives.fx_legs, one per deal and currency) in the
+    schemat.ir_swaps leg layout: product_code '0100', leg_type 'FX', zero-coupon ('ZC'),
+    fixed_rate = the implied rate of the swap points, each currency on its own curves."""
+    if fx_legs.empty:
+        return pd.DataFrame()
+    import QuantLib as ql
+    dc = ql.Actual360()
+    rows = []
+    for i, r in enumerate(fx_legs.itertuples(index=False)):
+        yf = dc.yearFraction(ql.Date.from_date(r.start_date.date()), ql.Date.from_date(r.maturity_date.date()))
+        rows.append({
+            "report_date":   report_date,
+            "swap_id":       r.deal_id,
+            "leg_id":        f"{r.deal_id}-{r.currency}",
+            "product_code":  "0100",
+            "leg_type":      "FX",
+            "bs_side":       r.bs_side,
+            "swap_type":     "FXS",
+            "notional":      float(r.notional),
+            "currency":      r.currency,
+            "start_date":    r.start_date,
+            "maturity_date": r.maturity_date,
+            "pay_freq":      "ZC",
+            "fixing_freq":   None,
+            "rate_index":    "FIXED",
+            "dc_conv":       "ACT/360",
+            "b_day_conv":    "ModifiedFollowing",
+            "fixed_rate":    round(r.interest / (r.outstanding * yf), 6) if r.outstanding and yf > 0 else 0.0,
+            "float_spread":  None,
+            "disc_curve":    f"{r.currency}_disc_curve",
+            "fwd_curve":     f"{r.currency}_fwd_curve",
+            "schedule_id":   first_schedule_id + i,
+            # carried in sched.ir_swaps only (CF generation)
+            "outstanding_bal": float(r.outstanding),
+            "interest":        float(r.interest),
+            "near_amount":     float(r.near_amount),
+        })
+    return pd.DataFrame(rows)
+
+
+def write_fx_deals(deals: pd.DataFrame) -> None:
+    """schemat.fx_deals: the fx_spot sheet as booked (liquidity reads the exchanges from
+    here). Only banks with FX deals get the table."""
+    with engine.begin() as conn:
+        conn.execute(text("IF OBJECT_ID('schemat.fx_deals', 'U') IS NOT NULL DROP TABLE schemat.fx_deals;"))
+    if not deals.empty:
+        deals.to_sql("fx_deals", engine, schema="schemat", if_exists="replace", index=False)
+
+
+def load_and_insert_ir_swaps(df_swaps: pd.DataFrame, fx_legs: pd.DataFrame | None = None,
+                             report_date: pd.Timestamp | None = None) -> pd.DataFrame:
+    """Expand swap-level DataFrame to leg-level (+ the FX deal legs), write to
+    schemat.ir_swaps and sched.ir_swaps, and return the legs DataFrame for in-memory use."""
+    legs = _build_legs_df(df_swaps) if not df_swaps.empty else pd.DataFrame()
+    if fx_legs is not None and not fx_legs.empty:
+        fx_rows = _build_fx_legs_df(fx_legs, report_date, len(legs) + 1)
+        legs = pd.concat([legs, fx_rows], ignore_index=True)
 
     # schemat.ir_swaps — match SQLAlchemy column list
     sa_cols = [c.name for c in IRSwaps.columns]
@@ -257,11 +318,16 @@ def load_fwd_curve(curve_name: str, fixing_freq: str,
     """Return Series indexed by (curve_name, fixing_freq, node_date) -> fwd_rt."""
     import QuantLib as ql
 
-    _DC  = {"PLN": ql.Actual365Fixed(),
-             "USD": ql.ActualActual(ql.ActualActual.ISDA),
-             "EUR": ql.Thirty360(ql.Thirty360.ISDA)}
+    # Forward rate in the IBOR's own accrual basis: the float coupon is notional x fwd x
+    # yf(float_dc_conv), so fwd must be quoted on the same day count (EURIBOR ACT/360,
+    # WIBOR ACT/365). EUR used 30/360 here: 6M forwards came out ~1.1% too high (182/180
+    # days) and shocked revaluations, which re-derive the forward on ACT/360, drifted
+    # from the base by a constant offset.
+    from labbank_common.curves import index_day_basis      # shared with cash_flow_calc
+    _DC  = {c: (ql.Actual360() if index_day_basis(c) == 360 else ql.Actual365Fixed())
+            for c in ("PLN", "USD", "EUR", "GBP")}
     _CAL = {"PLN": ql.Poland(), "EUR": ql.TARGET(),
-             "USD": ql.UnitedStates(ql.UnitedStates.NYSE)}
+             "USD": ql.UnitedStates(ql.UnitedStates.NYSE), "GBP": ql.UnitedKingdom()}
 
     dc  = _DC.get(currency, ql.Actual365Fixed())
     cal = _CAL.get(currency, ql.TARGET())
@@ -270,7 +336,13 @@ def load_fwd_curve(curve_name: str, fixing_freq: str,
         SELECT n_days, d_f FROM mkt.curves
         WHERE curve_date = :rd AND curve_name = :cn
     """)
-    df = pd.read_sql_query(q, engine, params={"rd": report_date, "cn": curve_name})
+    # projection curve of this IBOR tenor when the bank has one (multi-curve, labbank_common/
+    # curves.py); the result keeps the leg's fwd_curve name as its key
+    from labbank_common.curves import projection_curve
+    names = frozenset(pd.read_sql_query(text("SELECT DISTINCT curve_name FROM mkt.curves WHERE curve_date = :rd"),
+                                        engine, params={"rd": report_date})["curve_name"])
+    df = pd.read_sql_query(q, engine, params={"rd": report_date,
+                                              "cn": projection_curve(curve_name, fixing_freq, names)})
     interp = _interpolate_d_f(df["n_days"].to_numpy(), df["d_f"].to_numpy(), report_date)
 
     fp = ql.Period(fixing_freq)
@@ -322,6 +394,8 @@ def load_sched_ir_swaps() -> pd.DataFrame:
 def append_irs_to_ir_gap_tables(
     swap_gap: pd.DataFrame,
     report_date: pd.Timestamp,
+    gap_col: str = "gap_cf_irs",
+    product_code: str = "0000",
 ) -> None:
     """Merge IRS gap into irrbb.ir_gap_beh (gap_cf_irs column) and append
     IRS rows (product_code='0000') to irrbb.ir_gap_beh_a.
@@ -342,7 +416,7 @@ def append_irs_to_ir_gap_tables(
             existing[dt_col] = pd.to_datetime(existing[dt_col])
 
     # Ensure split columns exist (backward-compat if table predates this change)
-    for col in ("gap_cf_ca", "gap_cf_irs"):
+    for col in ("gap_cf_ca", "gap_cf_irs", gap_col):
         if col not in existing.columns:
             existing[col] = 0.0
 
@@ -357,7 +431,10 @@ def append_irs_to_ir_gap_tables(
     merged = existing.merge(irs_agg, on=merge_keys, how="outer")
     merged["gap_cf"]     = merged["gap_cf"].fillna(0.0)
     merged["gap_cf_ca"]  = merged["gap_cf_ca"].fillna(0.0)
-    merged["gap_cf_irs"] = merged["_irs_new"].fillna(0.0)
+    merged["gap_cf_irs"] = merged["gap_cf_irs"].fillna(0.0)
+    if "gap_cf_fx" in merged.columns:
+        merged["gap_cf_fx"] = merged["gap_cf_fx"].fillna(0.0)
+    merged[gap_col]      = merged["_irs_new"].fillna(0.0)   # assigned, not added: rerun-safe
     merged = merged.drop(columns=["_irs_new"])
 
     # Re-derive bucket bounds for all rows (fills NaT for IRS-only new rows)
@@ -368,6 +445,10 @@ def append_irs_to_ir_gap_tables(
     merged["bucket_end_dt"]   = [b[1] for b in bounds]
 
     with engine.begin() as conn:
+        for col in merged.columns.intersection(["gap_cf_ca", "gap_cf_irs", "gap_cf_fx"]):
+            conn.execute(text(
+                f"IF COL_LENGTH('irrbb.ir_gap_beh', '{col}') IS NULL "
+                f"ALTER TABLE irrbb.ir_gap_beh ADD {col} FLOAT NULL"))
         conn.execute(text("DELETE FROM irrbb.ir_gap_beh"))
     merged.to_sql("ir_gap_beh", engine, schema="irrbb",
                   if_exists="append", index=False, chunksize=10_000)
@@ -376,8 +457,8 @@ def append_irs_to_ir_gap_tables(
     keep = ["currency", "bs_side", "tenor_bucket",
             "bucket_start_dt", "bucket_end_dt", "cf_end_dt", "gap_cf"]
     irs_a = swap_gap[[c for c in keep if c in swap_gap.columns]].copy()
-    irs_a["product_code"] = "0000"
+    irs_a["product_code"] = product_code
     with engine.begin() as conn:
-        conn.execute(text("DELETE FROM irrbb.ir_gap_beh_a WHERE product_code = '0000'"))
+        conn.execute(text("DELETE FROM irrbb.ir_gap_beh_a WHERE product_code = :pc"), {"pc": product_code})
     irs_a.to_sql("ir_gap_beh_a", engine, schema="irrbb",
                  if_exists="append", index=False, chunksize=10_000)

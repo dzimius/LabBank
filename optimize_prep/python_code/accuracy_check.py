@@ -19,7 +19,10 @@ import os
 import sys
 import numpy as np
 import pandas as pd
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
+sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")))
+from labbank_common.bank_config import get_bank, get_engine, total_assets
+BANK_OUT_DIR = str(get_bank().output_dir("optimize_prep"))   # runs/<bank_id>/optimize_prep
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.join(BASE_DIR, "..", "..")
@@ -37,18 +40,12 @@ from nii_eve_cf_fast import (
     compute_eve_cf_fast_by_product,
 )
 
-engine = create_engine(
-    "mssql+pyodbc://maciek_d/bank_gen"
-    "?driver=ODBC+Driver+17+for+SQL+Server"
-    "&Trusted_Connection=yes",
-    fast_executemany=True,
-    future=True,
-)
+engine = get_engine()   # active bank's database (LABBANK_BANK, default eur)
 
-REPORT_DATE  = pd.to_datetime("2026-06-30")
-TOTAL_ASSETS = 10_000_000_000
-OUT_PATH     = os.path.join(BASE_DIR, "..", "output", "approx_accuracy_report.xlsx")
-NPZ_PARAMS   = os.path.join(BASE_DIR, "..", "output", "product_params.npz")
+REPORT_DATE  = pd.Timestamp(get_bank().report_date)
+TOTAL_ASSETS = total_assets()   # the bank's own book size (bank_config.total_assets)
+OUT_PATH     = os.path.join(BANK_OUT_DIR, "approx_accuracy_report.xlsx")
+NPZ_PARAMS   = os.path.join(BANK_OUT_DIR, "product_params.npz")
 
 # ── tolerances ─────────────────────────────────────────────────────────────────
 # 1% error per product weight: if a product's weight changes by ε, the metric
@@ -80,7 +77,14 @@ def _load_exact_nii_by_product() -> pd.DataFrame:
     """)
     df = pd.read_sql_query(q, engine, params={"rd": REPORT_DATE})
     df["product_code"] = df["product_code"].astype(str)
+    df["nii_total"] = df["nii_total"] * _to_home(df["currency"])   # fast layer is in home ccy
     return df
+
+
+def _to_home(ccy: pd.Series) -> pd.Series:
+    from labbank_common import fx
+    from labbank_common.bank_config import get_bank
+    return fx.to_home_series(ccy, get_bank(), REPORT_DATE).to_numpy()
 
 
 def _load_exact_eve_by_product() -> pd.DataFrame:
@@ -94,16 +98,23 @@ def _load_exact_eve_by_product() -> pd.DataFrame:
     """)
     df = pd.read_sql_query(q, engine, params={"rd": REPORT_DATE})
     df["product_code"] = df["product_code"].astype(str)
+    df["pv_total"] = df["pv_total"] * _to_home(df["currency"])
     return df
 
 
 def _load_exact_lcr_nsfr() -> pd.DataFrame:
+    """Exact ratios to compare with the fast layer, whose home-currency ratio is the
+    consolidated one: a multi-currency bank's 'ALL' row stands in for the home currency."""
+    from labbank_common.bank_config import home_ccy
     q = text("""
         SELECT currency, lcr, nsfr
         FROM results.lcr_nsfr
         WHERE report_date = :rd
     """)
-    return pd.read_sql_query(q, engine, params={"rd": REPORT_DATE})
+    df = pd.read_sql_query(q, engine, params={"rd": REPORT_DATE})
+    if (df["currency"] == "ALL").any():
+        df = df[df["currency"] == "ALL"].assign(currency=home_ccy())
+    return df
 
 
 def _load_tier1_capital() -> float:

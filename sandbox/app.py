@@ -1,11 +1,20 @@
 """LabBank Sandbox — interactive ALM explorer.
 
-Run:
-    streamlit run sandbox/app.py   (from bank_project root)
+Run (from bank_project root):
+    streamlit run sandbox/app.py                  # EUR bank (default)
+    streamlit run sandbox/app.py -- --bank pln    # PLN bank
+or set LABBANK_BANK=pln. One Streamlit process serves one bank: the engines
+cache bank-specific tensors at process level.
 """
 from __future__ import annotations
 
+import os
 import re
+import sys
+
+# --bank <id> selects the bank before anything reads labbank_common.bank_config
+if "--bank" in sys.argv[1:-1]:
+    os.environ["LABBANK_BANK"] = sys.argv[sys.argv.index("--bank") + 1]
 
 import numpy as np
 import pandas as pd
@@ -23,6 +32,8 @@ from baseline import (
     load_cohort_rates,
     load_curves,
     load_irs_baseline,
+    load_fx_deals_baseline,
+    fx_deal_position,
     load_nmd_model_df,
     load_params,
     load_scenario_curves,
@@ -33,6 +44,11 @@ from gap_engine  import compute_repricing_gap, compute_liq_gap
 from irs_engine  import compute_irs_metrics
 from nmd_engine  import NMD_PRODUCTS, compute_nmd_delta, load_nmd_model
 from hyp_engine  import compute_hyp_metrics
+from labbank_common.bank_config import get_bank   # project root is on sys.path via baseline
+
+BANK = get_bank()               # one Streamlit process per bank: LABBANK_BANK=pln|eur
+CCY  = BANK.market.ccy          # home currency: labels, IRS defaults, LCR/NSFR lookup
+IBOR = BANK.market.float_index  # WIBOR / EURIBOR (labels)
 
 # ── hypothetical scenario labels ──────────────────────────────────────────────
 _CURVE_LABELS = {
@@ -142,14 +158,14 @@ def _apply_bulk_nmd(pc: str, editor_key: str, seed_arr, lo: int, hi: int,
     _set_nmd_seed(pc, cur)
 
 # ─────────────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="LabBank Sandbox", page_icon="🏦", layout="wide")
+st.set_page_config(page_title=f"{BANK.name} Sandbox", page_icon="🏦", layout="wide")
 st.markdown("""
 <style>
 [data-testid="stMetricDelta"] { font-size: 1.35rem; }
 [data-testid="stMetricDelta"] svg { width: 1.35rem; height: 1.35rem; }
 </style>
 """, unsafe_allow_html=True)
-st.title("🏦 LabBank ALM Sandbox")
+st.title(f"🏦 {BANK.name} — ALM Sandbox")
 
 # ── data loaders ──────────────────────────────────────────────────────────────
 params      = load_params()
@@ -157,6 +173,7 @@ curves      = load_curves()
 cohort_rates = load_cohort_rates()
 bs_struct   = load_bs_structure()
 irs_base    = load_irs_baseline()
+fx_base     = load_fx_deals_baseline()      # derivatives.xlsx sheet fx_spot
 
 @st.cache_data
 def _ana_irs_base() -> dict:
@@ -216,7 +233,7 @@ def _nmd_overlay(bs_df: pd.DataFrame, total_assets: float) -> tuple[float, float
 
 
 # ── IRS book: float index drives the reset / pay frequency ───────────────────
-_IRS_INDEX_DEFAULT = "PLN_ASK_6M"
+_IRS_INDEX_DEFAULT = f"{CCY}_ASK_6M"
 
 
 def _index_tenor(index) -> str | None:
@@ -227,7 +244,7 @@ def _index_tenor(index) -> str | None:
 
 _IRS_INDEX_OPTIONS = sorted(
     set(irs_base["float_rate_index"].dropna().astype(str))
-    | {"PLN_ASK_1M", "PLN_ASK_3M", "PLN_ASK_6M"},
+    | {f"{CCY}_ASK_1M", f"{CCY}_ASK_3M", f"{CCY}_ASK_6M"},
     key=lambda x: (len(_index_tenor(x) or ""), _index_tenor(x) or x),
 )
 _IRS_REQUIRED = ["notional", "maturity_date", "fixed_rate"]
@@ -246,8 +263,8 @@ def _normalize_irs(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     """
     df = df.copy().reset_index(drop=True)
     df["pay_fixed"] = [bool(v) if pd.notna(v) else False for v in df["pay_fixed"]]
-    for col, val in (("currency", "PLN"), ("disc_curve", "PLN_disc_curve"),
-                     ("fwd_curve", "PLN_fwd_curve"), ("float_rate_index", _IRS_INDEX_DEFAULT)):
+    for col, val in (("currency", CCY), ("disc_curve", f"{CCY}_disc_curve"),
+                     ("fwd_curve", f"{CCY}_fwd_curve"), ("float_rate_index", _IRS_INDEX_DEFAULT)):
         df[col] = df[col].where(df[col].notna(), val)
     # a swap with no start date starts today (its first fixing is today's, locked)
     df["start_date"] = df["start_date"].where(df["start_date"].notna(),
@@ -276,16 +293,16 @@ def _get(m, key: str, scen: str = "") -> float:
         if key == "eve_base":  return m["eve_base"]
         if key == "delta_nii": return m["delta_nii"][scen]
         if key == "delta_eve": return m["delta_eve"][scen]
-        if key == "lcr":       return m["lcr"].get("PLN", float("nan"))
-        if key == "nsfr":      return m["nsfr"].get("PLN", float("nan"))
+        if key == "lcr":       return m["lcr"].get(CCY, float("nan"))
+        if key == "nsfr":      return m["nsfr"].get(CCY, float("nan"))
         if key == "rwa":       return m.get("rwa", float("nan"))
     else:
         if key == "nii_base":  return m.nii_base
         if key == "eve_base":  return m.eve_base
         if key == "delta_nii": return m.delta_nii[scen]
         if key == "delta_eve": return m.delta_eve[scen]
-        if key == "lcr":       return m.lcr.get("PLN", float("nan"))
-        if key == "nsfr":      return m.nsfr.get("PLN", float("nan"))
+        if key == "lcr":       return m.lcr.get(CCY, float("nan"))
+        if key == "nsfr":      return m.nsfr.get(CCY, float("nan"))
         if key == "rwa":       return m.rwa
     return float("nan")
 
@@ -307,17 +324,20 @@ def _init():
         "asset_base":          a,
         "fund_base":           f,
         "irs_base_ed":         irs_base.copy(),
+        "fx_base_ed":          fx_base.copy(),
         "total_assets":        float(params.total_assets),
         # one reset counter PER EDITOR -- each is baked into that editor's widget
         # key, so "↺ Reset IRS" only discards IRS edits (a shared counter used to
         # wipe the Balance Sheet / NMD edits too)
         "rc_bs":               0,
         "rc_irs":              0,
+        "rc_fx":               0,
         "rc_nmd":              0,
         "t1_capital":          1_000_000_000.0,
         "_cur_asset":          a.copy(),
         "_cur_fund":           f.copy(),
         "_cur_irs":            irs_base.copy(),
+        "_cur_fx":             fx_base.copy(),
         # NMD stress state — keyed by product_code
         "nmd_stressed_pct":    {pc: df["pct"].to_numpy().copy()
                                 for pc, df in _nmd_models_df.items()},
@@ -339,7 +359,7 @@ _init()
 
 # ── tabs ──────────────────────────────────────────────────────────────────────
 tab_bs, tab_metrics, tab_gap, tab_curves, tab_nmd, tab_irs = st.tabs(
-    ["⚖️  Balance Sheet", "📈  ALM Metrics", "📊  Gap Analysis", "📉  Market Curves", "🏦  NMD Stress", "🔄  IRS Book"]
+    ["⚖️  Balance Sheet", "📈  ALM Metrics", "📊  Gap Analysis", "📉  Market Curves", "🏦  NMD Stress", "🔄  Swap Book"]
 )
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -357,8 +377,8 @@ with tab_curves:
     st.subheader("Market Curves")
     st.caption(
         "Zero-coupon (spot) rates derived from the pre-computed curve tensors. "
-        "Base scenario = current market; shock scenarios = IRRBB standard shocks. "
-        "PLN only — EUR/USD carry no real market data in this demo book."
+        "Base scenario = current market; shock scenarios = IRRBB standard shocks, "
+        "sized per currency (EBA Annex I)."
     )
 
     _n_m    = curves.n_months
@@ -370,7 +390,11 @@ with tab_curves:
     _shock_scens = _all_scens[1:]
     _clrs        = px.colors.qualitative.Plotly
 
-    _ccy_sel = "PLN"
+    # every currency the bank books products in (home first); the hypothetical-scenario
+    # tools further down stay home-currency only
+    _curve_ccys = [c for c in [CCY, *BANK.market.foreign_ccys] if c in curves.currencies.tolist()]
+    _ccy_sel = (st.radio("Currency", _curve_ccys, horizontal=True, key="curve_ccy")
+                if len(_curve_ccys) > 1 else CCY)
     _ci_sel  = curves.currency_index(_ccy_sel)
 
     def _zero_pct(scen_idx: int) -> np.ndarray:
@@ -378,12 +402,12 @@ with tab_curves:
         return -np.log(_df) / _yrs * 100
 
     # ── Plot 1: Base zero curve ───────────────────────────────────────────────
-    st.markdown("**Base (current) market curve — PLN**")
+    st.markdown(f"**Base (current) market curve — {_ccy_sel}**")
 
     fig_base_curve = go.Figure()
     fig_base_curve.add_trace(go.Scatter(
         x=_yrs, y=_zero_pct(0),
-        name="PLN zero",
+        name=f"{_ccy_sel} zero",
         line=dict(color=_clrs[0], width=2),
     ))
     fig_base_curve.update_layout(
@@ -398,7 +422,7 @@ with tab_curves:
     st.divider()
 
     # ── Plot 2: Scenario zero curves ──────────────────────────────────────────
-    st.markdown("**IRRBB scenario zero curves — PLN**")
+    st.markdown(f"**IRRBB scenario zero curves — {_ccy_sel}**")
 
     fig_scen_curves = go.Figure()
     for _si, _scen in enumerate(_all_scens):
@@ -426,7 +450,7 @@ with tab_curves:
     st.caption(
         f"Report date: **{curves.report_date}** | "
         f"Scenarios: {len(_all_scens)}  ({_base_scen} + {len(_shock_scens)} shocks) | "
-        f"Currency: PLN | "
+        f"Currency: {_ccy_sel} | "
         f"Horizon: {_n_m} months ({_n_m // 12} years)"
     )
 
@@ -518,7 +542,7 @@ with tab_bs:  # tab-bar position 1
     c_ta, c_rst = st.columns([4, 1])
     with c_ta:
         total_assets_input = st.number_input(
-            "Total Assets (PLN)", min_value=1_000_000_000, max_value=100_000_000_000,
+            f"Total Assets ({CCY})", min_value=1_000_000_000, max_value=100_000_000_000,
             value=int(st.session_state.total_assets), step=500_000_000, format="%d",
         )
         st.session_state.total_assets = float(total_assets_input)
@@ -539,22 +563,37 @@ with tab_bs:  # tab-bar position 1
     rc = st.session_state.rc_bs
 
     # ── editors — always receive the STABLE baseline; editor holds its own deltas
+    # pixel widths: the two editors sit side by side, so every column is kept as narrow as
+    # its content allows (R.type / Fix freq / Mat added 2026-10-12)
     _ECFG = {
-        "own_name":    st.column_config.TextColumn("Product",     disabled=True, width="medium"),
-        "role":        st.column_config.TextColumn("Type",        disabled=True, width="small"),
-        "currency":    st.column_config.TextColumn("CCY",         disabled=True, width="small"),
+        "own_name":    st.column_config.TextColumn("Product",     disabled=True, width=150),
+        "role":        st.column_config.TextColumn("Type",        disabled=True, width=44),
+        "currency":    st.column_config.TextColumn("CCY",         disabled=True, width=36),
+        "rate_type":   st.column_config.TextColumn(
+            "R.type", disabled=True, width=40,
+            help="F = fixed, V = floating (variable), A = administered (rate set by the bank)."),
+        "fix":         st.column_config.TextColumn(
+            "Fix freq", disabled=True, width=52,
+            help="Fixing frequency: V = reset tenor (3M resets every 3 months); F = fixed-rate "
+                 "period (10Y fixed for 10 years, then resets); blank = fixed for the whole life (F) "
+                 "or administered (A)."),
+        "mat":         st.column_config.TextColumn(
+            "Mat", disabled=True, width=38,
+            help="Contractual maturity of a new contract; NMD = non-maturity deposit."),
         "current_pct": st.column_config.NumberColumn(
-            "Base %",   disabled=True, format="%.1f", width="small"),
+            "Base %",   disabled=True, format="%.2f", width=56),
         "new_pct": st.column_config.NumberColumn(
-            "✏️ New %", min_value=0.0, max_value=100.0, step=0.5, format="%.1f",
-            width="small",
+            "✏️ New %", min_value=0.0, max_value=100.0, step=0.01, format="%.2f",
+            width=62,
             help="Enter your new allocation. Both sides must sum to 100%."),
         "avg_rate": st.column_config.NumberColumn(
-            "Rate %", disabled=True, format="%.2f%%", width="small",
+            "Rate %", disabled=True, format="%.2f%%", width=58,
             help="Weighted-average effective interest rate from the NII model "
                  "(assets: earned rate; liabilities: cost rate). Read-only."),
         "notional_m": st.column_config.NumberColumn(
-            "Notional M", disabled=True, format="%.0f", width="small"),
+            f"M {CCY}", disabled=True, format="%.0f", width=62,
+            help=f"Balance in millions of {CCY}; foreign-currency rows (CCY column) are "
+                 f"converted at the report-date FX rate."),
     }
 
     col_a, col_f = st.columns(2, gap="large")
@@ -563,7 +602,7 @@ with tab_bs:  # tab-bar position 1
         edited_assets = st.data_editor(
             _bs_with_notional(st.session_state.asset_base, st.session_state.asset_base, total_assets_input),
             column_config=_ECFG,
-            column_order=["own_name", "currency", "current_pct", "new_pct", "avg_rate", "notional_m"],
+            column_order=["own_name", "currency", "rate_type", "fix", "mat", "current_pct", "new_pct", "avg_rate", "notional_m"],
             hide_index=True, use_container_width=True,
             key=f"ed_a_{rc}",
         )
@@ -583,7 +622,7 @@ with tab_bs:  # tab-bar position 1
         edited_fund = st.data_editor(
             _fund_disp,
             column_config=_ECFG,
-            column_order=["own_name", "role", "currency", "current_pct", "new_pct", "avg_rate", "notional_m"],
+            column_order=["own_name", "role", "currency", "rate_type", "fix", "mat", "current_pct", "new_pct", "avg_rate", "notional_m"],
             hide_index=True, use_container_width=True,
             key=f"ed_f_{rc}",
         )
@@ -649,7 +688,7 @@ with tab_bs:  # tab-bar position 1
     cf.plotly_chart(_comp_chart(edited_fund, st.session_state.fund_base, "Liabilities + Equity"),
                     use_container_width=True)
     st.caption(f"Report Date: **{params.report_date}** | "
-               f"Total Assets: **{total_assets_input/1e9:.1f} B PLN**")
+               f"Total Assets: **{total_assets_input/1e9:.1f} B {CCY}**")
 
     st.divider()
     if st.button(
@@ -674,12 +713,12 @@ with tab_bs:  # tab-bar position 1
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# TAB 6 — IRS BOOK
+# TAB 6 — SWAP BOOK (IRS) + FX DEALS
 # ═════════════════════════════════════════════════════════════════════════════
 with tab_irs:  # tab-bar position 6
 
     c_hd, c_rst2 = st.columns([5, 1])
-    c_hd.subheader("Interest Rate Swap Book")
+    c_hd.subheader("Swap Book — Interest Rate Swaps")
     with c_rst2:
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button("↺ Reset IRS", use_container_width=True):
@@ -689,11 +728,11 @@ with tab_irs:  # tab-bar position 6
 
     st.info(
         "**Convention** — *Pay Fixed?* **unchecked (☐)** = bank **receives fixed, pays floating** "
-        "(WIBOR). This is the correct hedge for floating-rate loan books: "
-        "the bank pays WIBOR to the IRS counterparty, offsetting WIBOR received from borrowers, "
+        f"({IBOR}). This is the correct hedge for floating-rate loan books: "
+        f"the bank pays {IBOR} to the IRS counterparty, offsetting {IBOR} received from borrowers, "
         "leaving a fixed spread.\n\n"
         "Edit notional, fixed rate, dates or *Pay Fixed?*. Add rows with **+**; delete via row checkbox.\n\n"
-        "Pick the float leg's **index** (WIBOR 1M / 3M / 6M) — its tenor is the reset and "
+        f"Pick the float leg's **index** ({IBOR} 1M / 3M / 6M) — its tenor is the reset and "
         "float-payment frequency. New rows need a notional, maturity and fixed rate; "
         "everything else has a default.",
         icon="ℹ️",
@@ -706,15 +745,15 @@ with tab_irs:  # tab-bar position 6
             "swap_id":          st.column_config.TextColumn("Swap ID", width="small",
                                     help="Leave empty on a new row to get NEW_01, NEW_02, …"),
             "notional":         st.column_config.NumberColumn(
-                                    "Notional (PLN)", min_value=0, step=1_000_000,
+                                    f"Notional ({CCY})", min_value=0, step=1_000_000,
                                     format="%d", width="large", required=True),
             "pay_fixed":        st.column_config.CheckboxColumn(
                                     "Pay Fixed?", width="small", default=False,
-                                    help="☐ = receive fixed / pay WIBOR  |  ☑ = pay fixed / receive WIBOR"),
+                                    help=f"☐ = receive fixed / pay {IBOR}  |  ☑ = pay fixed / receive {IBOR}"),
             "currency":         st.column_config.SelectboxColumn("CCY", width="small",
-                                    options=["PLN"], required=True, default="PLN",
-                                    help="Book is PLN-only for now. Single-option list — the "
-                                         "ALM-metric and gap engines look up the PLN disc/fwd "
+                                    options=[CCY], required=True, default=CCY,
+                                    help=f"Book is {CCY}-only for now. Single-option list — the "
+                                         f"ALM-metric and gap engines look up the {CCY} disc/fwd "
                                          "curves regardless of this field."),
             "start_date":       st.column_config.DateColumn(
                                     "Start", width="small",
@@ -728,7 +767,7 @@ with tab_irs:  # tab-bar position 6
                                     "Float Index", width="small",
                                     options=_IRS_INDEX_OPTIONS, required=True,
                                     default=_IRS_INDEX_DEFAULT,
-                                    help="WIBOR tenor of the float leg. Its tenor sets the reset "
+                                    help=f"{IBOR} tenor of the float leg. Its tenor sets the reset "
                                          "and float-payment frequency (3M → quarterly), which the "
                                          "Gap Analysis tab shows as repricing timing. ALM Metrics "
                                          "don't move with it: the float leg is projected on forward "
@@ -736,15 +775,15 @@ with tab_irs:  # tab-bar position 6
                                          "of both NII (same 12M average forward however the resets "
                                          "are chunked) and EVE (float leg telescopes to N·(1−DF))."),
             "disc_curve":       st.column_config.SelectboxColumn("Disc Curve", width="small",
-                                    options=["PLN_disc_curve"], required=True,
-                                    default="PLN_disc_curve",
-                                    help="Single-option list for now — PLN-only book. The sandbox "
-                                         "always discounts on the PLN curve."),
+                                    options=[f"{CCY}_disc_curve"], required=True,
+                                    default=f"{CCY}_disc_curve",
+                                    help=f"Single-option list for now — {CCY}-only book. The sandbox "
+                                         f"always discounts on the {CCY} curve."),
             "fwd_curve":        st.column_config.SelectboxColumn("Fwd Curve", width="small",
-                                    options=["PLN_fwd_curve"], required=True,
-                                    default="PLN_fwd_curve",
-                                    help="Single-option list for now — PLN-only book. The sandbox "
-                                         "always projects the float leg on the PLN forward curve."),
+                                    options=[f"{CCY}_fwd_curve"], required=True,
+                                    default=f"{CCY}_fwd_curve",
+                                    help=f"Single-option list for now — {CCY}-only book. The sandbox "
+                                         f"always projects the float leg on the {CCY} forward curve."),
         },
         column_order=["swap_id", "notional", "pay_fixed", "currency",
                       "start_date", "maturity_date", "fixed_rate",
@@ -783,44 +822,82 @@ with tab_irs:  # tab-bar position 6
         curr_s = _leg_stats(edited_irs)
 
         rows_leg = [
-            {"Leg": "Receive-Fixed (pay WIBOR)",
-             "Metric": "Notional (M PLN)",
+            {"Leg": f"Receive-Fixed (pay {IBOR})",
+             "Metric": f"Notional (M {CCY})",
              "Baseline": f"{base_s['recv_n']/1e6:,.0f}",
              "Current":  f"{curr_s['recv_n']/1e6:,.0f}",
              "Delta":    f"{(curr_s['recv_n']-base_s['recv_n'])/1e6:+,.0f}"},
-            {"Leg": "Receive-Fixed (pay WIBOR)",
+            {"Leg": f"Receive-Fixed (pay {IBOR})",
              "Metric": "# Swaps",
              "Baseline": str(base_s['n_recv']),
              "Current":  str(curr_s['n_recv']),
              "Delta":    f"{curr_s['n_recv']-base_s['n_recv']:+d}"},
-            {"Leg": "Receive-Fixed (pay WIBOR)",
+            {"Leg": f"Receive-Fixed (pay {IBOR})",
              "Metric": "Wtd Avg Fixed Rate (received)",
              "Baseline": f"{base_s['wt_recv']:.3%}",
              "Current":  f"{curr_s['wt_recv']:.3%}",
              "Delta":    f"{(curr_s['wt_recv']-base_s['wt_recv'])*10000:+.1f} bp"},
-            {"Leg": "Pay-Fixed (receive WIBOR)",
-             "Metric": "Notional (M PLN)",
+            {"Leg": f"Pay-Fixed (receive {IBOR})",
+             "Metric": f"Notional (M {CCY})",
              "Baseline": f"{base_s['pay_n']/1e6:,.0f}",
              "Current":  f"{curr_s['pay_n']/1e6:,.0f}",
              "Delta":    f"{(curr_s['pay_n']-base_s['pay_n'])/1e6:+,.0f}"},
-            {"Leg": "Pay-Fixed (receive WIBOR)",
+            {"Leg": f"Pay-Fixed (receive {IBOR})",
              "Metric": "# Swaps",
              "Baseline": str(base_s['n_pay']),
              "Current":  str(curr_s['n_pay']),
              "Delta":    f"{curr_s['n_pay']-base_s['n_pay']:+d}"},
-            {"Leg": "Pay-Fixed (receive WIBOR)",
+            {"Leg": f"Pay-Fixed (receive {IBOR})",
              "Metric": "Wtd Avg Fixed Rate (paid)",
              "Baseline": f"{base_s['wt_pay']:.3%}" if base_s['pay_n'] > 0 else "—",
              "Current":  f"{curr_s['wt_pay']:.3%}" if curr_s['pay_n'] > 0 else "—",
              "Delta":    f"{(curr_s['wt_pay']-base_s['wt_pay'])*10000:+.1f} bp" if
                          (base_s['pay_n'] > 0 or curr_s['pay_n'] > 0) else "—"},
             {"Leg": "Net",
-             "Metric": "Net Receive-Fixed Notional (M PLN)",
+             "Metric": f"Net Receive-Fixed Notional (M {CCY})",
              "Baseline": f"{(base_s['recv_n']-base_s['pay_n'])/1e6:,.0f}",
              "Current":  f"{(curr_s['recv_n']-curr_s['pay_n'])/1e6:,.0f}",
              "Delta":    f"{((curr_s['recv_n']-curr_s['pay_n'])-(base_s['recv_n']-base_s['pay_n']))/1e6:+,.0f}"},
         ]
         st.dataframe(pd.DataFrame(rows_leg), hide_index=True, use_container_width=True)
+
+    # ── FX deals (sheet fx_spot) ───────────────────────────────────────────────
+    if BANK.market.foreign_ccys or len(fx_base):
+        st.divider()
+        c_fh, c_frst = st.columns([5, 1])
+        c_fh.subheader("FX Deals — spots, forwards, FX swaps")
+        with c_frst:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("↺ Reset FX", use_container_width=True):
+                st.session_state.fx_base_ed = fx_base.copy()
+                st.session_state.rc_fx += 1
+                st.rerun()
+        st.caption(
+            "Amounts from the **bank's** side: *buy* = the bank receives, *sell* = it pays. "
+            "An FX swap is a near exchange plus the opposite far exchange; once the near date "
+            "has passed only the far exchange is open — buying USD there makes the bank long "
+            "USD and closes the short of the USD deposits. Edits move the **FX Position** "
+            "(ALM Metrics tab); NII / EVE / LCR keep the pipeline's FX book.")
+        _ccys = [CCY, *BANK.market.foreign_ccys]
+        _ccy_col = lambda t: st.column_config.SelectboxColumn(t, options=_ccys, width="small")
+        _amt_col = lambda t: st.column_config.NumberColumn(t, min_value=0, step=1_000_000, format="localized")
+        edited_fx = st.data_editor(
+            st.session_state.fx_base_ed, num_rows="dynamic", use_container_width=True,
+            column_config={
+                "deal_id":       st.column_config.TextColumn("Deal ID", width="small"),
+                "deal_type":     st.column_config.SelectboxColumn(
+                                     "Type", options=["FX_SWAP", "FX_FWD", "FX_SPOT"],
+                                     default="FX_SWAP", width="small"),
+                "near_date":     st.column_config.DateColumn("Near date", width="small"),
+                "near_buy_ccy":  _ccy_col("Near buy"),  "near_buy_amt":  _amt_col("Near buy amt"),
+                "near_sell_ccy": _ccy_col("Near sell"), "near_sell_amt": _amt_col("Near sell amt"),
+                "far_date":      st.column_config.DateColumn("Far date", width="small"),
+                "far_buy_ccy":   _ccy_col("Far buy"),   "far_buy_amt":   _amt_col("Far buy amt"),
+                "far_sell_ccy":  _ccy_col("Far sell"),  "far_sell_amt":  _amt_col("Far sell amt"),
+            },
+            hide_index=True, key=f"ed_fx_{st.session_state.rc_fx}",
+        )
+        st.session_state["_cur_fx"] = edited_fx.copy()
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -934,8 +1011,8 @@ with tab_metrics:  # tab-bar position 2
     kpi_defs = [
         ("NII",     lambda m: _get(m,"nii_base"),   "{:,.0f} M", lambda b,m: f"{(m-b)/1e6:+,.1f} M"),
         ("EVE",     lambda m: _get(m,"eve_base"),    "{:,.0f} M", lambda b,m: f"{(m-b)/1e6:+,.1f} M"),
-        ("LCR PLN", lambda m: _get(m,"lcr"),         "{:.2%}",    lambda b,m: _pp(m,b)),
-        ("NSFR PLN",lambda m: _get(m,"nsfr"),        "{:.2%}",    lambda b,m: _pp(m,b)),
+        (f"LCR {CCY}", lambda m: _get(m,"lcr"),         "{:.2%}",    lambda b,m: _pp(m,b)),
+        (f"NSFR {CCY}",lambda m: _get(m,"nsfr"),        "{:.2%}",    lambda b,m: _pp(m,b)),
     ]
     b_scale = [1/1e6, 1/1e6, 1, 1]
 
@@ -975,7 +1052,7 @@ with tab_metrics:  # tab-bar position 2
         f"Modified = BS scale change + IRS analytical delta"
         + (" + NMD behavioral stress" if _nmd_active else "")
         + (f" + curve **{_hyp_lbl}**" if _hyp_fwd is not None else "")
-        + f". **Tier 1 Capital: {t1/1e6:,.0f} M PLN** (equity rows from Balance Sheet)."
+        + f". **Tier 1 Capital: {t1/1e6:,.0f} M {CCY}** (equity rows from Balance Sheet)."
     )
 
     st.divider()
@@ -1029,15 +1106,15 @@ with tab_metrics:  # tab-bar position 2
         fig.add_hline(y=0, line_dash="dash", line_color="grey", line_width=1)
         fig.update_layout(title=title, barmode="group", height=380,
                           legend=dict(orientation="h", y=1.08),
-                          margin=dict(t=50, b=5, l=5, r=5), yaxis_title="M PLN")
+                          margin=dict(t=50, b=5, l=5, r=5), yaxis_title=f"M {CCY}")
         return fig
 
     gc1, gc2 = st.columns(2)
-    gc1.plotly_chart(_gbar("Δ NII by Scenario (M PLN)",
+    gc1.plotly_chart(_gbar(f"Δ NII by Scenario (M {CCY})",
                            [base_m.delta_nii[s]/1e6 for s in scens],
                            [_get(mod_adj,"delta_nii",s)/1e6 for s in scens], scens),
                      use_container_width=True)
-    gc2.plotly_chart(_gbar("Δ EVE by Scenario (M PLN)",
+    gc2.plotly_chart(_gbar(f"Δ EVE by Scenario (M {CCY})",
                            [base_m.delta_eve[s]/1e6 for s in scens],
                            [_get(mod_adj,"delta_eve",s)/1e6 for s in scens], scens),
                      use_container_width=True)
@@ -1124,11 +1201,14 @@ with tab_metrics:  # tab-bar position 2
     _base_amounts = (params.balance_arr / float(params.total_assets)) * ta_val
 
     lcr_rows = []
-    for ccy in sorted(set(params.currency.tolist())):
+    _multi_ccy = len(set(params.currency.tolist())) > 1
+    for ccy in [CCY] + sorted(set(params.currency.tolist()) - {CCY}):
         bc = compute_lcr_components_fast(_base_amounts, params, ccy)
         mc = compute_lcr_components_fast(_mod_amounts,  params, ccy)
+        # the home-currency ratio is the consolidated one (all currencies, in CCY)
+        _ccy_lbl = f"{ccy} (all ccy)" if (_multi_ccy and ccy == CCY) else ccy
         lcr_rows.append({
-            "CCY": ccy,
+            "CCY": _ccy_lbl,
             "": "Baseline",
             "HQLA (M)":          f"{bc['hqla']/1e6:,.1f}",
             "Outflows 30d (M)":  f"{bc['outflows_30d']/1e6:,.1f}",
@@ -1137,7 +1217,7 @@ with tab_metrics:  # tab-bar position 2
             "LCR":               f"{bc['lcr']:.2%}" if not np.isnan(bc['lcr']) else "n/a",
         })
         lcr_rows.append({
-            "CCY": ccy,
+            "CCY": _ccy_lbl,
             "": "Modified",
             "HQLA (M)":          f"{mc['hqla']/1e6:,.1f}",
             "Outflows 30d (M)":  f"{mc['outflows_30d']/1e6:,.1f}",
@@ -1164,6 +1244,68 @@ with tab_metrics:  # tab-bar position 2
                 pd.DataFrame(hqla_rows)[["own_name", "current_pct", "new_pct"]],
                 hide_index=True, use_container_width=True,
             )
+
+    # ── FX position (foreign-currency book) ───────────────────────────────────
+    # Small on purpose: everything above is consolidated in CCY; this shows only the
+    # open position in each foreign currency and what a move of the exchange rate costs.
+    if BANK.market.foreign_ccys:
+        from labbank_common import fx as _fx
+        from labbank_common.product_labels import product_label
+        st.divider()
+        st.subheader("FX Position")
+        _to_home = _fx.to_home(BANK)
+        _sgn = np.where(params.bs_side == "A", 1.0, np.where(params.bs_side == "L", -1.0, 0.0))
+        _t1_base = float(_base_amounts[params.bs_side == "E"].sum())
+        # FX deals as edited in the Swap Book tab (baseline = the pipeline's FX legs in the npz)
+        _fx_pos_mod = fx_deal_position(st.session_state["_cur_fx"], params.report_date)
+        _fx_shock = st.slider("FX shock: foreign currency moves against " + CCY + " by (%)",
+                              1, 30, 10, key="fx_shock_pct") / 100.0
+        for _fc in BANK.market.foreign_ccys:
+            _m = params.currency == _fc
+            _fx_rows = _m & (params.product_code.astype(str) == "0100")   # FX deal legs in the npz
+            _nop_b = float((_base_amounts * _sgn)[_m].sum())   # in CCY
+            _fx_mod = _fx_pos_mod.get(_fc, 0.0) * _to_home[_fc]
+            _nop_m = float((_mod_amounts * _sgn)[_m & ~_fx_rows].sum()) + _fx_mod
+            _fc_per = 1.0 / _to_home[_fc]                       # units of _fc per 1 CCY
+            _pct_b, _pct_m = abs(_nop_b) / _t1_base * 100, abs(_nop_m) / t1 * 100
+            _k_b = 0.08 * abs(_nop_b) if _pct_b > 2 else 0.0
+            _k_m = 0.08 * abs(_nop_m) if _pct_m > 2 else 0.0
+            def _d(v, fmt, suffix=""):          # no arrow while the BS is unedited
+                return None if abs(v) < 0.05 else f"{v:{fmt}}{suffix}"
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric(f"Net open position {_fc} (M {_fc})", f"{_nop_m * _fc_per / 1e6:+,.0f}",
+                      _d((_nop_m - _nop_b) * _fc_per / 1e6, "+,.1f", " vs base"),
+                      help=f"{_fc} assets − {_fc} liabilities, incl. FX deals "
+                           f"({_fx_mod * _fc_per / 1e6:+,.0f}M {_fc}, Swap Book tab). "
+                           f"Negative = short {_fc}: a stronger {_fc} is a loss.")
+            c2.metric("NOP / Tier 1", f"{_pct_m:.1f}%", _d(_pct_m - _pct_b, "+.1f", " pp"), delta_color="inverse",
+                      help="CRR Art. 351: no FX capital while the net open position is ≤ 2% of own funds.")
+            c3.metric(f"Loss if {_fc} moves {_fx_shock:.0%} against (M {CCY})",
+                      f"{abs(_nop_m) * _fx_shock / 1e6:,.1f}",
+                      _d((abs(_nop_m) - abs(_nop_b)) * _fx_shock / 1e6, "+,.1f"), delta_color="inverse")
+            c4.metric(f"FX capital 8% × NOP (M {CCY})", f"{_k_m / 1e6:,.1f}",
+                      _d((_k_m - _k_b) / 1e6, "+,.1f"), delta_color="inverse")
+
+            _rows = [(product_label(pc, sd), float(ba * sg * _fc_per / 1e6), float(ma * sg * _fc_per / 1e6))
+                     for pc, sd, ba, ma, sg in zip(params.product_code[_m & ~_fx_rows], params.bs_side[_m & ~_fx_rows],
+                                                   _base_amounts[_m & ~_fx_rows], _mod_amounts[_m & ~_fx_rows],
+                                                   _sgn[_m & ~_fx_rows])]
+            _fx_b = float((_base_amounts * _sgn)[_fx_rows].sum())
+            if _fx_b or _fx_mod:
+                _rows.append(("FX deals", _fx_b * _fc_per / 1e6, _fx_mod * _fc_per / 1e6))
+            _pos = (pd.DataFrame(_rows, columns=["product", "Baseline", "Modified"])
+                    .groupby("product", as_index=False).sum())
+            _fig = go.Figure([go.Bar(y=_pos["product"], x=_pos[c], name=c, orientation="h")
+                              for c in ("Baseline", "Modified")])
+            _fig.add_vline(x=_nop_m * _fc_per / 1e6, line_dash="dash",
+                           annotation_text=f"NOP {_nop_m * _fc_per / 1e6:+,.0f}M")
+            _fig.update_layout(height=230, barmode="group", margin=dict(t=30, b=5, l=5, r=5),
+                               title=f"{_fc} positions (M {_fc}; assets +, liabilities −) at "
+                                     f"1 {CCY} = {_fc_per:.4f} {_fc}",
+                               legend=dict(orientation="h", y=-0.25))
+            st.plotly_chart(_fig, use_container_width=True)
+        st.caption(f"{_fc} IRRBB, repricing gap and {_fc}-only LCR: ALM report, chapter 9 "
+                   "(FX Risk). Exchange rate: ECB reference rate on the report date.")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1247,7 +1389,7 @@ with tab_gap:  # tab-bar position 3
     fig1.add_hline(y=0, line_dash="dot", line_color="grey", line_width=1)
     _add_sep(fig1)
     fig1.update_layout(
-        barmode="group", height=440, yaxis_title="M PLN",
+        barmode="group", height=440, yaxis_title=f"M {CCY}",
         legend=dict(orientation="h", y=1.06),
         margin=dict(t=40, b=5, l=5, r=5),
         bargroupgap=0.15,
@@ -1301,7 +1443,7 @@ with tab_gap:  # tab-bar position 3
         _add_sep(fig)
         _delta_annotations(fig, deltas)
         fig.update_layout(
-            title=title, height=420, yaxis_title="M PLN",
+            title=title, height=420, yaxis_title=f"M {CCY}",
             yaxis=dict(range=[_p2_ymin, _p2_ymax]),
             margin=dict(t=45, b=5, l=5, r=5),
         )
@@ -1314,6 +1456,59 @@ with tab_gap:  # tab-bar position 3
                      use_container_width=True)
     p2b.plotly_chart(_net_gap_bar("Net Gap — Balance Sheet + IRS", net_m_v, delta_net_v),
                      use_container_width=True)
+
+    # ── Panel 2b: β-adjusted net gap (NII view) ────────────────────────────────
+    # Same gap, each product scaled by its client-rate β (labbank_common.rate_models,
+    # shared with ALM report chapter 3c): NMDs along their repricing profile.
+    st.markdown("**Panel 2b — β-adjusted net gap (NII view, BS + IRS)**")
+    _idx_1m = {str(c): float(curves.get_fwd_curve("base", str(c))[0]) for c in curves.currencies}
+    rep_b      = compute_repricing_gap(params, cur_irs_gap, nmd_models=_nmd_gap_models,
+                                       weights=_bs_weights_gap, index_by_ccy=_idx_1m)
+    rep_b_base = compute_repricing_gap(params, irs_base, index_by_ccy=_idx_1m)
+    beta_net_m  = (rep_b["net_gap"] / 1e6).tolist()
+    delta_beta  = [c - b for c, b in zip(beta_net_m, (rep_b_base["net_gap"] / 1e6).tolist())]
+
+    # 12M ΔNII per +100 bp implied by each gap: Σ gap × 1% × (1 − bucket mid-point)
+    _w12 = np.array([1.0 - (m + 0.5) / 12.0 for m in range(12)])
+    _dnii_raw  = float(np.dot(np.array(net_m_v[:12]), _w12)) * 0.01
+    _dnii_beta = float(np.dot(np.array(beta_net_m[:12]), _w12)) * 0.01
+    st.caption("The repricing gap above moves every unit of balance 1:1 with the market. The NII "
+               "engine moves each client rate by β × index (Rate model): a 0-β current account is "
+               "in the gap but costs no NII. Here each product is scaled by its effective β at "
+               "today's 1M index (0 where a floor / cap binds); NMDs follow their repricing "
+               "profile (the balance not yet repriced keeps today's rate). Dashed outline = raw net gap "
+               "(BS + IRS). ▲/▼: change vs. the shipped baseline.")
+    m1, m2, _ = st.columns([1, 1, 2])
+    m1.metric("12M ΔNII per +100 bp — raw gap", f"{_dnii_raw:+,.1f} M {CCY}")
+    m2.metric("12M ΔNII per +100 bp — β-adjusted gap", f"{_dnii_beta:+,.1f} M {CCY}",
+              help="First-order estimate from the gap; the CF engine (Metrics tab) also captures "
+                   "coupon timing, floors and renewal.")
+
+    _all_b  = beta_net_m + net_m_v
+    _b_span = (max(_all_b) - min(_all_b)) or 100
+    _b_dy   = min(_all_b) - _b_span * 0.15
+    fig2b = go.Figure()
+    fig2b.add_trace(go.Bar(
+        name="β-adjusted net gap", x=buckets, y=beta_net_m,
+        marker_color=_sign_colors(beta_net_m),
+        text=[f"{v:+.0f}" if abs(v) > 30 else "" for v in beta_net_m], textposition="outside",
+    ))
+    fig2b.add_trace(go.Bar(
+        name="Raw net gap", x=buckets, y=net_m_v,
+        marker=dict(color="rgba(0,0,0,0)", line=dict(color="#212121", width=1.5)),
+    ))
+    for b, d in zip(buckets, delta_beta):
+        if abs(d) >= 1.0:
+            fig2b.add_annotation(x=b, y=_b_dy, xref="x", yref="y", text=f"{'▲' if d > 0 else '▼'}{d:+.0f}",
+                                 showarrow=False, font=dict(size=15, color="#2E7D32" if d > 0 else "#C62828"))
+    fig2b.add_hline(y=0, line_dash="dot", line_color="grey", line_width=1)
+    _add_sep(fig2b)
+    fig2b.update_layout(
+        barmode="overlay", height=420, yaxis_title=f"M {CCY}",
+        yaxis=dict(range=[_b_dy - _b_span * 0.12, max(_all_b) + _b_span * 0.15]),
+        legend=dict(orientation="h", y=1.06), margin=dict(t=40, b=5, l=5, r=5),
+    )
+    st.plotly_chart(fig2b, use_container_width=True)
 
     # ── Panel 3: cumulative net gap ───────────────────────────────────────────
     st.markdown("**Panel 3 — Cumulative net gap (BS + IRS)**")
@@ -1332,7 +1527,7 @@ with tab_gap:  # tab-bar position 3
     fig3.add_hline(y=0, line_dash="dot", line_color="grey", line_width=1)
     _add_sep(fig3)
     fig3.update_layout(
-        height=380, yaxis_title="M PLN (cumulative)",
+        height=380, yaxis_title=f"M {CCY} (cumulative)",
         legend=dict(orientation="h", y=1.06),
         margin=dict(t=40, b=5, l=5, r=5),
     )
@@ -1372,7 +1567,7 @@ with tab_gap:  # tab-bar position 3
                                  line=dict(color="black", width=2, dash="dash"),
                                  marker=dict(size=6)))
     fig_liq.add_hline(y=0, line_dash="dot", line_color="grey", line_width=1)
-    fig_liq.update_layout(barmode="overlay", height=420, yaxis_title="M PLN",
+    fig_liq.update_layout(barmode="overlay", height=420, yaxis_title=f"M {CCY}",
                            legend=dict(orientation="h", y=1.06),
                            margin=dict(t=40, b=5, l=5, r=5))
     st.plotly_chart(fig_liq, use_container_width=True)
@@ -1382,8 +1577,8 @@ with tab_gap:  # tab-bar position 3
                              marker_color=_sign_colors(cum_l),
                              text=[f"{v:+.0f}" for v in cum_l], textposition="outside"))
     fig_cum.add_hline(y=0, line_dash="dot", line_color="grey", line_width=1)
-    fig_cum.update_layout(title="Cumulative Net Liquidity Gap (M PLN)", height=300,
-                           yaxis_title="M PLN", margin=dict(t=40, b=5, l=5, r=5))
+    fig_cum.update_layout(title=f"Cumulative Net Liquidity Gap (M {CCY})", height=300,
+                           yaxis_title=f"M {CCY}", margin=dict(t=40, b=5, l=5, r=5))
     st.plotly_chart(fig_cum, use_container_width=True)
 
 
@@ -1472,7 +1667,7 @@ with tab_nmd:  # tab-bar position 5
         with col_ed:
             st.markdown(
                 f"**{pc_sel} — {NMD_PRODUCTS[pc_sel]}** "
-                f"| Balance: **{balance/1e6:,.0f} M PLN** "
+                f"| Balance: **{balance/1e6:,.0f} M {CCY}** "
                 f"| Deposit rate: **{rate*100:.4f}%**"
             )
             st.data_editor(
@@ -1621,7 +1816,7 @@ with tab_nmd:  # tab-bar position 5
 
         st.caption(
             f"Model shown: **{pc_sel} — {NMD_PRODUCTS[pc_sel]}** | "
-            f"Balance: {balance/1e6:,.0f} M PLN | Rate: {rate*100:.4f}% | "
+            f"Balance: {balance/1e6:,.0f} M {CCY} | Rate: {rate*100:.4f}% | "
             f"Tenors: {K} | "
             "ΔNII / ΔEVE impact is on the **Metrics** and **Gap Analysis** tabs."
         )

@@ -38,17 +38,28 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import matplotlib.patches as mpatches
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from IPython.display import HTML, display
 
-ENGINE = create_engine(
-    'mssql+pyodbc://maciek_d/bank_gen'
-    '?driver=ODBC+Driver+17+for+SQL+Server'
-    '&Trusted_Connection=yes',
-    future=True,
-)
-REPORT_DATE = pd.to_datetime('2026-06-30')
-CCY = 'PLN'
+import sys, os
+_ROOT_DIR = os.getcwd()   # walk up to the project root (notebook may run from output/<bank>/)
+while not os.path.isdir(os.path.join(_ROOT_DIR, 'labbank_common')):
+    _ROOT_DIR = os.path.dirname(_ROOT_DIR)
+if _ROOT_DIR not in sys.path:
+    sys.path.insert(0, _ROOT_DIR)
+from labbank_common.bank_config import get_bank, get_engine
+
+BANK = get_bank()                # LABBANK_BANK, inherited from make_finance_report.py
+ENGINE = get_engine(BANK)
+REPORT_DATE = pd.Timestamp(BANK.report_date)
+CCY = BANK.market.ccy
+
+# Multi-currency bank: the report is consolidated in the home currency. FX_SQL converts a
+# row's amount at the report-date rate inside the queries (1 for the home currency).
+from labbank_common import fx as _fx
+FX_TO_HOME = _fx.to_home(BANK, REPORT_DATE)
+FX_SQL = ('CASE currency ' + ' '.join(f"WHEN '{c}' THEN {r!r}" for c, r in FX_TO_HOME.items())
+          + ' END')
 
 plt.rcParams.update({
     'figure.dpi': 100, 'figure.facecolor': 'white',
@@ -93,10 +104,16 @@ PROD_LABELS = {
     '1000': 'Mortgage Fixed',        '1100': 'Mortgage Float',
     '2000': 'Consumer Loan Fixed',   '2100': 'Consumer Loan Float',
     '3000': 'Bond / Securities',     '3100': 'Bond / Securities',
-    '3200': 'T-Bill',                '3500': 'Cash / Central Bank',
+    '3200': 'T-Bill',                '3500': 'Cash (vault + min. reserves)',
+    '3300': 'Corporate Bond AA',     '3310': 'Corporate Bond BBB',
+    '3320': 'Corporate Bond BB',     '3330': 'Corporate FRN A',
+    '3510': 'Central Bank Reserves (DFR)', '4000': 'SME Investment Loan Fixed',
     '4100': 'SME Investment Loan',   '5000': 'Issued Bond',
     '6000': 'Current Account',       '6300': 'Current Account (SME)',
+    '6350': 'Current Account (Corporate)',
+    '4200': 'Corporate Investment Loan',
     '7060': 'Term Deposit',          '7900': 'Interbank Placement',
+    '7070': 'Term Deposit (SME)',
     '8000': 'Savings Account',
 }
 
@@ -178,12 +195,12 @@ RD = REPORT_DATE
 
 # 1. Actual book balances per product
 bs_prod = rsql('''
-    SELECT product_code, product_name, bs_side, currency,
-           SUM(balance_amt) AS balance_amt
+    SELECT product_code, product_name, bs_side, MAX(currency) AS currency,
+           SUM(balance_amt * {FX_SQL}) AS balance_amt
     FROM dbo.transactions
-    WHERE report_date = :rd AND currency = :ccy
-    GROUP BY product_code, product_name, bs_side, currency
-''', rd=RD, ccy=CCY)
+    WHERE report_date = :rd
+    GROUP BY product_code, product_name, bs_side
+'''.format(FX_SQL=FX_SQL), rd=RD)
 
 equity_amt = float(rsql(
     'SELECT ISNULL(SUM(balance_amt),0) AS v FROM schemat.equity WHERE report_date=:rd',
@@ -192,13 +209,13 @@ equity_amt = float(rsql(
 # 2. NII by product — CF base scenario (consistent fixed pipeline)
 nii_prod = rsql('''
     SELECT product_code, bs_side, rate_type,
-           SUM(nii_interest) AS nii_interest,
-           SUM(nii_renewal)  AS nii_renewal,
-           SUM(nii_total)    AS nii_total
+           SUM(nii_interest * {FX_SQL}) AS nii_interest,
+           SUM(nii_renewal  * {FX_SQL}) AS nii_renewal,
+           SUM(nii_total    * {FX_SQL}) AS nii_total
     FROM cf.nii_base_scenario
-    WHERE report_date = :rd AND currency = :ccy AND scenario_id = 'base'
+    WHERE report_date = :rd AND scenario_id = 'base'
     GROUP BY product_code, bs_side, rate_type
-''', rd=RD, ccy=CCY)
+'''.format(FX_SQL=FX_SQL), rd=RD)
 
 # 3. Balance-weighted average rates per product
 rate_prod = rsql('''
@@ -207,20 +224,20 @@ rate_prod = rsql('''
            SUM(beh_outstanding * margin)        / NULLIF(SUM(beh_outstanding), 0) AS avg_margin,
            SUM(beh_outstanding * ren_client_rt) / NULLIF(SUM(beh_outstanding), 0) AS avg_ren_rt
     FROM cf.nii_base_scenario
-    WHERE report_date = :rd AND currency = :ccy AND scenario_id = 'base'
+    WHERE report_date = :rd AND scenario_id = 'base'
       AND beh_outstanding > 0
     GROUP BY product_code, bs_side
-''', rd=RD, ccy=CCY)
+''', rd=RD)
 
 # 4. Scenario NII for rate sensitivity
 nii_scen = rsql('''
-    SELECT scenario_id, currency,
-           SUM(nii_interest) AS nii_interest,
-           SUM(nii_renewal)  AS nii_renewal,
-           SUM(nii_total)    AS nii_total
-    FROM irrbb.nii_results WHERE report_date=:rd AND currency=:ccy
-    GROUP BY scenario_id, currency
-''', rd=RD, ccy=CCY)
+    SELECT scenario_id, :ccy AS currency,
+           SUM(nii_interest * {FX_SQL}) AS nii_interest,
+           SUM(nii_renewal  * {FX_SQL}) AS nii_renewal,
+           SUM(nii_total    * {FX_SQL}) AS nii_total
+    FROM irrbb.nii_results WHERE report_date=:rd
+    GROUP BY scenario_id
+'''.format(FX_SQL=FX_SQL), rd=RD, ccy=CCY)
 
 # ── Master product table ──────────────────────────────────────────────────────
 prod = (nii_prod
@@ -243,7 +260,7 @@ avg_cost_funds = total_exp  / total_liabs  * 100 if total_liabs  else 0
 int_spread     = avg_asset_yld - avg_cost_funds
 
 print(f'Data loaded  |  {len(prod)} product rows  |  '
-      f'assets {total_assets/1e9:.2f}B / liabs {total_liabs/1e9:.2f}B PLN')
+      f'assets {total_assets/1e9:.2f}B / liabs {total_liabs/1e9:.2f}B {CCY}')
 """)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -256,9 +273,9 @@ _base_nii_off = float(nii_scen[nii_scen['scenario_id']=='base']['nii_total'].sum
 display(html_table(
     ['Balance Sheet', 'Value'],
     [
-        ['Total assets',      f'{total_assets/1e9:.2f}  B PLN'],
-        ['Total liabilities', f'{total_liabs/1e9:.2f}  B PLN'],
-        ['Equity',            f'{equity_amt/1e9:.2f}  B PLN'],
+        ['Total assets',      f'{total_assets/1e9:.2f}  B {CCY}'],
+        ['Total liabilities', f'{total_liabs/1e9:.2f}  B {CCY}'],
+        ['Equity',            f'{equity_amt/1e9:.2f}  B {CCY}'],
     ],
     title=f'FINANCE P&L SUMMARY  |  {CCY}  |  {REPORT_DATE.date()}',
 ))
@@ -270,7 +287,7 @@ display(html_table(
         ['Interest expense (liab.)', pos_neg(-total_exp/1e6, '+9.1f')],
     ],
     total_row=['Net Interest Income', pos_neg(nii_total/1e6, '+9.1f')],
-    note='M PLN',
+    note=f'M {CCY}',
 ))
 
 display(html_table(
@@ -304,7 +321,7 @@ for _s, _lbl in [('par_up','+250 bps'),('par_dn','-250 bps')]:
     _v = float(_r['nii_total'].sum()); _d = _v - _base_nii_off
     _eba_rows.append([_lbl, pos_neg(_d/1e6, '+8.1f'), pos_neg(_d/_base_nii_off*100, '+.1f')])
 display(html_table(
-    ['EBA Parallel Shock Sensitivity', 'ΔNII (M PLN)', 'ΔNII (%)'],
+    ['EBA Parallel Shock Sensitivity', f'ΔNII (M {CCY})', 'ΔNII (%)'],
     _eba_rows,
 ))
 """)
@@ -348,7 +365,7 @@ for bar, val in zip(bars1, wf_vals):
 ax1.set_xticks(x1); ax1.set_xticklabels(wf_labels, rotation=30, ha='right', fontsize=8)
 ax1.axhline(0, color='black', lw=0.8)
 ax1.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v,_: f'{v:.0f}M'))
-ax1.set_ylabel('M PLN'); ax1.set_title('NII Waterfall — Income → Expense → Net')
+ax1.set_ylabel(f'M {CCY}'); ax1.set_title('NII Waterfall — Income → Expense → Net')
 ax1.text(len(x1)-1, nii_total/1e6*0.5,
          f'NII\\n{nii_total/1e6:+.0f}M\\nNIM {nim_pct:.2f}%',
          ha='center', fontsize=8.5, color=C_NET, fontweight='bold')
@@ -367,7 +384,7 @@ for bar, (_, row) in zip(b2, _all.iterrows()):
 ax2.set_xticks(x2); ax2.set_xticklabels(_all['label'], rotation=35, ha='right', fontsize=8)
 ax2.axhline(0, color='black', lw=0.8)
 ax2.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v,_: f'{v:.0f}M'))
-ax2.set_title('NII by Product'); ax2.set_ylabel('M PLN')
+ax2.set_title('NII by Product'); ax2.set_ylabel(f'M {CCY}')
 plt.tight_layout(); plt.show()
 """)
 
@@ -469,7 +486,7 @@ wedges, texts, autos = axes3[0].pie(
     colors=_cols_pie, startangle=90, pctdistance=0.78,
     textprops={'fontsize': 8})
 for a in autos: a.set_fontsize(7.5)
-axes3[0].set_title(f'Funding Mix\\n({total_liabs/1e9:.1f} B PLN total)')
+axes3[0].set_title(f'Funding Mix\\n({total_liabs/1e9:.1f} B {CCY} total)')
 
 # Bar: cost rate
 _x = np.arange(len(_l))
@@ -492,8 +509,8 @@ for bar, v in zip(b_c, _cm):
                   f'{v:.0f}M', ha='center', fontsize=8)
 axes3[2].set_xticks(_x); axes3[2].set_xticklabels(_l['label'], rotation=25, ha='right', fontsize=8)
 axes3[2].yaxis.set_major_formatter(mticker.FuncFormatter(lambda v,_: f'{v:.0f}M'))
-axes3[2].set_title(f'Annual Interest Cost ({total_exp/1e6:.0f} M PLN total)')
-axes3[2].set_ylabel('M PLN')
+axes3[2].set_title(f'Annual Interest Cost ({total_exp/1e6:.0f} M {CCY} total)')
+axes3[2].set_ylabel(f'M {CCY}')
 plt.tight_layout(); plt.show()
 
 _fund_rows = [
@@ -549,8 +566,8 @@ for ax, side, total_b, title in [
                 f'{pct:.0f}%\\n({rate_s})', ha='center', fontsize=8.5)
     ax.set_xticks(_x); ax.set_xticklabels(_grp['label'], fontsize=10)
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v,_: f'{v:.1f}B'))
-    ax.set_title(f'{title}\\n(total {total_b/1e9:.1f} B PLN)')
-    ax.set_ylabel('B PLN')
+    ax.set_title(f'{title}\\n(total {total_b/1e9:.1f} B {CCY})')
+    ax.set_ylabel(f'B {CCY}')
     ax.legend(handles=[mpatches.Patch(color=c,label=l) for l,c in RT_COLORS.items()])
 
 plt.tight_layout(); plt.show()
@@ -563,7 +580,7 @@ for side, lbl in [('A','Assets'),('L','Liabilities')]:
         if _r.empty: continue
         b = _r['balance_amt'].abs().sum()
         eff = abs(_r['nii_interest'].sum()) / b * 100 if b else 0
-        _rt_rows.append([rl, f'{b/1e9:.2f} B PLN', f'{b/tot*100:.1f}%', f'{eff:.2f}%'])
+        _rt_rows.append([rl, f'{b/1e9:.2f} B {CCY}', f'{b/tot*100:.1f}%', f'{eff:.2f}%'])
     display(html_table(
         [lbl, 'Balance', '% of total', 'Avg rate'],
         _rt_rows,
@@ -605,7 +622,7 @@ for i, (_, row) in enumerate(_bridge.iterrows()):
 ax5a.set_xticks(_x5); ax5a.set_xticklabels(_bridge['label'], rotation=30, ha='right', fontsize=8)
 ax5a.axhline(0, color='black', lw=0.8)
 ax5a.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v,_: f'{v:.0f}M'))
-ax5a.set_title('NII by Product (locked + renewal)'); ax5a.set_ylabel('M PLN'); ax5a.legend()
+ax5a.set_title('NII by Product (locked + renewal)'); ax5a.set_ylabel(f'M {CCY}'); ax5a.legend()
 
 # Aggregate summary bar (right)
 _agg_vals = [
@@ -624,7 +641,7 @@ for bar, v in zip(b5b, _agg_vals):
 ax5b.set_xticks(range(4)); ax5b.set_xticklabels(_agg_lbls, fontsize=9)
 ax5b.axhline(0, color='black', lw=0.8)
 ax5b.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v,_: f'{v:.0f}M'))
-ax5b.set_title('Aggregate Components'); ax5b.set_ylabel('M PLN')
+ax5b.set_title('Aggregate Components'); ax5b.set_ylabel(f'M {CCY}')
 _tot_int = sum(_agg_vals[0::2]); _tot_ren = sum(_agg_vals[1::2])
 ax5b.text(3.55, max(_agg_vals)*0.82,
           f'Net locked:\\n{_tot_int:+.0f}M\\nNet renewal:\\n{_tot_ren:+.0f}M',
@@ -660,7 +677,9 @@ so the two side totals add up to the bank's total margin value.
 
 CELL_PMARGIN = code("""\
 import sys, os
-_ROOT_DIR = os.path.normpath(os.path.join(os.getcwd(), '..'))
+_ROOT_DIR = os.getcwd()   # walk up to the project root (notebook may run from output/<bank>/)
+while not os.path.isdir(os.path.join(_ROOT_DIR, 'labbank_common')):
+    _ROOT_DIR = os.path.dirname(_ROOT_DIR)
 if _ROOT_DIR not in sys.path:
     sys.path.insert(0, _ROOT_DIR)
 from labbank_common.product_labels import product_label
@@ -718,7 +737,7 @@ for side, title, marg_hdr, tot, note in [
         title=title, note=note,
     ))
 display(html_table(
-    ['Margin Value / Year', 'M PLN'],
+    ['Margin Value / Year', f'M {CCY}'],
     [
         ['Assets total contribution',      pos_neg(_tot_a, '+.1f')],
         ['Liabilities total contribution', pos_neg(_tot_l, '+.1f')],
@@ -876,7 +895,7 @@ CELL_EP_MD = md("""\
 today* — not as an optimization — split by product so you can see which products are economically
 strong vs. weak on a fully-loaded basis, not just on raw interest margin.
 
-Sourced from `optimize_prep/output/product_params.npz` and `ftp_rates.npz` (the same per-product
+Sourced from `runs/<bank>/optimize_prep/product_params.npz` and `ftp_rates.npz` (the same per-product
 economics `bs_optimization/` reads), not from SQL like the rest of this report — see the technical
 notes for why that's a separate data source. Regenerate both via the `labbank_data_job`/
 `optimize_prep_job` Dagster jobs (or `optimize_prep/python_code/opt_prep_workflow.py` +
@@ -889,19 +908,22 @@ optimizer, not a steady-state cost, so it's zero for the book as it stands.
 CELL_EP = code("""\
 import sys, os
 
-_OPT_PREP_DIR = os.path.normpath(os.path.join(os.getcwd(), '..', 'optimize_prep', 'python_code'))
+_ROOT_DIR = os.getcwd()   # walk up to the project root (notebook may run from output/<bank>/)
+while not os.path.isdir(os.path.join(_ROOT_DIR, 'labbank_common')):
+    _ROOT_DIR = os.path.dirname(_ROOT_DIR)
+_OPT_PREP_DIR = os.path.join(_ROOT_DIR, 'optimize_prep', 'python_code')
 if _OPT_PREP_DIR not in sys.path:
     sys.path.insert(0, _OPT_PREP_DIR)
 from bs_vector import BalanceSheetParams
 from ftp_store import load_ftp_rates, margin_unit_rate, equity_benefit_unit_rate
 
-PARAMS_PATH = os.path.normpath(os.path.join(os.getcwd(), '..', 'optimize_prep', 'output', 'product_params.npz'))
+PARAMS_PATH = str(BANK.output_dir('optimize_prep') / 'product_params.npz')
 EP_OPEX_RATE = 0.0065   # flat opex rate on non-equity balance -- matches bs_optimizer.py's OPEX_RATE
 
 ep_params = BalanceSheetParams.load(PARAMS_PATH)
 ep_ftp_rate = load_ftp_rates(ep_params.cohort_id)
 if ep_ftp_rate is None:
-    print('  No FTP cache found (optimize_prep/output/ftp_rates.npz) -- Margin will equal '
+    print('  No FTP cache found (runs/<bank>/optimize_prep/ftp_rates.npz) -- Margin will equal '
           'client-rate NII until build_ftp_rates.py is run.')
     ep_ftp_rate = np.zeros_like(ep_params.nii_unit_rate)
 
@@ -954,7 +976,7 @@ display(html_table(
           f'CET1 target {ep_params.cet1_target*100:.1f}%  |  '
           f'Cost of capital {ep_params.coc_rate*100:.1f}%  |  '
           f'OpEx rate {EP_OPEX_RATE*100:.2f}% of balance.  '
-          f'M PLN, EP = {_tot_ep/total_assets*10000:+.0f} bps of total assets.'),
+          f'M {CCY}, EP = {_tot_ep/total_assets*10000:+.0f} bps of total assets.'),
 ))
 
 # ── Waterfall: book-level EP bridge (Margin -> EqBenefit -> Fee -> -EL -> -CoC -> -OpEx -> EP) ──
@@ -995,7 +1017,7 @@ for i, (bar, (_lbl, _val, _col)) in enumerate(zip(bars8c, _ep_components + [('',
 ax8c.set_xticks(_x8c); ax8c.set_xticklabels(_wf2_labels, fontsize=9)
 ax8c.axhline(0, color='black', lw=0.8)
 ax8c.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v,_: f'{v:.0f}M'))
-ax8c.set_ylabel('M PLN'); ax8c.set_title(f'Total book: EP = {_tot_ep/1e6:+.1f}M PLN '
+ax8c.set_ylabel(f'M {CCY}'); ax8c.set_title(f'Total book: EP = {_tot_ep/1e6:+.1f}M {CCY} '
                                           f'({_tot_ep/total_assets*10000:+.0f} bps of total assets)')
 plt.tight_layout(); plt.show()
 
@@ -1047,7 +1069,7 @@ ax8b.axhline(0, color='black', lw=0.8)
 for i, v in enumerate(_ep_m_sorted['ep']/1e6):
     ax8b.text(i, v + (2 if v >= 0 else -5), f'{v:+.0f}M', ha='center', fontsize=7.5, fontweight='bold')
 ax8b.set_xticks(_x8b); ax8b.set_xticklabels(_ep_m_sorted['label'], rotation=30, ha='right', fontsize=8)
-ax8b.set_title(f'EP contribution (M PLN)  --  total {_tot_ep/1e6:+.0f}M'); ax8b.set_ylabel('EP (M PLN)')
+ax8b.set_title(f'EP contribution (M {CCY})  --  total {_tot_ep/1e6:+.0f}M'); ax8b.set_ylabel(f'EP (M {CCY})')
 
 plt.tight_layout(); plt.show()
 """)
@@ -1076,7 +1098,17 @@ nb = {
     "cells": cells,
 }
 
-NOTEBOOK = Path(__file__).with_name("finance_report.ipynb")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from labbank_common.bank_config import get_bank
+_BANK = get_bank()
+for _c in cells:   # markdown is static text: name the bank's currency / index at build time
+    if _c["cell_type"] == "markdown":
+        _c["source"] = [t.replace("PLN", _BANK.market.ccy).replace("WIBOR", _BANK.market.float_index)
+                         .replace("2026-06-30", _BANK.report_date)
+                        for t in _c["source"]]
+
+# one folder per bank: runs/<bank_id>/visual_rep/ (keeps both banks' reports side by side)
+NOTEBOOK = _BANK.output_dir("visual_rep") / "finance_report.ipynb"
 PDF_OUT  = NOTEBOOK.with_suffix(".pdf")
 HTML_OUT = NOTEBOOK.with_suffix(".html")
 _ENV = {**os.environ, "PYTHONWARNINGS": "ignore::RuntimeWarning"}

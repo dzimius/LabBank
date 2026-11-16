@@ -25,17 +25,26 @@ OPTPREP_CODE  = os.path.join(PROJECT_ROOT, "optimize_prep", "python_code")
 
 if OPTPREP_CODE not in sys.path:
     sys.path.insert(0, OPTPREP_CODE)
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+from labbank_common import demo  # noqa: E402
+from labbank_common.bank_config import get_bank  # noqa: E402
+
+BANK = get_bank()   # one Streamlit process per bank (LABBANK_BANK)
+demo.install(BANK)  # a clean clone has no runs/ yet: unpack the demo pack
 
 from bs_vector import BalanceSheetParams, CurveTensors, CohortRates  # noqa: E402
 from metrics   import compute_all_metrics, AllMetrics, reset_bias_cache  # noqa: E402
 from ep_fast   import build_ep_context, compute_ep_components  # noqa: E402
 
 # ── file paths ─────────────────────────────────────────────────────────────────
-PARAMS_PATH         = os.path.join(PROJECT_ROOT, "optimize_prep", "output", "product_params.npz")
-CURVES_PATH         = os.path.join(PROJECT_ROOT, "optimize_prep", "output", "curve_tensors.npz")
-SCENARIO_CURVES_PATH = os.path.join(PROJECT_ROOT, "sandbox", "scenario_curves.npz")
-BS_PATH     = os.path.join(PROJECT_ROOT, "balance_generate", "input_data", "bank_data.xlsx")
-IRS_PATH    = os.path.join(PROJECT_ROOT, "ir_derivatives",   "input",  "irs_input.xlsx")
+PARAMS_PATH         = str(BANK.output_dir("optimize_prep") / "product_params.npz")
+CURVES_PATH         = str(BANK.output_dir("optimize_prep") / "curve_tensors.npz")
+SCENARIO_CURVES_PATH = str(BANK.output_dir("sandbox") / "scenario_curves.npz")
+BS_PATH     = str(BANK.balance_dir() / "bank_data.xlsx")
+# derivatives.xlsx: sheet 'swap' (swap book) + sheet 'fx_spot' (FX deals), labbank_common/derivatives.py
+from labbank_common import derivatives as _deriv  # noqa: E402
+DERIV_PATH  = str(_deriv.input_path(BANK))
 
 TOLERANCE   = 0.05   # % tolerance for balance-sheet sum validation
 
@@ -137,12 +146,33 @@ def load_scenario_curves() -> dict:
 @st.cache_data
 def load_bs_structure() -> pd.DataFrame:
     df = pd.read_excel(BS_PATH, sheet_name="bs_structure")
-    return df[["product_code", "own_name", "bs_side", "bs_percentage", "currency"]].copy()
+    # catalogue products (bs_percentage 0, and the variants of sheet catalogue, which this
+    # plain read does not expand) are not held: the app shows the book as it is -- they are
+    # sold only through the roll-forward growth plan and the optimizers
+    df = df[df["bs_percentage"] > 0]
+    return df[["product_code", "own_name", "bs_side", "bs_percentage", "currency",
+               "rate_type", "fixing_freq", "maturity"]].copy()
+
+
+def _fix_label(rate_type, fixing_freq) -> str:
+    """Fixing frequency for the editor (the rate type has its own column): the reset tenor of
+    a floating product, the fixed-rate period of a fixed one (10Y), blank when it is implied
+    -- fixed for the whole life, administered rate, equity."""
+    if rate_type not in ("F", "V") or pd.isna(fixing_freq):
+        return ""
+    return str(fixing_freq)
+
+
+def _mat_label(maturity) -> str:
+    if pd.isna(maturity):
+        return "—"
+    return "NMD" if str(maturity) == "NM" else str(maturity)
 
 
 @st.cache_data
 def load_irs_baseline() -> pd.DataFrame:
-    df = pd.read_excel(IRS_PATH)
+    # manual swap sheet + the asset swaps the pipeline generated from the bond book
+    df = _deriv.read_swap_book(BANK, DERIV_PATH)
     df["start_date"]    = pd.to_datetime(df["start_date"]).dt.date
     df["maturity_date"] = pd.to_datetime(df["maturity_date"]).dt.date
     # float_spread is intentionally dropped: it is inert in the sandbox engines
@@ -153,6 +183,34 @@ def load_irs_baseline() -> pd.DataFrame:
             "float_rate_index", "float_fixing_freq", "float_pay_freq",
             "disc_curve", "fwd_curve"]
     return df[[c for c in keep if c in df.columns]].copy()
+
+
+FX_EDIT_COLS = ["deal_id", "deal_type", "near_date", "near_buy_ccy", "near_buy_amt",
+                "near_sell_ccy", "near_sell_amt", "far_date", "far_buy_ccy", "far_buy_amt",
+                "far_sell_ccy", "far_sell_amt"]
+
+
+@st.cache_data
+def load_fx_deals_baseline() -> pd.DataFrame:
+    """The fx_spot sheet (FX spots / forwards / swaps) in the Swap Book tab's editor layout."""
+    df = _deriv.read_fx_deals(BANK, DERIV_PATH)
+    for c in ("near_date", "far_date"):
+        df[c] = df[c].dt.date
+    return df[FX_EDIT_COLS].reset_index(drop=True)
+
+
+def fx_deal_position(deals: pd.DataFrame, report_date) -> dict[str, float]:
+    """Open position the FX deals add per currency (own units): every exchange still to
+    settle after the report date, + received / - paid by the bank."""
+    if deals is None or deals.empty:
+        return {}
+    d = deals.copy()
+    for c in ("near_date", "far_date"):
+        d[c] = pd.to_datetime(d[c])
+    d = d.dropna(subset=["deal_id"])
+    ex = _deriv.fx_exchanges(d.assign(trade_date=pd.NaT))
+    ex = ex[(ex["date"] > pd.Timestamp(report_date)) & ex["amount"].notna()]
+    return ex.groupby("currency")["amount"].sum().to_dict()
 
 
 # ── balance-sheet editor helpers ──────────────────────────────────────────────
@@ -166,6 +224,10 @@ def build_bs_editor_df(params: BalanceSheetParams, bs_struct: pd.DataFrame) -> p
     own_name      str   display label
     bs_side       str   A / L / E
     currency      str
+    rate_type     str   F fixed / V floating / A administered (bank-set)
+    fix           str   fixing frequency: reset tenor (V), fixed-rate period (F, e.g. 10Y);
+                        blank when implied (F for the whole life, A)
+    mat           str   contractual maturity ("7Y", "NMD" for non-maturity deposits)
     current_pct   float % of total_assets at baseline
     new_pct       float % of total_assets (editable — starts equal to current_pct)
     """
@@ -196,6 +258,9 @@ def build_bs_editor_df(params: BalanceSheetParams, bs_struct: pd.DataFrame) -> p
             "own_name":     str(r["own_name"]),
             "bs_side":      str(r["bs_side"]),
             "currency":     str(r["currency"]),
+            "rate_type":    "" if pd.isna(r.get("rate_type")) else str(r.get("rate_type")),
+            "fix":          _fix_label(r.get("rate_type"), r.get("fixing_freq")),
+            "mat":          _mat_label(r.get("maturity")) if r["bs_side"] != "E" else "—",
             "current_pct":  cpct,
             "new_pct":      cpct,
             "avg_rate":     avg_rate,
@@ -223,9 +288,11 @@ def compute_weights(params: BalanceSheetParams,
 
     # pre-compute current total weight per product
     prod_w: dict[tuple[str, str], float] = {}
+    n_rows: dict[tuple[str, str], int] = {}
     for pc, side, w in zip(params.product_code, params.bs_side, base_w):
         key = (str(pc), str(side))
         prod_w[key] = prod_w.get(key, 0.0) + float(w)
+        n_rows[key] = n_rows.get(key, 0) + 1
 
     for i, (pc, side) in enumerate(zip(params.product_code, params.bs_side)):
         key = (str(pc), str(side))
@@ -235,6 +302,8 @@ def compute_weights(params: BalanceSheetParams,
         if old_w > 0.0:
             scale    = (new_pcts[key] / 100.0) / old_w
             new_w[i] = base_w[i] * scale
+        else:            # catalogue product (no base balance): even split over its rows
+            new_w[i] = (new_pcts[key] / 100.0) / n_rows[key]
 
     return new_w
 
@@ -248,7 +317,7 @@ def run_metrics(weights: np.ndarray,
 
 # ── NMD behavioral model loaders ─────────────────────────────────────────────
 
-NMD_BEH_PATH = os.path.join(PROJECT_ROOT, "balance_gen_add_data", "input", "dep_beh_models_ir.xlsx")
+NMD_BEH_PATH = str(BANK.models_dir() / "dep_beh_models_ir.xlsx")
 
 _SANDBOX_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SANDBOX_DIR not in sys.path:

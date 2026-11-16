@@ -15,6 +15,8 @@ Follows the same pattern as irrbb_calc/sql_setup.py:
 """
 from __future__ import annotations
 
+import os
+import sys
 import pandas as pd
 from sqlalchemy import (
     create_engine, text, Table, Column, MetaData,
@@ -22,13 +24,11 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.mssql import DECIMAL
 
-engine = create_engine(
-    "mssql+pyodbc://maciek_d/bank_gen"
-    "?driver=ODBC+Driver+17+for+SQL+Server"
-    "&Trusted_Connection=yes",
-    fast_executemany=True,
-    future=True,
-)
+sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')))
+from labbank_common.bank_config import get_engine
+from labbank_common import run_store  # noqa: E402  history per (report_date, run_id), docs/04
+
+engine = get_engine()   # active bank's database (LABBANK_BANK, default eur)
 
 metadata = MetaData(schema=None)
 
@@ -140,26 +140,17 @@ def ensure_schema() -> None:
 
 def reset_monthly_curves() -> None:
     ensure_schema()
-    with engine.begin() as conn:
-        conn.execute(text("DROP TABLE IF EXISTS opt_prep.monthly_curves"))
-    with engine.begin() as conn:
-        metadata.create_all(bind=conn, tables=[MonthlyCurves], checkfirst=False)
+    run_store.reset_table(engine, "monthly_curves", "opt_prep", run_store.sa_create(metadata, MonthlyCurves))
 
 
 def reset_product_params() -> None:
     ensure_schema()
-    with engine.begin() as conn:
-        conn.execute(text("DROP TABLE IF EXISTS opt_prep.product_params"))
-    with engine.begin() as conn:
-        metadata.create_all(bind=conn, tables=[ProductParams], checkfirst=False)
+    run_store.reset_table(engine, "product_params", "opt_prep", run_store.sa_create(metadata, ProductParams))
 
 
 def reset_product_scenario_params() -> None:
     ensure_schema()
-    with engine.begin() as conn:
-        conn.execute(text("DROP TABLE IF EXISTS opt_prep.product_scenario_params"))
-    with engine.begin() as conn:
-        metadata.create_all(bind=conn, tables=[ProductScenarioParams], checkfirst=False)
+    run_store.reset_table(engine, "product_scenario_params", "opt_prep", run_store.sa_create(metadata, ProductScenarioParams))
 
 
 def reset_all() -> None:
@@ -184,6 +175,7 @@ def _write(df: pd.DataFrame, table: Table, chunksize: int = 10_000) -> None:
         if c not in out.columns:
             out[c] = None
     out = out[cols].where(pd.notnull(out[cols]), None)
+    out = run_store.stamp(out, run_store.current_run())
     out.to_sql(
         table.name, engine,
         schema=table.schema,
@@ -258,10 +250,7 @@ CohortCfCompare = Table(
 
 def reset_cohort_cf_compare() -> None:
     ensure_schema()
-    with engine.begin() as conn:
-        conn.execute(text("DROP TABLE IF EXISTS opt_prep.cohort_cf_compare"))
-    with engine.begin() as conn:
-        metadata.create_all(bind=conn, tables=[CohortCfCompare], checkfirst=False)
+    run_store.reset_table(engine, "cohort_cf_compare", "opt_prep", run_store.sa_create(metadata, CohortCfCompare))
 
 
 def write_cohort_cf_compare(df: pd.DataFrame) -> None:
@@ -290,10 +279,7 @@ FtpRates = Table(
 
 def reset_ftp_rates() -> None:
     ensure_schema()
-    with engine.begin() as conn:
-        conn.execute(text("DROP TABLE IF EXISTS opt_prep.ftp_rates"))
-    with engine.begin() as conn:
-        metadata.create_all(bind=conn, tables=[FtpRates], checkfirst=False)
+    run_store.reset_table(engine, "ftp_rates", "opt_prep", run_store.sa_create(metadata, FtpRates))
 
 
 def write_ftp_rates(df: pd.DataFrame) -> None:

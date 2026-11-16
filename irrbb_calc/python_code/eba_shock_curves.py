@@ -29,7 +29,7 @@ Usage
   shocked_df = esc.build_all_shocked_curves(mkt_df, report_date, currency="PLN")
   esc.write_irrbb_curves(engine, shocked_df, report_date)
   esc.generate_shock_excel(mkt_df, report_date, currency="PLN",
-                           output_path="output/irrbb_shock_curves.xlsx")
+                           output_path="output/<bank>/irrbb_shock_curves.xlsx")
 """
 from __future__ import annotations
 
@@ -125,6 +125,12 @@ def get_shock_params(currency: str) -> dict[str, float]:
     return SHOCK_PARAMS_BPS[currency]
 
 
+def curve_currency(curve_name: str, default: str) -> str:
+    """Currency of a curve from its name prefix ('USD_disc_curve' -> 'USD'), else `default`."""
+    prefix = str(curve_name).split("_", 1)[0].upper()
+    return prefix if prefix in SHOCK_PARAMS_BPS else default
+
+
 def shock_bps_at_tenors(
     t: np.ndarray,
     scenario: str,
@@ -166,8 +172,11 @@ def shock_bps_at_tenors(
     R_s   = float(params["short"])
     R_l   = float(params["long"])
 
-    f_s = np.exp(-t)          # 1 at t=0, → 0 for long tenors
-    f_l = 1.0 - np.exp(-t)   # 0 at t=0, → 1 for long tenors
+    # Shaping per BCBS SRP31.6 / Reg. (EU) 2024/856 Annex: S_short(t) = R_short * exp(-t/x),
+    # S_long(t) = R_long * (1 - exp(-t/x)) with x = 4 years (was exp(-t): the short shock
+    # had decayed to 37% at 1Y and 2% at 4Y instead of 78% / 37%)
+    f_s = np.exp(-t / SHOCK_DECAY_YEARS)          # 1 at t=0, -> 0 for long tenors
+    f_l = 1.0 - np.exp(-t / SHOCK_DECAY_YEARS)    # 0 at t=0, -> 1 for long tenors
 
     if scenario == "par_up":
         return np.full_like(t, +R_par)
@@ -180,7 +189,7 @@ def shock_bps_at_tenors(
     elif scenario == "steep":
         return -0.65 * R_s * f_s + 0.90 * R_l * f_l
     elif scenario == "flat":
-        return +0.80 * R_s * f_s - 0.75 * R_l * f_l
+        return +0.80 * R_s * f_s - 0.60 * R_l * f_l      # flattener: -0.6 x long (was 0.75)
     else:
         raise ValueError(
             f"Unknown scenario '{scenario}'. "
@@ -213,6 +222,25 @@ def _log_interp_daily_df(
     return pd.DataFrame({"n_days": grid.astype(int), "d_f": np.exp(ln_y_interp)})
 
 
+SHOCK_DECAY_YEARS = 4.0
+
+
+def eba_lower_bound_bps(t_years) -> np.ndarray:
+    """Post-shock interest-rate lower bound of Reg. (EU) 2024/856 Art. 3(7): -150bp at
+    t = 0, rising 3bp per year of maturity, 0% from 50 years."""
+    return np.minimum(0.0, -150.0 + 3.0 * np.asarray(t_years, dtype=float))
+
+
+def floor_shocked(zero_rate, shocked_rate, t_years, flat_floor=None) -> np.ndarray:
+    """Floor a shocked zero curve. Default (flat_floor None): the EBA lower bound, or the
+    observed (unshocked) rate where that is already lower -- a shock never lifts a rate
+    that is below the bound. A number: the legacy flat floor (e.g. 0.0)."""
+    if flat_floor is not None:
+        return np.maximum(flat_floor, shocked_rate)
+    bound = np.minimum(eba_lower_bound_bps(t_years) / 10_000.0, zero_rate)
+    return np.maximum(bound, shocked_rate)
+
+
 def default_realistic_base_floor_bps(
     t_years: np.ndarray, short_floor_bps: float = -100.0, slope_bps_per_year: float = 10.0,
 ) -> np.ndarray:
@@ -243,7 +271,7 @@ def apply_shock_to_disc_curve(
     scenario: str,
     params: dict[str, float],
     own_shock_bps: float = -100.0,
-    nii_floor_rate: float = 0.0,
+    nii_floor_rate: float | None = None,   # None = EBA lower bound
     base_floor_bps_fn=None,
 ) -> pd.DataFrame:
     """Shift a discount curve (n_days, d_f) by the EBA shock for one scenario.
@@ -259,7 +287,7 @@ def apply_shock_to_disc_curve(
          scenario == "base"  -> just the (possibly base-floored) r(t), no
                                  further floor -- EBA's own nii_floor_rate is a
                                  SHOCK floor, not a floor on the unshocked curve.
-         otherwise            -> max(nii_floor_rate, r(t) + Δr(t)), exactly the
+         otherwise            -> floor_shocked(): EBA lower bound (or nii_floor_rate), the
                                  original EBA-regulatory-floor behavior,
                                  unaffected by base_floor_bps_fn's value.
     5. Back to d_f: exp(−r_shocked · t)
@@ -288,10 +316,12 @@ def apply_shock_to_disc_curve(
         if scenario == "base":
             shocked_r = zero_rate
         else:
-            shocked_r = np.maximum(nii_floor_rate, zero_rate + shock_dec)
+            shocked_r = floor_shocked(zero_rate, zero_rate + shock_dec, t, nii_floor_rate)
     else:
         shock_dec   = shock_bps_at_tenors(t, scenario, params, own_shock_bps) / 10_000.0
-        shocked_r   = np.maximum(nii_floor_rate, zero_rate + shock_dec)
+        # the unshocked base curve is never floored (it used to be max(0%, r))
+        shocked_r   = (zero_rate if scenario == "base"
+                       else floor_shocked(zero_rate, zero_rate + shock_dec, t, nii_floor_rate))
 
     d_f_shocked = np.where(t > 0, np.exp(-shocked_r * t), 1.0)
 
@@ -307,7 +337,7 @@ def build_all_shocked_curves(
     report_date: pd.Timestamp,
     currency: str,
     own_shock_bps: float = -100.0,
-    nii_floor_rate: float = 0.0,
+    nii_floor_rate: float | None = None,   # None = EBA lower bound
     base_floor_bps_fn=None,
 ) -> pd.DataFrame:
     """Compute shocked discount curves for all 8 scenarios and all curve_names.
@@ -319,7 +349,8 @@ def build_all_shocked_curves(
     report_date   : valuation date
     currency      : currency code (e.g. 'PLN') — determines shock magnitudes
     own_shock_bps : parallel shift for the 'own' scenario (default −100 bps)
-    nii_floor_rate: absolute rate floor applied after shock (default 0.0 = 0%)
+    nii_floor_rate: post-shock floor: None (default) = EBA lower bound of Reg. 2024/856
+                    Art. 3(7); a number = legacy flat floor (e.g. 0.0)
     base_floor_bps_fn: optional pre-shock floor on the unshocked curve itself
                     (see apply_shock_to_disc_curve / default_realistic_base_floor_bps).
                     Default None -- every existing caller is unaffected unless
@@ -330,11 +361,14 @@ def build_all_shocked_curves(
     DataFrame with columns: report_date, scenario_id, curve_name, n_days, d_f
     Stored in SQL table irrbb.curves (written by write_irrbb_curves).
     """
-    params = get_shock_params(currency)
     parts  = []
 
     for scenario in ALL_SCENARIO_IDS:
         for curve_name, grp in mkt_df.groupby("curve_name"):
+            # each curve is shocked with its OWN currency's Annex I sizes (USD_disc_curve ->
+            # USD), so a multi-currency bank shocks every currency correctly; curves without
+            # a currency prefix (synthetic curves) use `currency`
+            params = get_shock_params(curve_currency(curve_name, currency))
             shocked = apply_shock_to_disc_curve(
                 grp[["n_days", "d_f"]].reset_index(drop=True),
                 scenario, params, own_shock_bps, nii_floor_rate,
@@ -351,7 +385,7 @@ def build_all_shocked_curves(
 def build_own_shocked_curves(
     mkt_df: pd.DataFrame,
     report_date: pd.Timestamp,
-    nii_floor_rate: float = 0.0,
+    nii_floor_rate: float | None = None,   # None = EBA lower bound
 ) -> pd.DataFrame:
     """Compute shocked discount curves for the 4 own parallel scenarios.
 
@@ -391,35 +425,43 @@ def write_irrbb_curves(
     replace=True  (default): delete all existing rows for report_date first.
     replace=False           : append-only — used when adding own scenarios after
                               EBA curves have already been written.
+    Rows are keyed by (report_date, run_id): other runs stay (labbank_common/run_store.py).
     """
+    from labbank_common import run_store
+    _run = run_store.current_run()
     with engine.begin() as conn:
         conn.execute(text("""
             IF OBJECT_ID('irrbb.curves', 'U') IS NULL
             CREATE TABLE irrbb.curves (
                 report_date  DATE           NOT NULL,
+                run_id       VARCHAR(20)    NOT NULL,
                 scenario_id  VARCHAR(10)    NOT NULL,
                 curve_name   VARCHAR(20)    NOT NULL,
                 n_days       INT            NOT NULL,
                 d_f          DECIMAL(18, 8) NOT NULL,
                 zero_rt      DECIMAL(18, 8) NULL,
                 CONSTRAINT pk_irrbb_curves
-                    PRIMARY KEY (report_date, scenario_id, curve_name, n_days)
+                    PRIMARY KEY (report_date, run_id, scenario_id, curve_name, n_days)
             );
         """))
-        # Add zero_rt to pre-existing tables that were created without it
-        conn.execute(text("""
-            IF NOT EXISTS (
-                SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
-                WHERE TABLE_SCHEMA = 'irrbb' AND TABLE_NAME = 'curves'
-                  AND COLUMN_NAME = 'zero_rt'
-            )
-                ALTER TABLE irrbb.curves ADD zero_rt DECIMAL(18, 8) NULL;
-        """))
+        # history per (report_date, run_id) (docs/04): a table created before run_id gets it, in the
+        # key; its rows belong to the run that wrote them, i.e. this database's run
+        has_run = conn.execute(text("""SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = 'irrbb'
+                                       AND TABLE_NAME = 'curves' AND COLUMN_NAME = 'run_id'""")).first()
+        if has_run is None:
+            conn.execute(text("ALTER TABLE irrbb.curves ADD run_id VARCHAR(20) NULL"))
+            conn.execute(text("UPDATE irrbb.curves SET run_id = :run"), {"run": _run.run_id})
+            conn.execute(text("ALTER TABLE irrbb.curves ALTER COLUMN run_id VARCHAR(20) NOT NULL"))
+            conn.execute(text("IF EXISTS (SELECT 1 FROM sys.key_constraints WHERE name = 'pk_irrbb_curves') "
+                              "ALTER TABLE irrbb.curves DROP CONSTRAINT pk_irrbb_curves"))
+            conn.execute(text("ALTER TABLE irrbb.curves ADD CONSTRAINT pk_irrbb_curves "
+                              "PRIMARY KEY (report_date, run_id, scenario_id, curve_name, n_days)"))
         if replace:
             conn.execute(
-                text("DELETE FROM irrbb.curves WHERE report_date = :rd"),
-                {"rd": report_date},
+                text("DELETE FROM irrbb.curves WHERE report_date = :rd AND run_id = :run"),
+                {"rd": report_date, "run": _run.run_id},
             )
+    shocked_df = shocked_df.assign(run_id=_run.run_id)
     shocked_df.to_sql(
         "curves", engine, schema="irrbb",
         if_exists="append", index=False, chunksize=10_000,
@@ -466,7 +508,7 @@ def generate_shock_excel(
     currency: str,
     output_path: str,
     own_shock_bps: float = -100.0,
-    nii_floor_rate: float = 0.0,
+    nii_floor_rate: float | None = None,   # None = EBA lower bound
     horizon_days: int = 365,
 ) -> None:
     """Write the shocked curves to Excel for review and audit.
@@ -498,7 +540,8 @@ def generate_shock_excel(
         {"Parameter": "Short-rate shock (bps)",  "Value": params["short"]},
         {"Parameter": "Long-rate shock (bps)",   "Value": params["long"]},
         {"Parameter": "Own scenario shock (bps)","Value": own_shock_bps},
-        {"Parameter": "NII rate floor",           "Value": f"{nii_floor_rate*100:.1f}%"},
+        {"Parameter": "Post-shock floor",         "Value": ("EBA lower bound (-150bp + 3bp/yr)"
+                                                    if nii_floor_rate is None else f"{nii_floor_rate*100:.1f}%")},
         {"Parameter": "Source",
          "Value": "EBA/RTS/2022/10 Annex I (Commission Delegated Reg. (EU) 2024/857)"},
         {"Parameter": "Recalibration", "Value": "At least every 5 years (Article 2)"},
@@ -538,7 +581,7 @@ def generate_shock_excel(
                 delta_bps = float(shock_bps_at_tenors(
                     np.array([t]), sid, params, own_shock_bps
                 )[0])
-                r_shocked = max(nii_floor_rate, r_b + delta_bps / 10_000)
+                r_shocked = float(floor_shocked(r_b, r_b + delta_bps / 10_000, t, nii_floor_rate))
                 row[f"{sid}_shock_bps"]   = round(delta_bps, 2)
                 row[f"{sid}_shocked_r_%"] = round(r_shocked * 100, 4)
                 row[f"{sid}_d_f"]         = round(float(np.exp(-r_shocked * t)) if t > 0 else 1.0, 8)
@@ -581,7 +624,7 @@ def generate_shock_excel(
                     delta_bps = float(shock_bps_at_tenors(
                         np.array([t]), sid, params, own_shock_bps
                     )[0])
-                    r_sh = max(nii_floor_rate, r_b + delta_bps / 10_000)
+                    r_sh = float(floor_shocked(r_b, r_b + delta_bps / 10_000, t, nii_floor_rate))
                     daily_rows[sid].append(round(r_sh * 100, 4))
                     daily_rows[f"{sid}_df"].append(round(float(np.exp(-r_sh * t)), 8))
 

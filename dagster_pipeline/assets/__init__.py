@@ -1,8 +1,8 @@
 from dagster_pipeline.assets.balance_sheet import balance_transactions, balance_add_data
 from dagster_pipeline.assets.cash_flows import cash_flows
 from dagster_pipeline.assets.ir_derivatives import ir_swaps
-from dagster_pipeline.assets.irrbb import nii_results, eve_results, eba_sot_results
-from dagster_pipeline.assets.liquidity import lcr_nsfr_results
+from dagster_pipeline.assets.irrbb import nii_results, eve_results, eba_sot_results, csrbb_results
+from dagster_pipeline.assets.liquidity import lcr_nsfr_results, off_balance_results
 from dagster_pipeline.assets.optimize_prep import optimize_prep_tensors, hyp_scenario_curves
 
 all_assets = [
@@ -13,7 +13,9 @@ all_assets = [
     nii_results,
     eve_results,
     eba_sot_results,
+    csrbb_results,
     lcr_nsfr_results,
+    off_balance_results,
     optimize_prep_tensors,
     hyp_scenario_curves,
 ]

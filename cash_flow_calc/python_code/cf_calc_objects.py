@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import datetime
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 
 import numpy as np
 import pandas as pd
@@ -15,6 +15,7 @@ import sql_setup
 
 sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')))
 from labbank_common import rate_models  # noqa: E402
+from labbank_common.curves import fixing_asof  # noqa: E402
 
 dict_cols_loan_fin_inst = {
     # balance_amt / init_balance_amt / amort_type pulled for vectorized payment computation
@@ -23,7 +24,8 @@ dict_cols_loan_fin_inst = {
     # with a product-level margin_pct in bs.models_rate use that instead (see rate_models)
     'loans': ['schedule_id', 'currency', 'start_date', 'maturity_date', 'payment_freq',
               'fixing_freq', 'dc_conv', 'b_day_conv', "rate_index", 'disc_curve', 'fwd_curve',
-              'balance_amt', 'init_balance_amt', 'amort_type', 'product_code', 'bs_side', 'margin'],
+              'balance_amt', 'init_balance_amt', 'amort_type', 'product_code', 'bs_side', 'margin',
+              'rate_type', 'card_monthly_principal_rate'],
     'fin_inst': ['schedule_id', 'currency', 'start_date', 'maturity_date', 'payment_freq',
                  'fixing_freq', 'dc_conv', 'b_day_conv', "rate_index", 'disc_curve', 'fwd_curve',
                  'balance_amt', 'amort_type', 'bs_side', 'product_code'],
@@ -126,13 +128,15 @@ def get_calendar_from_currency(curr: str) -> ql.Calendar:
     currency_to_calendar = {
         'PLN': ql.Poland(),
         'EUR': ql.TARGET(),
-        'USD': ql.UnitedStates(ql.UnitedStates.NYSE)
+        'USD': ql.UnitedStates(ql.UnitedStates.NYSE),
+        'GBP': ql.UnitedKingdom(),
     }
     return currency_to_calendar.get(curr, ql.TARGET())
 
 def get_dc_conv_from_str(b: str) -> ql.DayCounter:
     dc_conv_from_str = {
         'ACT/365': ql.Actual365Fixed(),
+        'ACT/360': ql.Actual360(),          # EURIBOR money-market convention
         'ACT/ACT': ql.ActualActual(ql.ActualActual.ISDA),
         '30/360': ql.Thirty360(ql.Thirty360.ISDA)
     }
@@ -141,8 +145,9 @@ def get_dc_conv_from_str(b: str) -> ql.DayCounter:
 def get_dc_from_currency(curr: str) -> ql.DayCounter:
     currency_to_dc_conv = {
         'PLN': ql.Actual365Fixed(),
-        'USD': ql.ActualActual(ql.ActualActual.ISDA),
-        'EUR': ql.Thirty360(ql.Thirty360.ISDA),
+        'USD': ql.Actual365Fixed(),   # curve zero-rate quoting: ACT/365 for every currency, as the curves are
+        'EUR': ql.Actual365Fixed(),   # built (b_s_add_data_objects.get_dc_from_currency; code converts days/365)
+        'GBP': ql.Actual365Fixed(),
     }
     return currency_to_dc_conv.get(curr, ql.Actual365Fixed())
 
@@ -328,16 +333,24 @@ def gen_orgin_sched_loan_fin_inst(
     bdc = getattr(ql, row.b_day_conv)
     dc_conv = get_dc_conv_from_str(row.dc_conv)
 
-    start_dt_ql = ql.Date.from_date(row.start_date)
+    # Existing card drawings run off from valuation; origination dates describe
+    # account vintage, not a term-loan amortisation schedule.
+    is_card = pd.notna(row.amort_type) and int(row.amort_type) == 3
+    start_dt_ql = ql.Date.from_date(report_date if is_card else row.start_date)
     end_dt_ql = ql.Date.from_date(row.maturity_date)
 
     # --- payment schedule ---
     p_freq = ql.Period(row.payment_freq)
     pay_dates = payment_dates_advance_n(start_dt_ql, end_dt_ql, p_freq, cal, bdc)
 
-    # znajdź pierwszy okres po report_date
-    k = bisect_left(pay_dates, r_dt_ql)
-    start_idx = max(k - 1, 0)
+    # Future payments only: the first payment date AFTER the report date (one due on the
+    # report date is already paid -- balance_amt is the balance after it). The previous
+    # payment date is kept only as the START of the current accrual period. Keeping it as
+    # a payment row (old start_idx = k-1) amortised today's balance over one PAST
+    # instalment that downstream filters then dropped: the first future balance was short
+    # by one instalment (EUR fixed mortgages -0.4%, cash loans -1.3%/-2.1%).
+    k = bisect_right(pay_dates, r_dt_ql)
+    start_idx = k                    # global period index of the first future payment
     pay_dates_filt = pay_dates[start_idx:]
 
     if not pay_dates_filt:
@@ -415,14 +428,9 @@ def gen_orgin_sched_loan_fin_inst(
     # --- overwrite z fixing_history dla join_dt <= report_date
     mask = result_df["fixing_dt"] <= report_date  # albo config.report_date
     if mask.any():
-        fix_idx = pd.MultiIndex.from_arrays(
-            [
-                result_df.loc[mask, "fixing_dt"].to_numpy(),  # <-- tu zmiana
-                result_df.loc[mask, "rate_index"].to_numpy(),
-            ],
-            names=["fixing_date", "rate_index"],
-        )
-        result_df.loc[mask, "fwd_rt"] = fix_df.reindex(fix_idx).to_numpy() / 100.0
+        # last quote on or before the fixing date (a TARGET day can have no quote)
+        result_df.loc[mask, "fwd_rt"] = fixing_asof(
+            fix_df, result_df.loc[mask, "fixing_dt"], result_df.loc[mask, "rate_index"]) / 100.0
 
     result_df = result_df.drop(columns=["join_dt"])
     return result_df
@@ -490,6 +498,84 @@ def gen_deposit_sched(
         "int_pmt":        [bal * client_rt * cf_yf if not np.isnan(client_rt) else np.nan],
         "capital_pmt":    [bal],
     })
+
+
+def gen_term_deposit_redemption_sched(
+    row,
+    report_date: pd.Timestamp,
+    disc_df: pd.Series,
+    tdrr: float,
+) -> Optional[tuple[pd.DataFrame, pd.DataFrame]]:
+    """Behavioural schedule of a fixed-rate term deposit with early redemption.
+
+    EBA RTS 2024/857 Art. 10(6)-(7): the redeemed share `tdrr` of the deposit goes
+    to the overnight bucket, the rest runs to contractual maturity.  Same two-period
+    layout as the NMD schedules (compute_deposit_beh_schedule):
+
+        period 1 [report_date, +1 business day]: outstanding = bal,
+                 capital = tdrr*bal, interest = bal * client_rt * yf1
+        period 2 [+1 business day, maturity]:    outstanding = (1-tdrr)*bal,
+                 capital = (1-tdrr)*bal, interest = (1-tdrr)*bal * client_rt * yf2
+
+    The redeemed share forfeits interest after day 1.
+
+    Returns (orig_df, beh_df) ready for merge_cf_orig_beh(how='outer'), or None when
+    there is nothing to redeem (tdrr <= 0, already matured, or matures by the next
+    business day).  orig_df is the contractual bullet keyed on the period-2 start so
+    it lines up with the remaining tranche; its con_* payments are unchanged.
+    """
+    if tdrr <= 0:
+        return None
+    orig = gen_deposit_sched(row, report_date, disc_df)
+    if orig is None or orig.empty:
+        return None
+
+    r_dt_ql = ql.Date.from_date(report_date)
+    cal     = get_calendar_from_currency(row.currency)
+    bdc     = getattr(ql, row.b_day_conv)
+    dc_conv = get_dc_conv_from_str(row.dc_conv)
+    on_ql   = cal.advance(r_dt_ql, ql.Period(1, ql.Days), bdc)
+    mat_ql  = ql.Date.from_date(row.maturity_date)
+    if mat_ql <= on_ql:
+        return None
+
+    tau  = min(1.0, float(tdrr))
+    bal  = float(row.balance_amt)
+    rt   = float(orig['client_rt'].iloc[0])
+    yf1  = dc_conv.yearFraction(r_dt_ql, on_ql)
+    yf2  = dc_conv.yearFraction(on_ql, mat_ql)
+    on_dt  = pd.Timestamp(datetime.date(on_ql.year(), on_ql.month(), on_ql.dayOfMonth()))
+    mat_dt = orig['cf_end_dt'].iloc[0]
+    fix_on_ql = cal.advance(on_ql, ql.Period(-2, ql.Days), bdc)
+    fix_on = pd.Timestamp(datetime.date(fix_on_ql.year(), fix_on_ql.month(), fix_on_ql.dayOfMonth()))
+
+    df_on  = disc_df.get((row.disc_curve, on_dt), np.nan)
+    df_mat = orig['d_f'].iloc[0]
+    fwd_on = (1.0 / df_on - 1.0) / yf1 if yf1 > 0 and df_on > 0 else np.nan
+    fwd_2  = (df_on / df_mat - 1.0) / yf2 if yf2 > 0 and df_mat > 0 else np.nan
+
+    beh = pd.DataFrame({
+        "schedule_id":     [row.schedule_id, row.schedule_id],
+        "bs_side":         [row.bs_side, row.bs_side],
+        "fixing_dt":       [orig['fixing_dt'].iloc[0], fix_on],
+        "cf_start_dt":     [orig['cf_start_dt'].iloc[0], on_dt],
+        "cf_end_dt":       [on_dt, mat_dt],
+        "cf_yf":           [yf1, yf2],
+        "d_f":             [df_on, df_mat],
+        "fwd_rt":          [fwd_on, fwd_2],
+        "client_rt":       [rt, rt],
+        "outstanding_bal": [bal, (1.0 - tau) * bal],
+        "capital_pmt":     [tau * bal, (1.0 - tau) * bal],
+        "int_pmt":         [bal * rt * yf1, (1.0 - tau) * bal * rt * yf2],
+    })
+
+    # contractual bullet re-keyed onto the period-2 row (dates/rates of that row)
+    orig = orig.copy()
+    orig['cf_start_dt'] = on_dt
+    orig['fixing_dt']   = fix_on
+    orig['cf_yf']       = yf2
+    orig['fwd_rt']      = fwd_2
+    return orig, beh
 
 
 def tenor_str_to_ql_period(tenor: str) -> ql.Period:
@@ -621,6 +707,15 @@ def payment_dates_advance_n(
             break
         dates.append(d)
         i += 1
+    # The contractual maturity is always the final payment date. When it falls between
+    # regular dates, a final stub period pays out at maturity (it used to be dropped and
+    # the bullet came early); a regular date a few days off maturity (business-day
+    # adjustment) is moved onto maturity instead of creating a tiny stub.
+    if not dates or dates[-1] < end_date:
+        if dates and (end_date - dates[-1]) <= 4:          # weekend + holiday shift
+            dates[-1] = end_date
+        else:
+            dates.append(end_date)
     return dates
 
 def ql_column_to_datetime(series: pd.Series) -> pd.Series:
@@ -648,7 +743,14 @@ def get_interpolated_curves(row: pd.Series) -> pd.DataFrame:
     return curve_df
 
 def get_daily_intrpl_curve(curve_name: str, fixing_freq: Optional[str] = None) -> pd.DataFrame:
-    df_sql = sql_setup.sql_select_specific_curve(curve_name)
+    # Forwards of an IBOR tenor come from that tenor's projection curve when the bank has one
+    # (multi-curve, labbank_common/curves.py); the result keeps the product's fwd_curve name
+    # as its key, so every lookup downstream is unchanged.
+    source = curve_name
+    if fixing_freq:
+        from labbank_common.curves import projection_curve
+        source = projection_curve(curve_name, fixing_freq, sql_setup.sql_curve_names())
+    df_sql = sql_setup.sql_select_specific_curve(source)
     x_s = df_sql['n_days']
     y_s = df_sql['d_f']
     x = x_s.to_numpy(dtype=float)
@@ -661,7 +763,10 @@ def get_daily_intrpl_curve(curve_name: str, fixing_freq: Optional[str] = None) -
         df_intpl["fixing_freq"] =  [fixing_freq] * len(df_intpl)
         ccy = curve_name[:3]
         cal = get_calendar_from_currency(ccy)
-        dc_conv = get_dc_from_currency(ccy)
+        # the INDEX's day count (EURIBOR ACT/360), not the curve quoting basis (ACT/365):
+        # EUR forwards were ~1.4% of the rate (~4bp) too high against ACT/360 accrual
+        from labbank_common.curves import index_day_basis
+        dc_conv = ql.Actual360() if index_day_basis(ccy) == 360 else ql.Actual365Fixed()
         df_intpl['end_dt'] = [cal.advance(ql.Date.from_date(dt), ql.Period(fixing_freq), ql.ModifiedFollowing)
                   for dt in df_intpl['node_date'].dt.to_pydatetime()]
         df_intpl['year_frac'] = [dc_conv.yearFraction(ql.Date.from_date(s_dt), e_dt) for s_dt, e_dt
@@ -670,7 +775,9 @@ def get_daily_intrpl_curve(curve_name: str, fixing_freq: Optional[str] = None) -
         df_intpl["end_dt"] = pd.to_datetime([d.to_date() for d in df_intpl["end_dt"]])
         df_intpl = df_intpl.merge(df_helper, how= 'left',
                                           left_on= 'end_dt', right_on= 'date')
-        df_intpl['fwd_rt'] = (df_intpl['d_f']/df_intpl['d_f_2'] - 1)/df_intpl['year_frac']
+        # simple up to 1Y, annually compounded for longer fixing blocks (labbank_common.curves)
+        from labbank_common.curves import forward_rate
+        df_intpl['fwd_rt'] = forward_rate(df_intpl['d_f'], df_intpl['d_f_2'], df_intpl['year_frac'])
         df_intpl = df_intpl.drop(columns= ['date', 'end_dt', 'year_frac', 'd_f', 'd_f_2'])
         df_intpl = df_intpl.dropna(subset=['fwd_rt'])
     return df_intpl
@@ -732,7 +839,7 @@ def compute_amort_schedule_vectorized(
     """
     PARAM_COLS = ['schedule_id', 'balance_amt', 'amort_type', 'bs_side']
     # margin only present for loans; product_code for both loans and fin_inst
-    avail_params = PARAM_COLS + [c for c in ['margin', 'product_code']
+    avail_params = PARAM_COLS + [c for c in ['margin', 'product_code', 'card_monthly_principal_rate']
                                   if c in sched_params_df.columns]
     df = sched_df.merge(sched_params_df[avail_params], on='schedule_id', how='left')
     if 'margin' not in df.columns:
@@ -880,6 +987,17 @@ def compute_amort_schedule_vectorized(
 
     df['client_rt'] = df['_client_rt']
 
+    # Cards: principal payment fraction is separate from interest. No new
+    # spending in run-off; constant-BS NII renewals are handled downstream.
+    m3 = df['amort_type'] == 3
+    if m3.any():
+        from labbank_common.credit_cards import runoff
+        for _, group in df.loc[m3].groupby('schedule_id', sort=False):
+            opening, principal = runoff(float(group['balance_amt'].iloc[0]), len(group),
+                                        float(group['card_monthly_principal_rate'].iloc[0]))
+            df.loc[group.index, 'outstanding_bal'] = opening
+            df.loc[group.index, 'capital_pmt'] = principal
+
     # ── Interest for all amort types ──────────────────────────────────────────
     df['int_pmt'] = df['outstanding_bal'] * df['client_rt'] * df['cf_yf']
 
@@ -936,6 +1054,11 @@ def compute_adjusted_schedule(
 
     m1 = df['_is_annuity']
     if not m1.any():
+        # Cards/bullet/linear schedules still have a behavioural stream.
+        df['outstanding_adj'] = df['outstanding_bal']
+        df['capital_adj'] = df['capital_pmt']
+        df['prepayment_pmt'] = 0.0
+        df['int_adj'] = df['int_pmt']
         return df
 
     if exact:
@@ -959,8 +1082,9 @@ def compute_adjusted_schedule(
 
             O  = np.maximum(H[:n] * (B - A * cum_Q), 0.0)
             I  = O * client_rt * yf
-            C  = np.where(O > 0, np.maximum(A - I, 0.0), 0.0)
             PP = cpr * O
+            # the last instalment repays what is left, not a full annuity (overpaid ~0.3% per loan)
+            C  = np.where(O > 0, np.minimum(np.maximum(A - I, 0.0), np.maximum(O - PP, 0.0)), 0.0)
 
             out = group.copy()
             out['outstanding_adj'] = O
@@ -1010,7 +1134,7 @@ def compute_adjusted_schedule(
         O  = np.where(near_zero,
                       np.maximum(B - A * rank, 0.0),
                       np.maximum(B * factor - A * (factor - 1.0) / safe_r, 0.0))
-        C  = np.where(O > 0, np.maximum(A - O * r_adj, 0.0), 0.0)
+        C  = np.where(O > 0, np.minimum(np.maximum(A - O * r_adj, 0.0), O), 0.0)   # last instalment <= what is left
         PP = cpr_const * O
         I  = O * client_rt * yf
 

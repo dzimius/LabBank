@@ -19,18 +19,23 @@ EVE sign convention:
 from __future__ import annotations
 
 import os
+import sys
 import numpy as np
 import pandas as pd
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.abspath(os.path.join(_HERE, ".."))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+from labbank_common.bank_config import get_bank  # noqa: E402
+
+_CCY = get_bank().market.ccy
 NMD_PRODUCTS = {
-    "6000": "Current Account (PLN)",
-    "8000": "Saving Account (PLN)",
+    "6000": f"Current Account ({_CCY})",
+    "8000": f"Saving Account ({_CCY})",
 }
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-NMD_BEH_PATH = os.path.abspath(
-    os.path.join(_HERE, "..", "balance_gen_add_data", "input", "dep_beh_models_ir.xlsx")
-)
+NMD_BEH_PATH = str(get_bank().models_dir() / "dep_beh_models_ir.xlsx")
 
 
 def _tenor_to_yf(label: str) -> float:

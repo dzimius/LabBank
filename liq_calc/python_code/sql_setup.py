@@ -4,17 +4,17 @@
 """
 from __future__ import annotations
 
+import os
+import sys
 import pandas as pd
-from sqlalchemy import create_engine, text, Table, Column, String, Date, MetaData
+from sqlalchemy import text, Table, Column, String, Date, MetaData
 from sqlalchemy.dialects.mssql import DECIMAL
 
-engine = create_engine(
-    "mssql+pyodbc://maciek_d/bank_gen"
-    "?driver=ODBC+Driver+17+for+SQL+Server"
-    "&Trusted_Connection=yes",
-    fast_executemany=True,
-    future=True,
-)
+sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')))
+from labbank_common.bank_config import get_engine
+from labbank_common import run_store  # noqa: E402  history per (report_date, run_id), docs/04
+
+engine = get_engine()   # active bank's database (LABBANK_BANK, default eur)
 
 metadata = MetaData(schema=None)
 
@@ -62,18 +62,12 @@ def _ensure_results_schema() -> None:
 
 def reset_lcr_nsfr() -> None:
     _ensure_results_schema()
-    with engine.begin() as conn:
-        conn.execute(text("DROP TABLE IF EXISTS results.lcr_nsfr"))
-    with engine.begin() as conn:
-        metadata.create_all(bind=conn, tables=[LcrNsfr], checkfirst=False)
+    run_store.reset_table(engine, "lcr_nsfr", "results", run_store.sa_create(metadata, LcrNsfr))
 
 
 def reset_irrbb_report() -> None:
     _ensure_results_schema()
-    with engine.begin() as conn:
-        conn.execute(text("DROP TABLE IF EXISTS results.irrbb_report"))
-    with engine.begin() as conn:
-        metadata.create_all(bind=conn, tables=[IrrbbReport], checkfirst=False)
+    run_store.reset_table(engine, "irrbb_report", "results", run_store.sa_create(metadata, IrrbbReport))
 
 
 def _write(df: pd.DataFrame, table: Table, table_name: str, schema: str) -> None:
@@ -85,6 +79,7 @@ def _write(df: pd.DataFrame, table: Table, table_name: str, schema: str) -> None
         if c not in out.columns:
             out[c] = None
     out = out[cols].where(pd.notnull(out[cols]), None)
+    out = run_store.stamp(out, run_store.current_run())
     out.to_sql(table_name, engine, schema=schema,
                if_exists="append", index=False, chunksize=10_000)
 
@@ -127,35 +122,106 @@ def load_eve_by_scenario(report_date: pd.Timestamp) -> pd.DataFrame:
 
 
 def load_td_maturity_split(report_date: pd.Timestamp) -> pd.DataFrame:
-    """Load L-side deposit balances split by whether they mature within 30 days.
+    """L-side term-deposit balances per (currency, product_code) split by contractual
+    maturity within / after 30 days (non-maturity deposits have no maturity_date and fall
+    in neither). Per product so counterparties are not pooled (labbank_common.lcr_rules).
 
-    Returns DataFrame: currency, within_30d_amt, after_30d_amt
-    Used to apply 100% LCR run-off to deposits maturing within the stress window.
+    Returns DataFrame: currency, product_code, within_30d_amt, after_30d_amt
     """
     horizon_30d = report_date + pd.Timedelta(days=30)
     query = text("""
-        SELECT currency,
+        SELECT currency, CAST(product_code AS VARCHAR(4)) AS product_code,
                SUM(CASE WHEN maturity_date <= :h30 THEN balance_amt ELSE 0 END) AS within_30d_amt,
                SUM(CASE WHEN maturity_date >  :h30 THEN balance_amt ELSE 0 END) AS after_30d_amt
         FROM schemat.deposits
         WHERE bs_side = 'L'
           AND report_date = :rd
-        GROUP BY currency
+        GROUP BY currency, product_code
     """)
     return pd.read_sql_query(query, engine, params={"rd": report_date, "h30": horizon_30d})
 
 
-def load_30d_asset_inflows(report_date: pd.Timestamp) -> dict[str, float]:
+def load_30d_asset_inflows(report_date: pd.Timestamp, exclude_codes) -> pd.DataFrame:
+    """CONTRACTUAL 30-day asset inflows per (currency, product_code), without the products
+    in exclude_codes (labbank_common.lcr_rules.non_inflow_codes: HQLA + cards). Regulatory
+    inflows are contractual receipts -- the behavioural (prepayment-adjusted) schedule is a
+    liquidity forecast, not an eligible LCR inflow (it used beh_* before)."""
     import pandas as _pd
     horizon_30d = report_date + _pd.Timedelta(days=30)
-    query = text("""
-        SELECT currency,
-               SUM(COALESCE(beh_capital_pmt,0) + COALESCE(beh_interest_pmt,0)) AS inflow_amt
+    excl = ", ".join(f"'{str(c)}'" for c in exclude_codes) or "''"
+    query = text(f"""
+        SELECT currency, CAST(product_code AS VARCHAR(4)) AS product_code,
+               SUM(COALESCE(con_capital_pmt,0) + COALESCE(con_interest_pmt,0)) AS inflow_amt
         FROM cf.products
         WHERE bs_side = 'A'
+          AND CAST(product_code AS VARCHAR(4)) NOT IN ({excl})
           AND cf_end_dt > :rd AND cf_end_dt <= :h30
-          AND COALESCE(beh_total_pmt, 0) <> 0
-        GROUP BY currency
+          AND COALESCE(con_total_pmt, 0) <> 0
+        GROUP BY currency, product_code
     """)
-    df = pd.read_sql_query(query, engine, params={"rd": report_date, "h30": horizon_30d})
-    return dict(zip(df["currency"], df["inflow_amt"]))
+    return pd.read_sql_query(query, engine, params={"rd": report_date, "h30": horizon_30d})
+
+
+def load_hqla_market_value_ratio(report_date: pd.Timestamp, hqla_codes, spreads_bp=None) -> dict[str, float]:
+    """labbank_common.lcr_rules.hqla_market_value_ratio on this bank's database."""
+    from labbank_common.lcr_rules import hqla_market_value_ratio
+    return hqla_market_value_ratio(engine, report_date, hqla_codes, spreads_bp)
+
+
+# ── Pillar 2 liquidity (liquidity_p2.py) ─────────────────────────────────────────
+
+def load_deposits_by_client(report_date: pd.Timestamp) -> pd.DataFrame:
+    """L-side deposits with their client_id (dbo.transactions), own currency units.
+    Columns: client_id, client_type_id, product_code, product_name, currency, balance_amt."""
+    query = text("""
+        SELECT t.client_id, d.client_type_id, CAST(d.product_code AS VARCHAR(4)) AS product_code,
+               d.product_name, d.currency, d.balance_amt
+        FROM schemat.deposits d
+        JOIN dbo.transactions t ON t.transaction_id = d.transaction_id
+        WHERE d.bs_side = 'L' AND d.report_date = :rd
+        OPTION (MAXDOP 1)
+    """)
+    return pd.read_sql_query(query, engine, params={"rd": report_date})
+
+
+def load_issued_debt(report_date: pd.Timestamp) -> pd.DataFrame:
+    """L-side financial instruments (issued bonds) per product, own currency units.
+    Columns: product_code, product_name, currency, balance_amt."""
+    query = text("""
+        SELECT CAST(product_code AS VARCHAR(4)) AS product_code, product_name, currency,
+               SUM(balance_amt) AS balance_amt
+        FROM schemat.financial_instruments
+        WHERE bs_side = 'L' AND report_date = :rd
+        GROUP BY product_code, product_name, currency
+    """)
+    return pd.read_sql_query(query, engine, params={"rd": report_date})
+
+
+def load_behavioural_flows(report_date: pd.Timestamp, exclude_codes) -> pd.DataFrame:
+    """Behavioural cash flows of the whole book after the report date, own currency units.
+
+    Non-maturity deposits that have a liquidity model come from cf.products_liq; every
+    other product (loans with prepayments, securities, term deposits, issued bonds, deposits
+    without a liquidity model) from cf.products. exclude_codes (HQLA) are left out.
+    Columns: product_code, currency, bs_side, cf_end_dt, total_pmt, principal_pmt."""
+    excl = ", ".join(f"'{str(c)}'" for c in exclude_codes) or "''"
+    query = text(f"""
+        SELECT CAST(product_code AS VARCHAR(4)) AS product_code, currency, bs_side, cf_end_dt,
+               COALESCE(beh_capital_pmt, 0) + COALESCE(beh_interest_pmt, 0) AS total_pmt,
+               COALESCE(beh_capital_pmt, 0) AS principal_pmt
+        FROM cf.products_liq
+        WHERE cf_end_dt > :rd
+
+        UNION ALL
+
+        SELECT CAST(product_code AS VARCHAR(4)), currency, bs_side, cf_end_dt,
+               COALESCE(beh_capital_pmt, 0) + COALESCE(prepayment_pmt, 0) + COALESCE(beh_interest_pmt, 0),
+               COALESCE(beh_capital_pmt, 0) + COALESCE(prepayment_pmt, 0)
+        FROM cf.products
+        WHERE cf_end_dt > :rd
+          AND CAST(product_code AS VARCHAR(4)) NOT IN ({excl})
+          AND product_code NOT IN (SELECT DISTINCT product_code FROM cf.products_liq)
+    """)
+    df = pd.read_sql_query(query, engine, params={"rd": report_date})
+    df["cf_end_dt"] = pd.to_datetime(df["cf_end_dt"])
+    return df

@@ -1,21 +1,20 @@
 from __future__ import annotations
 
+import os
+import sys
 import re
 from typing import Optional
 
 import numpy as np
 import pandas as pd
-from sqlalchemy import create_engine, MetaData, Table, Column, text
+from sqlalchemy import MetaData, Table, Column, text
 from sqlalchemy import Integer, String, ForeignKey, Date
 from sqlalchemy.dialects.mssql import DECIMAL
 
-engine = create_engine(
-    "mssql+pyodbc://maciek_d/bank_gen"
-    "?driver=ODBC+Driver+17+for+SQL+Server"
-    "&Trusted_Connection=yes",
-    fast_executemany=True,
-    future=True,
-)
+sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')))
+from labbank_common.bank_config import get_engine
+
+engine = get_engine()   # active bank's database (LABBANK_BANK, default eur)
 
 
 metadata = MetaData(schema=None)
@@ -60,7 +59,7 @@ Loans = Table(
     Column("client_type_id", Integer, nullable=False),
     Column("rate_type", String(1), nullable=True),
     Column("maturity", String(4), nullable=True),
-    Column("rate_index", String(11), nullable=True),
+    Column("rate_index", String(16), nullable=True),
     Column("payment_freq", String(8), nullable=True),
     Column("fixing_freq", String(8), nullable=True),
     Column("dc_conv", String(7), nullable=True),
@@ -76,6 +75,9 @@ Loans = Table(
     Column("hqla_class", String(4),   nullable=True),
     Column("haircut",    DECIMAL(6, 4), nullable=True),
     Column("rsf_weight", DECIMAL(6, 4), nullable=True),
+    Column("credit_limit", DECIMAL(18, 2), nullable=True),
+    Column("undrawn_amt", DECIMAL(18, 2), nullable=True),
+    Column("card_monthly_principal_rate", DECIMAL(18, 6), nullable=True),
     schema="schemat",
 )
 
@@ -115,14 +117,17 @@ FinancialInstruments = Table(
     Column("product_name", String(64), nullable=False),
     Column("own_name", String(64), nullable=True),
     Column("bs_side", String(1), nullable=False),
-    Column("balance_amt", DECIMAL(18, 2), nullable=False),
+    Column("balance_amt", DECIMAL(18, 2), nullable=False),   # book value (cost for a bill)
+    Column("nominal_amt", DECIMAL(18, 2), nullable=True),    # redemption amount
+    Column("acquisition_date", Date, nullable=True),         # trade date of the holding
+    Column("purchase_price", DECIMAL(12, 6), nullable=True), # per 100 of nominal
     Column("start_date", Date, nullable=True),
     Column("maturity_date", Date, nullable=True),
     Column("currency", String(3), nullable=False),
     Column("maturity", String(4), nullable=True),
     Column("amort_type", String(1), nullable=True),
     Column("rate_type", String(1), nullable=True),
-    Column("rate_index", String(11), nullable=True),
+    Column("rate_index", String(16), nullable=True),
     Column("payment_freq", String(8), nullable=True),
     Column("fixing_freq", String(8), nullable=True),
     Column("dc_conv", String(7), nullable=True),
@@ -208,7 +213,7 @@ def add_client_id(transactions_df: pd.DataFrame, seed: Optional[int] = None, pct
     df['client_id'] = np.arange(1, len(df) + 1)
 
     # 1) loans → current_account : ten sam client_id
-    loan_pat = re.compile(r'(?:cash[\s_]*loan|mortgage)', flags=re.IGNORECASE)
+    loan_pat = re.compile(r'(?:cash[\s_]*loan|mortgage|credit_card)', flags=re.IGNORECASE)
     loans_mask = df['product_name'].str.contains(loan_pat, regex=True, na=False)
     loans_ids_unique = df.loc[loans_mask, 'client_id'].drop_duplicates()
 
@@ -275,7 +280,7 @@ def assign_client_ids(transactions_df: pd.DataFrame, seed: Optional[int] = None)
     df['client_id'] = np.arange(1, len(df) + 1)
 
     # 2) loans ↔ current_account
-    loan_pat = re.compile(r'(?:cash[\s_]*loan|mortgage)', flags=re.IGNORECASE)
+    loan_pat = re.compile(r'(?:cash[\s_]*loan|mortgage|credit_card)', flags=re.IGNORECASE)
     loans_mask = df['product_name'].str.contains(loan_pat, regex=True, na=False)
     loans_ids_unique = df.loc[loans_mask, 'client_id'].drop_duplicates()
 

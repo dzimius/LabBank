@@ -34,12 +34,20 @@ Schedules (monthly curve grid, fractional months):
 """
 from __future__ import annotations
 
+import os
+import sys
 from datetime import date
 
 import numpy as np
 import pandas as pd
 
-REPORT_DATE_DEFAULT = date(2026, 6, 30)
+_ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+if _ROOT_DIR not in sys.path:
+    sys.path.insert(0, _ROOT_DIR)
+from labbank_common.bank_config import get_bank  # noqa: E402
+
+
+REPORT_DATE_DEFAULT = date.fromisoformat(get_bank().report_date)   # fallback when curves carry no date
 EBA_SCENARIOS       = ["par_up", "par_dn", "steep", "flat", "sr_up", "sr_dn", "own"]
 _DAY_FRAC           = 30.4375          # average days per month
 
@@ -185,7 +193,7 @@ def compute_irs_metrics(
     curves,                         # CurveTensors from optimize_prep
     report_date: date | None = None,
     scenarios: list[str] | None = None,
-    currency: str = "PLN",
+    currency: str | None = None,
 ) -> dict:
     """Aggregate NII / EVE metrics for every row in `irs_df`.
 
@@ -197,7 +205,7 @@ def compute_irs_metrics(
     curves      : CurveTensors loaded from curve_tensors.npz
     report_date : valuation date (default: curves.report_date)
     scenarios   : EBA scenario IDs to compute; default = all 7
-    currency    : used for disc/fwd curve lookup
+    currency    : used for disc/fwd curve lookup (default: the bank's home currency)
 
     Returns
     -------
@@ -212,6 +220,7 @@ def compute_irs_metrics(
         report_date = pd.Timestamp(_rd).date() if _rd else REPORT_DATE_DEFAULT
     if scenarios is None:
         scenarios = EBA_SCENARIOS
+    currency = currency or get_bank().market.ccy
 
     base_disc = curves.get_disc_curve("base", currency)
     base_fwd  = curves.get_fwd_curve("base",  currency)

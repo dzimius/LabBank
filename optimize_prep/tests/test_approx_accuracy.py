@@ -288,7 +288,7 @@ class TestLCRFast:
         hqla      = amts[1] * 0.98           # only gov_bond is HQLA
         outflows  = amts[2] * 0.1 + amts[3] * 0.15
         raw_inflows = amts[0] * 0.05 + amts[1] * 0.02
-        inflows   = min(0.75 * raw_inflows, 0.75 * outflows)
+        inflows   = min(raw_inflows, 0.75 * outflows)   # raw already counterparty-weighted
         net_out   = outflows - inflows
         expected_lcr = hqla / net_out
 

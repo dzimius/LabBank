@@ -19,12 +19,12 @@ Prerequisites (must have been run first)
 
 Outputs
 -------
-  optimize_prep/output/product_params.npz
-  optimize_prep/output/params_inspection.xlsx
-  optimize_prep/output/curve_tensors.npz
-  optimize_prep/output/curves_inspection.xlsx
-  optimize_prep/output/ftp_rates.npz
-  optimize_prep/output/approx_accuracy_report.xlsx   ← main visible result
+  runs/<bank>/optimize_prep/product_params.npz
+  runs/<bank>/optimize_prep/params_inspection.xlsx
+  runs/<bank>/optimize_prep/curve_tensors.npz
+  runs/<bank>/optimize_prep/curves_inspection.xlsx
+  runs/<bank>/optimize_prep/ftp_rates.npz
+  runs/<bank>/optimize_prep/approx_accuracy_report.xlsx   ← main visible result
 """
 from __future__ import annotations
 
@@ -72,7 +72,7 @@ def run_opt_prep() -> None:
 
     elapsed = time.time() - t0
     print(f"\nopt_prep pipeline complete in {elapsed:.1f}s")
-    print("Main output: optimize_prep/output/approx_accuracy_report.xlsx")
+    print("Main output: runs/<bank>/optimize_prep/approx_accuracy_report.xlsx")
 
 
 if __name__ == "__main__":

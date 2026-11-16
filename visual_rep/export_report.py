@@ -10,8 +10,8 @@ The script:
      (uses a headless Chromium; no LaTeX required).
   3. If webpdf fails (e.g. Playwright not installed), falls back to HTML.
 
-Output is written next to the notebook:
-  - ALM_report.pdf   (or ALM_report.html on fallback)
+Output goes to runs/<bank_id>/visual_rep/ (LABBANK_BANK, default eur):
+  - ALM_report.ipynb (executed copy of the template) and ALM_report.pdf (or .html)
 
 Requirements
 ------------
@@ -24,7 +24,16 @@ import subprocess
 import sys
 from pathlib import Path
 
-NOTEBOOK = Path(__file__).with_name("ALM_report.ipynb")
+import shutil
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from labbank_common.bank_config import get_bank
+
+_BANK = get_bank()   # LABBANK_BANK; the executed notebook inherits it
+TEMPLATE = Path(__file__).with_name("ALM_report.ipynb")
+# the template is never executed in place: each bank gets its own copy + exports in
+# runs/<bank_id>/visual_rep/ (both banks' reports stay side by side)
+NOTEBOOK = _BANK.output_dir("visual_rep") / "ALM_report.ipynb"
 PDF_OUT  = NOTEBOOK.with_suffix(".pdf")
 HTML_OUT = NOTEBOOK.with_suffix(".html")
 
@@ -46,6 +55,7 @@ def run(cmd: list[str], *, capture_stderr: bool = False) -> tuple[int, str]:
 
 
 def main() -> None:
+    shutil.copyfile(TEMPLATE, NOTEBOOK)
     nb = str(NOTEBOOK)
 
     # ── 1. Execute the notebook ────────────────────────────────────────────────

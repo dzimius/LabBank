@@ -1,8 +1,10 @@
 from dagster import asset, MaterializeResult, MetadataValue
+from dagster_pipeline.partitions import BANK_PARTITIONS
 from dagster_pipeline.runner import PROJECT_ROOT, run_workflow
 
 
 @asset(
+    partitions_def=BANK_PARTITIONS,
     deps=["eba_sot_results", "lcr_nsfr_results"],
     group_name="optimize",
     compute_kind="python",
@@ -12,7 +14,7 @@ from dagster_pipeline.runner import PROJECT_ROOT, run_workflow
         "Step 2: extract product parameters (product_params.npz). "
         "Step 3: FTP rates per cohort (ftp_rates.npz). "
         "Step 4: accuracy check — fast vs exact NII/EVE/LCR/NSFR. "
-        "Writes optimize_prep/output/*.npz, *.xlsx."
+        "Writes runs/<bank>/optimize_prep/*.npz, *.xlsx."
     ),
 )
 def optimize_prep_tensors(context) -> MaterializeResult:
@@ -24,6 +26,7 @@ def optimize_prep_tensors(context) -> MaterializeResult:
 
 
 @asset(
+    partitions_def=BANK_PARTITIONS,
     deps=["optimize_prep_tensors"],
     group_name="optimize",
     compute_kind="python",

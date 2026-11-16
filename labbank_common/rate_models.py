@@ -18,7 +18,7 @@ their own contract margin, deposits / instruments without one get 0.
 
 Storage
 -------
-Input file : balance_gen_add_data/input/interest_rt.xlsx  (one row per
+Input file : inputs/<bank_id>/models/interest_rt.xlsx  (one row per
              report_date x product_code; bs_side A / L / A/L is descriptive --
              liability rows must set beta, asset rows may leave beta and
              margin_pct blank = beta 1 + contract margin) -- loaded by the add_data stage into
@@ -35,7 +35,13 @@ import numpy as np
 import pandas as pd
 
 PROJECT_ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-EXCEL_PATH = os.path.join(PROJECT_ROOT, "balance_gen_add_data", "input", "interest_rt.xlsx")
+
+
+def excel_path() -> str:
+    """interest_rt.xlsx of the active bank (inputs/<bank_id>/models/)."""
+    from labbank_common.bank_config import get_bank
+    return str(get_bank().models_dir() / "interest_rt.xlsx")
+
 SQL_TABLE = "bs.models_rate"
 
 RATE_COLS = ["beta", "margin_pct", "index_floor", "client_floor", "index_cap", "client_cap"]
@@ -87,9 +93,19 @@ def _select_report_date(df: pd.DataFrame, report_date, source: str) -> pd.DataFr
     return out.set_index("product_code")
 
 
-def read_rate_excel(report_date=None, path: str = EXCEL_PATH) -> pd.DataFrame:
+def read_rate_excel(report_date=None, path: str | None = None) -> pd.DataFrame:
     """Rows of the Excel input. With report_date: that date only, indexed by product_code."""
+    # the active bank's catalogue variants (bank_data sheet catalogue) get their parent's row
+    pmap = {}
+    if path is None:
+        from labbank_common import catalogue
+        if catalogue.bank_data_path().exists():
+            pmap = catalogue.parent_map()
+    path = path or excel_path()
     df = _normalise(pd.read_excel(path))
+    if pmap:
+        from labbank_common import catalogue
+        df = catalogue.expand_rows(df, pmap)
     return df if report_date is None else _select_report_date(df, report_date, path)
 
 
@@ -132,11 +148,28 @@ def product_spread(rm: pd.DataFrame) -> pd.Series:
     return m.where(m.notna() & (m != 0.0))
 
 
+class LimitMap(dict):
+    """{product_code: client floor (or cap)} that also carries the product's INDEX
+    floor (or cap) in ``.index`` -- so every NII / EVE call site that already passes
+    the floors / caps maps gets the index limits too (they used to be dropped here,
+    so shocked rates ignored contractual index floors). A plain dict = no index limits."""
+
+    def __init__(self, client: dict, index: dict | None = None):
+        super().__init__(client)
+        self.index = dict(index or {})
+
+    def __reduce__(self):                    # picklable for the Dask backend
+        return (LimitMap, (dict(self), self.index))
+
+
 def rate_maps(rm: pd.DataFrame) -> tuple[dict, dict, dict, dict]:
     """(caps, floors, coeff_a, coeff_b) dicts keyed by product_code str, as used by
-    the NII / EVE / sandbox code. coeff_b only holds product-level spreads."""
-    caps = rm["client_cap"].dropna().astype(float).to_dict()
-    floors = rm["client_floor"].dropna().astype(float).to_dict()
+    the NII / EVE / sandbox code. coeff_b only holds product-level spreads.
+    caps / floors are LimitMap: client limits as the dict, index limits in .index."""
+    caps = LimitMap(rm["client_cap"].dropna().astype(float).to_dict(),
+                    rm["index_cap"].dropna().astype(float).to_dict())
+    floors = LimitMap(rm["client_floor"].dropna().astype(float).to_dict(),
+                      rm["index_floor"].dropna().astype(float).to_dict())
     coeff_a = rm.loc[rm["beta"] != 1.0, "beta"].astype(float).to_dict()
     coeff_b = product_spread(rm).dropna().astype(float).to_dict()
     return caps, floors, coeff_a, coeff_b
@@ -169,3 +202,74 @@ def client_rate(index, spread, beta=1.0, index_floor=np.nan, index_cap=np.nan,
     rt = np.where(np.isnan(client_floor), rt, np.maximum(rt, client_floor))
     rt = np.where(np.isnan(client_cap), rt, np.minimum(rt, client_cap))
     return rt
+
+
+# ── beta-adjusted repricing gap (NII view of the gap) ─────────────────────────
+# The repricing gap counts every unit of balance in its bucket as moving 1:1 with
+# the market. The NII engine instead moves each client rate by the formula above:
+# a current account with beta 0 is in the gap but costs no NII. The beta-adjusted
+# gap rescales the gap by each product's local client-rate sensitivity, so a
+# time-weighted sum of it ~ the engine's parallel-shock dNII. Shared by the ALM
+# report (chapter 3c) and the sandbox Gap Analysis tab.
+
+NMD_NAME_KEYS = ("current_account", "saving_account")
+
+
+def is_nmd(product_name) -> bool:
+    """Non-maturity deposit (current / saving account) by product name."""
+    pn = str(product_name).lower()
+    return any(k in pn for k in NMD_NAME_KEYS)
+
+
+def nmd_product_codes(engine, report_date) -> set[str]:
+    """Product codes of the non-maturity deposits on the book at report_date."""
+    from sqlalchemy import text
+    rows = pd.read_sql_query(
+        text("SELECT DISTINCT CAST(product_code AS VARCHAR(4)) AS product_code, product_name "
+             "FROM schemat.deposits WHERE report_date = :rd"),
+        engine, params={"rd": pd.Timestamp(report_date).date()})
+    return {str(r.product_code) for r in rows.itertuples() if is_nmd(r.product_name)}
+
+
+def effective_beta(index, spread=0.0, beta=1.0, index_floor=np.nan, index_cap=np.nan,
+                   client_floor=np.nan, client_cap=np.nan, h: float = 1e-4) -> float:
+    """Local d(client rate)/d(index) at today's index level (central difference, +-1bp).
+
+    Equals beta unless a floor or cap binds at today's rates (then 0, or ~0.5 right
+    at the edge) -- e.g. a current account capped at 0.1% does not move at all.
+    """
+    spread = 0.0 if spread is None or pd.isna(spread) else float(spread)
+    up = client_rate(index + h, spread, beta, index_floor, index_cap, client_floor, client_cap)
+    dn = client_rate(index - h, spread, beta, index_floor, index_cap, client_floor, client_cap)
+    return float((up - dn) / (2.0 * h))
+
+
+def effective_betas(rm: pd.DataFrame, index_by_code: dict) -> dict:
+    """{product_code str: effective beta} for every rate-model row, each product at
+    its own index level (index_by_code[code], decimal). Products without a row are
+    left out -- callers default them to 1 (they follow the index)."""
+    spread = product_spread(rm)
+    out = {}
+    for pc, r in rm.iterrows():
+        idx = index_by_code.get(str(pc))
+        if idx is None:
+            continue
+        out[str(pc)] = effective_beta(idx, spread.get(pc, np.nan), r["beta"],
+                                      r["index_floor"], r["index_cap"],
+                                      r["client_floor"], r["client_cap"])
+    return out
+
+
+def beta_adjusted_gap(gap, beta_eff: float) -> np.ndarray:
+    """Beta-adjusted repricing amounts of one product over the gap buckets: beta x gap,
+    bucket by bucket.
+
+    gap      : (n_buckets,) signed repricing amounts of the product (earliest bucket first)
+    beta_eff : effective client-rate beta (see effective_beta)
+
+    Non-maturity deposits too: their behavioural IR profile IS their repricing ladder -- the
+    balance not yet repriced keeps today's rate, only the part the profile reprices takes
+    beta x market + margin (fixing_engine.effective_rate_type locks the rest), so their gap
+    is not moved to the first bucket.
+    """
+    return beta_eff * np.asarray(gap, dtype=float)

@@ -22,7 +22,7 @@ dict_tbl_sched_id_cols = {
     # bs_side included to carry balance sheet sign (A/L) into cash flow tables
     'loans': ["currency", "bs_side", "rate_type", "product_code", "start_date", "maturity_date",
               "payment_freq", "fixing_freq", "dc_conv", "b_day_conv", "rate_index",
-              "disc_curve", "fwd_curve", "amort_type"],
+              "disc_curve", "fwd_curve", "amort_type", "card_monthly_principal_rate"],
     'financial_instruments': ["currency", "bs_side", "rate_type", "product_code", "start_date", "maturity_date",
                               "payment_freq", "fixing_freq", "dc_conv", "b_day_conv", "rate_index",
                               "disc_curve", "fwd_curve", "amort_type"],
@@ -32,8 +32,18 @@ dict_tbl_sched_id_cols = {
     'deposits': ["currency", "bs_side", "rate_type", "product_code", "start_date", "maturity_date",
                  "dc_conv", "b_day_conv", "disc_curve", "fwd_curve"],
 }
+# Optional product-specific columns of schemat tables (credit cards). Tables generated before
+# they existed -- or positions loaded straight into SQL -- get them as NULL columns, which is
+# exactly what generation writes for non-card loans.
+optional_source_cols = {
+    'loans': {
+        'card_monthly_principal_rate': 'DECIMAL(18, 6)',
+        'credit_limit': 'DECIMAL(18, 2)',
+        'undrawn_amt': 'DECIMAL(18, 2)',
+    },
+}
 dict_tbl_sched_sum_cols = {
-    'loans': ["init_balance_amt", "balance_amt"],
+    'loans': ["init_balance_amt", "balance_amt", "credit_limit", "undrawn_amt"],
     'financial_instruments': ["balance_amt"],
     'deposits': ["balance_amt"],
 }
@@ -54,31 +64,58 @@ def get_calendar_from_currency(curr: str) -> ql.Calendar:
     currency_to_calendar = {
         'PLN': ql.Poland(),
         'EUR': ql.TARGET(),
-        'USD': ql.UnitedStates(ql.UnitedStates.NYSE)
+        'USD': ql.UnitedStates(ql.UnitedStates.NYSE),
+        'GBP': ql.UnitedKingdom(),
     }
     return currency_to_calendar.get(curr, ql.TARGET())
 
 def get_dc_from_currency(curr: str) -> ql.DayCounter:
     currency_to_dc_conv = {
         'PLN': ql.Actual365Fixed(),
-        'USD': ql.ActualActual(ql.ActualActual.ISDA),
-        'EUR': ql.Thirty360(ql.Thirty360.ISDA),
+        'USD': ql.Actual365Fixed(),   # curve zero-rate quoting: same basis for every currency
+        'EUR': ql.Actual365Fixed(),   # (downstream code converts days/365)
+        'GBP': ql.Actual365Fixed(),
     }
     return currency_to_dc_conv.get(curr, ql.Actual365Fixed())
 
-def depo_beh_models_job(file_name: str) -> pd.DataFrame:
-    df_depo_beh = pd.read_excel(file_name)
+def depo_beh_models_job(file_name: str, pmap: dict | None = None) -> pd.DataFrame:
+    from labbank_common import catalogue
+    df_depo_beh = catalogue.expand_columns(pd.read_excel(file_name), pmap or {})
     df_depo_beh = df_depo_beh.melt(id_vars=['report_date', 'tenor'],  var_name='product_code', value_name='outstanding')
     df_depo_beh = df_depo_beh.dropna(subset=['outstanding'])
     df_depo_beh = df_depo_beh[['report_date', 'product_code', 'tenor', 'outstanding']]
     return df_depo_beh
 
-def loan_beh_models_job(file_name: str) -> pd.DataFrame:
-    df_loan_beh = pd.read_excel(file_name)
+
+def check_core_within_stable(df_ir: pd.DataFrame, df_liq: pd.DataFrame, tol: float = 1e-9) -> None:
+    """NMD IR profile = core (stable AND not repricing), liquidity profile = stable volume:
+    core can never exceed stable. Raises on any product/tenor where it does, and on an IR
+    profile without a liquidity one."""
+    key = ['product_code', 'tenor']
+    m = df_ir.merge(df_liq, on=key, how='left', suffixes=('_core', '_stable'))
+    no_stable = sorted(m.loc[m['outstanding_stable'].isna(), 'product_code'].astype(str).unique())
+    if no_stable:
+        raise ValueError(f'dep_beh_models_ir: products {no_stable} have a core (IR) profile '
+                         'but no stable (liquidity) profile in dep_beh_models_liq')
+    bad = m[m['outstanding_core'] > m['outstanding_stable'] + tol]
+    if not bad.empty:
+        raise ValueError('dep_beh_models_ir: core profile above the stable (liquidity) profile:\n'
+                         + bad[key + ['outstanding_core', 'outstanding_stable']].head(10).to_string())
+
+def loan_beh_models_job(file_name: str, pmap: dict | None = None) -> pd.DataFrame:
+    from labbank_common import catalogue
+    df_loan_beh = catalogue.expand_columns(pd.read_excel(file_name), pmap or {})
     df_loan_beh = df_loan_beh.melt(id_vars=['report_date', 'tenor'],  var_name='product_code', value_name='prep_rate')
     df_loan_beh = df_loan_beh.dropna(subset=['prep_rate'])
     df_loan_beh = df_loan_beh[['report_date', 'product_code', 'tenor', 'prep_rate']]
     return df_loan_beh
+
+def depo_tdrr_models_job(file_name: str, pmap: dict | None = None) -> pd.DataFrame:
+    """Baseline cumulative term-deposit redemption rate per product (one row per product)."""
+    from labbank_common import catalogue
+    df = catalogue.expand_rows(pd.read_excel(file_name, dtype={'product_code': str}), pmap or {})
+    df = df.dropna(subset=['tdrr'])
+    return df[['report_date', 'product_code', 'tdrr']]
 
 def load_historical_fixings(curve_file_name: str) -> pd.DataFrame:
     fixing_hst = pd.read_excel(curve_file_name)
@@ -87,9 +124,9 @@ def load_historical_fixings(curve_file_name: str) -> pd.DataFrame:
     return df_fixing
 
 
-def build_curve_ql(valuation_date: ql.Date, quotes: dict[str, float]) -> ql.YieldTermStructureHandle:
+def build_curve_ql(valuation_date: ql.Date, quotes: dict[str, float],
+                   calendar: ql.Calendar) -> ql.YieldTermStructureHandle:
     ql.Settings.instance().evaluationDate = valuation_date
-    calendar = ql.Poland()
     day_count = ql.Actual365Fixed()
     fixing_days = 2
     bdc = ql.ModifiedFollowing
@@ -190,7 +227,7 @@ def simulate_hw_curves_quantlib(
     cal = get_calendar_from_currency(ccy)
     dc_conv =get_dc_from_currency(ccy)
 
-    yts = build_curve_ql(ql_valuation, quotes)
+    yts = build_curve_ql(ql_valuation, quotes, cal)
 
     horizon_date = cal.advance(ql_valuation, horizon)
     t_h = dc_conv.yearFraction(ql_valuation, horizon_date)
@@ -298,11 +335,42 @@ def curve_generation_job(
     mask = (dates <= report_date) & (dates >= min_date)
     dates = dates[mask]
 
+    results = []
     for ccy in df['currency'].unique():
         records = [df.loc[(df['date'] == dt) & (df['currency'] == ccy)] for dt in dates]
-        #records = [df.loc[(df['date'] == dt) & (df['currency'] == ccy)].iloc[0].to_dict() for dt in dates]
-        if len(records) == 0:
-            return pd.DataFrame(columns=["curve_date","tenor","year_frac","mat_date","int_rate"])
+        records = [r for r in records if not r.empty]
+        if not records:
+            continue
         with ProcessPoolExecutor(max_workers=max_workers) as ex:
-            results = list(ex.map(_worker_simulate, records))
+            results += list(ex.map(_worker_simulate, records))
+    if not results:
+        return pd.DataFrame(columns=["curve_date","tenor","year_frac","mat_date","int_rate"])
     return pd.concat(results, ignore_index=True)
+
+
+def apply_curve_basis(df_curves: pd.DataFrame, basis_file) -> pd.DataFrame:
+    """Multi-curve set from the single bootstrapped curve + a basis term structure
+    (curve_basis.csv next to curve_input.xlsx; see input/eur/build_curve_basis.py).
+
+    The bootstrapped curve stays the generic projection curve <ccy>_fwd_curve. Each basis row
+    group k builds zero(t) = zero_base(t) + spread_k(t), d_f = exp(-zero * year_frac):
+      k = 'disc'      -> replaces <ccy>_disc_curve (risk-free discounting, e.g. EUR STR)
+      k = '1M','3M',.. -> <ccy>_fwd_curve_<k>, projection curve of that IBOR tenor
+    A currency without a basis file keeps one curve for everything."""
+    basis = pd.read_csv(basis_file)
+    out = [df_curves]
+    for ccy in df_curves["currency"].unique():
+        base = df_curves[df_curves["curve_name"] == f"{ccy}_fwd_curve"]
+        if base.empty:
+            continue
+        for k, b in basis.groupby("curve"):
+            b = b.sort_values("n_days")
+            c = base.copy()
+            c["zero_rate"] = c["zero_rate"].astype(float) + np.interp(
+                c["n_days"].astype(float), b["n_days"].astype(float), b["spread"].astype(float))
+            c["d_f"] = np.exp(-c["zero_rate"] * c["year_frac"].astype(float))
+            c["curve_name"] = f"{ccy}_disc_curve" if k == "disc" else f"{ccy}_fwd_curve_{k}"
+            if k == "disc":
+                out[0] = out[0][~((out[0]["curve_name"] == f"{ccy}_disc_curve"))]
+            out.append(c)
+    return pd.concat(out, ignore_index=True)

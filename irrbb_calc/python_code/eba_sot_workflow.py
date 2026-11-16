@@ -3,18 +3,28 @@
 Run order: nii_calc_workflow OR eve_calc_workflow → THIS FILE
 (requires irrbb.curves to be populated with shocked discount curves)
 
-Computes EVE and NII SOT per EBA/GL/2018/02 Annex III with the 50%
-supervisory haircut applied at the TIME-BUCKET level — NOT at the total.
+Computes the EVE and NII Supervisory Outlier Test from the cash-flow results
+(irrbb.eve_results / irrbb.nii_results); the 50% haircut on a gain is applied to each
+currency's TOTAL delta (Reg. (EU) 2024/856), not per time bucket.
 
-Produces output/eba_sot_results.xlsx:
-  EVE_SOT_detail  — per (scenario, currency, EBA bucket): net_cf, d_f_base,okay
-                    d_f_shocked, delta_pv, delta_pv_reg
+Produces output/<bank>/eba_sot_results.xlsx:
+  EVE_SOT_detail  — per (scenario, currency, tenor bucket of the cash-flow date): PV base,
+                    PV shocked, delta_pv -- from the cf.eve_* tables, so the buckets add up
+                    exactly to delta_eve of the summary (no haircut at bucket level)
   EVE_SOT_summary — per (scenario, currency): ΔEVE, ΔEVE_reg, sot_eve_pct,
                     sot_eve_pct_reg
-  NII_SOT_detail  — per (scenario, currency, tenor bucket): gap_cf, Δr,
-                    remain_yf, delta_nii, delta_nii_reg
+  NII_SOT_detail  — per (scenario, currency, tenor bucket of the payment date): NII base,
+                    NII shocked, delta_nii -- from irrbb.nii_results_bucket (written by
+                    nii_calc_workflow), adding up exactly to delta_nii of the summary
   NII_SOT_summary — per (scenario, currency): ΔNII, ΔNII_reg, sot_nii_pct,
                     sot_nii_pct_reg
+
+Currencies: every summary amount is in the bank's HOME currency (foreign-currency NII / EVE
+converted at the report-date FX rate, labbank_common/fx.py), so % of Tier 1 is comparable.
+A bank with more than one currency also gets a currency = 'ALL' row per scenario: plain sum
+for base / shocked / delta, and for the regulatory delta the EBA aggregation across
+currencies -- losses in full, gains at 50% (sum of the per-currency *_reg values).
+The detail sheets are in the home currency too (same FX).
 
 Why bucket-level 50% differs from total-level 50%:
   Applying the haircut per bucket prevents positive contributions in some
@@ -28,22 +38,28 @@ import pandas as pd
 
 import config
 import sql_setup
+from labbank_common.bank_config import get_bank   # sql_setup puts the project root on sys.path
 import eba_shock_curves as esc
-import eba_sot_objects as sot
+
+import sys
+sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")))
+from labbank_common import irrbb_behaviour as beh_scen
+from labbank_common import fx
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(BASE_DIR)
+OUT_DIR = get_bank().output_dir('irrbb_calc')
 
-config.report_date = pd.to_datetime("2026-06-30")
+config.report_date = pd.Timestamp(get_bank().report_date)
 
 HORIZON_YF    = 1.0
-CURRENCY      = "PLN"
+CURRENCY      = get_bank().market.ccy
 OWN_SHOCK_BPS = -100.0
 
 DISC_CURVE_MAP = {
     "PLN": "PLN_disc_curve",
     "EUR": "EUR_disc_curve",
-    "USD": "USD_disc_curve",
+    "USD": "USD_disc_curve", "GBP": "GBP_disc_curve",
 }
 
 # ── 0. Load inputs ─────────────────────────────────────────────────────────────
@@ -54,12 +70,12 @@ mkt_df = sql_setup.load_mkt_curves(config.report_date)
 if mkt_df.empty:
     raise RuntimeError("No market curves found. Run cash_flow_calc / nii_calc_workflow first.")
 
-ir_gap = sql_setup.load_ir_gap_beh()
 
 # CF-based NII totals per scenario (base + all shocked) — for accurate delta_nii
 nii_cf = sql_setup.load_nii_summary(config.report_date)
 if nii_cf.empty:
     raise RuntimeError("No NII results found. Run nii_calc_workflow first.")
+nii_cf["nii_total"] = nii_cf["nii_total"] * fx.to_home_series(nii_cf["currency"], get_bank(), config.report_date)
 nii_base_map = (
     nii_cf[nii_cf["scenario_id"] == "base"]
     .set_index("currency")["nii_total"]
@@ -70,6 +86,7 @@ nii_base_map = (
 eve_cf = sql_setup.load_eve_summary(config.report_date)
 if eve_cf.empty:
     raise RuntimeError("No EVE results found. Run eve_calc_workflow first.")
+eve_cf["pv_total"] = eve_cf["pv_total"] * fx.to_home_series(eve_cf["currency"], get_bank(), config.report_date)
 eve_base_map = (
     eve_cf[eve_cf["scenario_id"] == "base"]
     .set_index("currency")["pv_total"]
@@ -84,15 +101,14 @@ except Exception:
     swap_df = pd.DataFrame()
 all_beh = pd.concat([beh_df, swap_df], ignore_index=True) if not swap_df.empty else beh_df
 print(f"Loaded {len(all_beh):,} CF rows ({all_beh['schedule_id'].nunique()} schedules)")
+scen_beh = sql_setup.load_beh_variants(config.report_date)   # EBA CPR/TDRR scenario variants
 
 # ── 1. Run SOT for all 7 stressed scenarios ────────────────────────────────────
 print("\nComputing EBA SOT (bucket-level 50% haircut)...")
 print(f"{'Scenario':<10} {'dEVE':>14} {'dEVE_reg':>14} {'dNII':>14} {'dNII_reg':>14}")
 print("-" * 60)
 
-eve_detail_parts  = []
 eve_summary_parts = []
-nii_detail_parts  = []
 nii_summary_parts = []
 
 for scenario_id in esc.ALL_SCENARIO_IDS:
@@ -116,12 +132,6 @@ for scenario_id in esc.ALL_SCENARIO_IDS:
 
     shocked_disc = pd.concat(disc_parts).sort_index()
 
-    # EVE SOT (run-off, all maturities) — bucket detail only (EBA standardised method)
-    eve_det, _ = sot.compute_eve_sot(
-        all_beh, mkt_df, shocked_disc, DISC_CURVE_MAP,
-        config.report_date, scenario_id,
-    )
-    eve_detail_parts.append(eve_det)
 
     # EVE summary — CF-based delta (shocked absolute EVE minus base), per currency
     eve_rows = []
@@ -142,12 +152,6 @@ for scenario_id in esc.ALL_SCENARIO_IDS:
     eve_summ = pd.DataFrame(eve_rows)
     eve_summary_parts.append(eve_summ)
 
-    # NII SOT — detail bucketing via gap-based method (for bucket breakdown)
-    nii_det, _ = sot.compute_nii_sot(
-        ir_gap, mkt_df, shocked_disc, DISC_CURVE_MAP,
-        config.report_date, scenario_id, HORIZON_YF,
-    )
-    nii_detail_parts.append(nii_det)
 
     # NII summary — CF-based delta (shocked absolute NII minus base), per currency
     nii_rows = []
@@ -175,10 +179,60 @@ for scenario_id in esc.ALL_SCENARIO_IDS:
     print(f"{scenario_id:<10} {dv:>14,.0f} {dvr:>14,.0f} {dn:>14,.0f} {dnr:>14,.0f}")
 
 # ── 2. Combine and add SOT % ───────────────────────────────────────────────────
-eve_detail  = pd.concat(eve_detail_parts,  ignore_index=True) if eve_detail_parts  else pd.DataFrame()
+def _bucket_detail(df: pd.DataFrame, value: str, prefix: str) -> pd.DataFrame:
+    """scenario x currency x tenor bucket: base, shocked and delta of `value` (home currency),
+    from per-cash-flow results -- sums exactly to the summary delta."""
+    if df.empty:
+        return pd.DataFrame()
+    df = df.assign(**{value: df[value] * fx.to_home_series(df["currency"], get_bank(),
+                                                           config.report_date).to_numpy()})
+    base = (df[df["scenario_id"] == "base"].groupby(["currency", "tenor_bucket"])[value].sum()
+            .rename(f"{prefix}_base"))
+    sh = df[df["scenario_id"] != "base"].set_index(["currency", "tenor_bucket"])
+    out = sh.join(base, how="left").reset_index()
+    out[f"{prefix}_base"] = out[f"{prefix}_base"].fillna(0.0)
+    out = out.rename(columns={value: f"{prefix}_shocked"})
+    out[f"delta_{prefix}"] = out[f"{prefix}_shocked"] - out[f"{prefix}_base"]
+    _order = {lbl: i for i, (_c, lbl) in enumerate(sql_setup._TENOR_BUCKET_CUTOFFS)}
+    out["_s"] = out["tenor_bucket"].map(lambda b: _order.get(b, 999))
+    return (out.sort_values(["scenario_id", "currency", "_s"]).drop(columns="_s")
+            [["scenario_id", "currency", "tenor_bucket", f"{prefix}_base", f"{prefix}_shocked",
+              f"delta_{prefix}"]].reset_index(drop=True))
+
+
+from sqlalchemy import text as _text
+_eve_cf_rows = pd.concat([pd.read_sql_query(_text(
+    f"SELECT scenario_id, currency, tenor_bucket, SUM(pv_capital + pv_interest) AS pv "
+    f"FROM cf.{t} WHERE report_date = :rd GROUP BY scenario_id, currency, tenor_bucket"),
+    sql_setup.engine, params={"rd": config.report_date})
+    for t in ("eve_base_scenario", "eve_par_scenarios", "eve_short_scenarios",
+              "eve_step_flat_scenarios", "eve_own_scenarios")], ignore_index=True)
+_eve_cf_rows = _eve_cf_rows[_eve_cf_rows["scenario_id"].isin(esc.ALL_SCENARIO_IDS)].drop_duplicates()
+eve_detail = _bucket_detail(_eve_cf_rows, "pv", "pv")
+try:
+    _nii_b = pd.read_sql_query(_text(
+        "SELECT scenario_id, currency, tenor_bucket, nii_total FROM irrbb.nii_results_bucket "
+        "WHERE report_date = :rd"), sql_setup.engine, params={"rd": config.report_date})
+except Exception as _e:                     # nii_calc_workflow not re-run since this change
+    print(f"  NII detail skipped: irrbb.nii_results_bucket unavailable ({type(_e).__name__})")
+    _nii_b = pd.DataFrame()
+nii_detail = _bucket_detail(_nii_b, "nii_total", "nii")
 eve_summary = pd.concat(eve_summary_parts, ignore_index=True) if eve_summary_parts else pd.DataFrame()
-nii_detail  = pd.concat(nii_detail_parts,  ignore_index=True) if nii_detail_parts  else pd.DataFrame()
 nii_summary = pd.concat(nii_summary_parts, ignore_index=True) if nii_summary_parts else pd.DataFrame()
+
+def _add_all_ccy(summary: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    """Append a currency='ALL' row per scenario (multi-currency banks only): sum of the
+    home-currency amounts; *_reg columns sum the per-currency regulatory deltas (losses in
+    full, gains at 50%) = the EBA aggregation across currencies."""
+    if summary.empty or summary["currency"].nunique() < 2:
+        return summary
+    tot = summary.groupby("scenario_id", sort=False)[cols].sum().reset_index()
+    tot["currency"] = "ALL"
+    return pd.concat([summary, tot[summary.columns]], ignore_index=True)
+
+
+eve_summary = _add_all_ccy(eve_summary, ["eve_base", "eve_shocked", "delta_eve", "delta_eve_reg"])
+nii_summary = _add_all_ccy(nii_summary, ["nii_base", "nii_shocked", "delta_nii", "delta_nii_reg"])
 
 if not eve_summary.empty:
     eve_summary["sot_eve_pct"]     = eve_summary["delta_eve"]     / TIER1_CAPITAL * 100.0
@@ -188,13 +242,16 @@ if not eve_summary.empty:
 if not nii_summary.empty:
     nii_summary["sot_nii_pct"]     = nii_summary["delta_nii"]     / TIER1_CAPITAL * 100.0
     nii_summary["sot_nii_pct_reg"] = nii_summary["delta_nii_reg"] / TIER1_CAPITAL * 100.0
-    nii_summary["sot_breach"]      = nii_summary["sot_nii_pct_reg"] < -5.0
+    # The supervisory NII SOT uses the two PARALLEL scenarios only (Reg. (EU) 2024/856);
+    # the other scenarios stay as internal information, never flagged as an SOT breach.
+    nii_summary["regulatory_test"] = nii_summary["scenario_id"].isin(["par_up", "par_dn"])
+    nii_summary["sot_breach"]      = nii_summary["regulatory_test"] & (nii_summary["sot_nii_pct_reg"] < -5.0)
 
 # ── 3. Write final SOT values to irrbb.irrbb_report ───────────────────────────
 # This is the sole writer to irrbb.irrbb_report.
 # NII delta comes from CF-based nii_results (includes IRS, per-product rates).
 # EVE delta comes from CF-based eve_results (full repricing with cap/floor/coeff).
-# EVE_SOT_detail uses the EBA bucket method (compute_eve_sot) for bucket breakdown.
+# EVE_SOT_detail / NII_SOT_detail bucket the same cash-flow results (they sum to these deltas).
 sql_setup.reset_irrbb_report()
 
 if not nii_summary.empty:
@@ -230,8 +287,8 @@ if not nii_summary.empty and not eve_summary.empty:
     currencies = results_df["currency"].dropna().unique().tolist()
     base_rows = []
     for ccy in currencies:
-        nii_b = nii_base_map.get(ccy, 0.0)
-        eve_b = eve_base_map.get(ccy, 0.0)
+        nii_b = sum(nii_base_map.values()) if ccy == "ALL" else nii_base_map.get(ccy, 0.0)
+        eve_b = sum(eve_base_map.values()) if ccy == "ALL" else eve_base_map.get(ccy, 0.0)
         base_rows.append({
             "report_date": config.report_date,
             "currency":    ccy,
@@ -254,8 +311,8 @@ if not nii_summary.empty and not eve_summary.empty:
     sql_setup.write_results_irrbb_report(results_df)
     print(f"  Written {len(results_df)} rows to results.irrbb_report.")
 
-    # Also write irrbb_report.xlsx to output/ for direct inspection
-    irrbb_report_path = "output/irrbb_report.xlsx"
+    # Also write irrbb_report.xlsx to output/<bank>/ for direct inspection
+    irrbb_report_path = str(OUT_DIR / "irrbb_report.xlsx")
     with pd.ExcelWriter(irrbb_report_path, engine="openpyxl") as writer:
         results_df.to_excel(writer, sheet_name="IRRBB_all", index=False)
         (results_df[["currency", "scenario_id", "nii_base", "nii_shocked", "delta_nii", "sot_nii_pct"]]
@@ -269,7 +326,7 @@ else:
     print("  Skipped: nii_summary or eve_summary is empty.")
 
 # ── 5. Write EBA SOT detail Excel ──────────────────────────────────────────────
-output_path = "output/eba_sot_results.xlsx"
+output_path = str(OUT_DIR / "eba_sot_results.xlsx")
 
 with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
     if not eve_detail.empty:
@@ -302,5 +359,5 @@ print("\n-- NII SOT summary (threshold: -5% of Tier 1) --")
 if not nii_summary.empty:
     print(nii_summary[["scenario_id", "currency", "nii_base", "nii_shocked",
                         "delta_nii", "delta_nii_reg",
-                        "sot_nii_pct", "sot_nii_pct_reg", "sot_breach"]]
+                        "sot_nii_pct", "sot_nii_pct_reg", "regulatory_test", "sot_breach"]]
           .to_string(index=False))

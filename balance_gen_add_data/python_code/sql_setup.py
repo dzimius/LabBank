@@ -1,22 +1,21 @@
 from __future__ import annotations
 
+import os
+import sys
 import re
 from typing import Optional
 
 import numpy as np
 import pandas as pd
-from sqlalchemy import create_engine, MetaData, Table, Column
+from sqlalchemy import MetaData, Table, Column
 from sqlalchemy import Integer, String, ForeignKey, Date, text
 from sqlalchemy.dialects.mssql import DECIMAL
 from sqlalchemy.engine import Engine
 
-engine = create_engine(
-    "mssql+pyodbc://maciek_d/bank_gen"
-    "?driver=ODBC+Driver+17+for+SQL+Server"
-    "&Trusted_Connection=yes",
-    fast_executemany=True,
-    future=True,
-)
+sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')))
+from labbank_common.bank_config import get_engine
+
+engine = get_engine()   # active bank's database (LABBANK_BANK, default eur)
 
 
 metadata = MetaData(schema=None)
@@ -25,10 +24,12 @@ metadata = MetaData(schema=None)
 TABLE_SCHEMAS: dict[str, str] = {
     "curves":             "mkt",
     "fixings":            "mkt",
+    "fx_rates":           "mkt",
     "models_loan":        "bs",
     "models_deposit_ir":  "bs",
     "models_deposit_liq": "bs",
     "models_rate":        "bs",
+    "models_deposit_tdrr": "bs",
 }
 
 def _ensure_schemas() -> None:
@@ -57,10 +58,20 @@ Curves = Table(
 Fixing = Table(
     "fixings", metadata,
     Column("fixing_date", Date, nullable=False),
-    Column("rate_index", String(8), nullable=False),
+    Column("rate_index", String(16), nullable=False),
     Column("tenor", String(4), nullable=False),
     Column("rate", DECIMAL(18, 6), nullable=False),
     Column("currency", String(3), nullable=False),
+    schema="mkt",
+)
+
+# Units of `currency` per 1 unit of the bank's home currency (labbank_common/fx.py).
+# Own MetaData: mkt tables are dropped every run and re-created by the append (to_sql).
+FxRates = Table(
+    "fx_rates", MetaData(),
+    Column("date", Date, nullable=False),
+    Column("currency", String(3), nullable=False),
+    Column("rate", DECIMAL(18, 8), nullable=False),
     schema="mkt",
 )
 
@@ -69,7 +80,7 @@ Loan_mod = Table(
     Column("report_date", Date, nullable=False),
     Column("product_code", String(4), nullable=False),
     Column("tenor", String(4), nullable=False),
-    Column("prep_rate", DECIMAL(18, 2), nullable=False),
+    Column("prep_rate", DECIMAL(18, 6), nullable=False),   # per-period rate (e.g. 0.002) -- 2 dp rounded it to 0
     schema="bs",
 )
 
@@ -78,7 +89,7 @@ Depo_mod_ir = Table(
     Column("report_date", Date, nullable=False),
     Column("product_code", String(4), nullable=False),
     Column("tenor", String(4), nullable=False),
-    Column("outstanding", DECIMAL(18, 2), nullable=False),
+    Column("outstanding", DECIMAL(18, 6), nullable=False),
     schema="bs",
 )
 
@@ -87,7 +98,7 @@ Depo_mod_liq = Table(
     Column("report_date", Date, nullable=False),
     Column("product_code", String(4), nullable=False),
     Column("tenor", String(4), nullable=False),
-    Column("outstanding", DECIMAL(18, 2), nullable=False),
+    Column("outstanding", DECIMAL(18, 6), nullable=False),
     schema="bs",
 )
 
@@ -106,14 +117,28 @@ Rate_mod = Table(
     schema="bs",
 )
 
+# Baseline cumulative term-deposit redemption rate per product (dep_redemption_models.xlsx),
+# EBA RTS 2024/857 Art. 10(4).  A product listed here is treated as a retail fixed-rate
+# term deposit with an early-redemption option; scenario multipliers live in
+# labbank_common/irrbb_behaviour.py.
+Depo_mod_tdrr = Table(
+    "models_deposit_tdrr", metadata,
+    Column("report_date", Date, nullable=False),
+    Column("product_code", String(4), nullable=False),
+    Column("tdrr", DECIMAL(18, 6), nullable=False),
+    schema="bs",
+)
+
 
 TABLES = {
     "curves":             Curves,
     "fixings":            Fixing,
+    "fx_rates":           FxRates,
     "models_loan":        Loan_mod,
     "models_deposit_ir":  Depo_mod_ir,
     "models_deposit_liq": Depo_mod_liq,
     "models_rate":        Rate_mod,
+    "models_deposit_tdrr": Depo_mod_tdrr,
 }
 
 def append_df_to_table(df: pd.DataFrame, table_name: str) -> None:
@@ -171,6 +196,18 @@ def reset_data_remove_always(schema_tables: list[str]) -> None:
     with engine.begin() as conn:
         for st in schema_tables:
             conn.execute(text(f"DROP TABLE IF EXISTS {st};"))
+
+def ensure_optional_columns(engine: Engine, schema: str, table: str, cols: dict[str, str]) -> list[str]:
+    """Add missing nullable columns (name -> SQL type) to schema.table; returns the names added."""
+    with engine.begin() as conn:
+        have = {r[0] for r in conn.execute(text(
+            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+            "WHERE TABLE_SCHEMA = :s AND TABLE_NAME = :t"), {"s": schema, "t": table})}
+        added = [c for c in cols if c not in have]
+        for c in added:
+            conn.execute(text(f"ALTER TABLE [{schema}].[{table}] ADD [{c}] {cols[c]} NULL"))
+    return added
+
 
 def create_sched_id_tbl_sql(
     engine: Engine,

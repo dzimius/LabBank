@@ -10,8 +10,8 @@ Usage
 -----
     from bs_vector import BalanceSheetParams, CurveTensors
 
-    params = BalanceSheetParams.load("optimize_prep/output/product_params.npz")
-    curves = CurveTensors.load("optimize_prep/output/curve_tensors.npz")
+    params = BalanceSheetParams.load("runs/pln/optimize_prep/product_params.npz")
+    curves = CurveTensors.load("runs/pln/optimize_prep/curve_tensors.npz")
 
     # current weights (sum to 1.0 over assets, 1.0 over liabilities)
     w = params.bs_pct_current / 100.0
@@ -138,6 +138,15 @@ class BalanceSheetParams:
     is_asset:     np.ndarray = field(default=None, compare=False)  # bool (n,)
     is_liability: np.ndarray = field(default=None, compare=False)  # bool (n,)
     is_equity:    np.ndarray = field(default=None, compare=False)  # bool (n,)
+
+    # ── committed facilities WITHOUT a drawn product (off balance sheet) ──────
+    # Fixed totals in home currency at the extraction balance-sheet size (lines linked to a
+    # drawn product are encoded per unit of drawn balance in lcr_runoff / rsf_factor /
+    # rwa_factor instead). The fast layer scales them with total assets.
+    commit_lcr_outflow: float = 0.0
+    commit_rsf:         float = 0.0
+    commit_rwa:         float = 0.0
+    commit_el:          float = 0.0   # informational: already spread into el_unit (extract_params)
     is_fixed:     np.ndarray = field(default=None, compare=False)  # bool (n,)
 
     def __post_init__(self):
@@ -146,6 +155,14 @@ class BalanceSheetParams:
         object.__setattr__(self, "is_liability", self.bs_side == "L")
         object.__setattr__(self, "is_equity",   self.bs_side == "E")
         object.__setattr__(self, "is_fixed",    self.rate_type == "F")
+
+    def commit_scale(self, amounts: np.ndarray) -> float:
+        """Size of the balance sheet behind `amounts` relative to extraction (standalone
+        facility totals grow with the bank): asset amounts excl. derivative legs / total_assets."""
+        if not (self.commit_lcr_outflow or self.commit_rsf or self.commit_rwa):
+            return 0.0
+        m = self.is_asset & ~np.isin(self.product_code.astype(str), ["0000", "0100"])
+        return float(np.asarray(amounts)[m].sum()) / self.total_assets if self.total_assets else 0.0
 
     # ── unique currencies in the book ─────────────────────────────────────────
     @property
@@ -254,6 +271,10 @@ class BalanceSheetParams:
             coupon_rate       = data["coupon_rate"].astype(float),
             scenario_ids      = data["scenario_ids"],
             total_assets      = float(data["total_assets"][0]),
+            commit_lcr_outflow = float(data["commit_lcr_outflow"][0]) if "commit_lcr_outflow" in data else 0.0,
+            commit_rsf         = float(data["commit_rsf"][0])         if "commit_rsf" in data else 0.0,
+            commit_rwa         = float(data["commit_rwa"][0])         if "commit_rwa" in data else 0.0,
+            commit_el          = float(data["commit_el"][0])          if "commit_el" in data else 0.0,
             report_date       = str(data["report_date"][0]),
             balance_arr       = data["balance_arr"].astype(float),
             # schedule monthly profile — zeros/999 if not present (old npz)

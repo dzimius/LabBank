@@ -21,6 +21,7 @@ IRS float legs: per-swap next-fixing date derived from start_date and fixing fre
 from __future__ import annotations
 
 import os
+import sys
 from datetime import date
 
 import numpy as np
@@ -29,9 +30,14 @@ import pandas as pd
 from irs_engine import _maturity_months
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-DEP_BEH_PATH = os.path.join(PROJECT_ROOT, "balance_gen_add_data", "input", "dep_beh_models_ir.xlsx")
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+from labbank_common.bank_config import get_bank  # noqa: E402
+from labbank_common.rate_models import beta_adjusted_gap, effective_beta  # noqa: E402
 
-REPORT_DATE_DEFAULT = date(2026, 6, 30)
+DEP_BEH_PATH = str(get_bank().models_dir() / "dep_beh_models_ir.xlsx")
+
+REPORT_DATE_DEFAULT = date.fromisoformat(get_bank().report_date)   # fallback when curves carry no date
 
 # 12 monthly buckets + 4 longer-tenor buckets
 BUCKETS       = ["1M","2M","3M","4M","5M","6M","7M","8M","9M","10M","11M","12M",
@@ -39,7 +45,7 @@ BUCKETS       = ["1M","2M","3M","4M","5M","6M","7M","8M","9M","10M","11M","12M",
 _BUCKET_UPPER = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 24, 36, 60, 9999]
 
 # NMD product codes that have behavioral repricing models
-_NMD_CODES    = {6000, 8000, 6300}        # 6300 uses 6000 curve as proxy
+_NMD_CODES    = {6000, 8000, 6300, 6350}  # 6300 uses 6000 curve as proxy; 6350 has its own
 _NMD_PROXY    = {6300: 6000}              # product codes with proxy mapping
 
 
@@ -199,12 +205,25 @@ def _nmd_repricing_by_bucket(balance: float,
 
 # ── main gap computation ──────────────────────────────────────────────────────
 
+def _row_beta(params, i: int, index_by_ccy: dict) -> float:
+    """Effective client-rate beta of npz row i at its currency's 1M index
+    (same rate-model fields the NII fast layer prices with)."""
+    idx = index_by_ccy.get(str(params.currency[i]))
+    if idx is None:
+        return 1.0
+    f = lambda name: float(getattr(params, name)[i]) if hasattr(params, name) else np.nan
+    a = f("coeff_a")
+    return effective_beta(idx, f("coeff_b"), 1.0 if np.isnan(a) else a,
+                          client_floor=f("client_floor"), client_cap=f("client_cap"))
+
+
 def compute_repricing_gap(
     params,
     irs_df: pd.DataFrame,
     report_date: date | None = None,
     nmd_models: dict | None = None,
     weights: np.ndarray | None = None,
+    index_by_ccy: dict | None = None,
 ) -> pd.DataFrame:
     """Return repricing gap DataFrame.
 
@@ -218,6 +237,11 @@ def compute_repricing_gap(
               weights[i] * params.total_assets instead of the static
               params.balance_arr[i], so the gap reflects Balance Sheet tab
               edits. Omit for the shipped-baseline gap.
+    index_by_ccy : optional {currency: today's 1M index (decimal)}. When given,
+              the gap is beta-adjusted (NII view, labbank_common.rate_models):
+              each product scaled by its effective client-rate beta at that
+              index (npz coeff_a / coeff_b / client floor & cap); NMDs along
+              their repricing profile like any product. IRS legs stay at 1.
     """
     if report_date is None:
         _rd = getattr(params, "report_date", None)
@@ -226,8 +250,11 @@ def compute_repricing_gap(
         nmd_models_base = _load_nmd_model(DEP_BEH_PATH)
     except Exception:
         nmd_models_base = {}
-    if nmd_models is None:
-        nmd_models = nmd_models_base
+    # Caller's (stressed) models override the shipped ones product by product; an
+    # NMD the caller does not cover (e.g. 6350 USD current account -- the NMD Stress
+    # tab edits home-currency products only) keeps its shipped model. Without the
+    # merge it got live_now = 0 vs live_base > 0: a phantom gap delta on app open.
+    nmd_models = {**nmd_models_base, **(nmd_models or {})}
 
     n_b  = len(BUCKETS)
     bs_a = np.zeros(n_b)
@@ -257,6 +284,8 @@ def compute_repricing_gap(
                 repricing = bal * prof + (live_now - live_base)
             else:
                 repricing = live_now
+            if index_by_ccy is not None:
+                repricing = beta_adjusted_gap(repricing, _row_beta(params, i, index_by_ccy))
             if side == "A":
                 bs_a += repricing
             elif side == "L":
@@ -289,6 +318,8 @@ def compute_repricing_gap(
                     t1 = F / 2.0
                 spread = _reprice_spread(bal, t1, F)
 
+            if index_by_ccy is not None:
+                spread = beta_adjusted_gap(spread, _row_beta(params, i, index_by_ccy))
             if side == "A":
                 bs_a += spread
             elif side == "L":

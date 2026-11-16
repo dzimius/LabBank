@@ -4,7 +4,7 @@ One-time (re-run whenever product_params.npz or curve_tensors.npz change)
 script to compute and cache FTP rates -- see ftp_store.py for the formula.
 
 Writes both:
-  - optimize_prep/output/ftp_rates.npz  (fast-load cache, incl. market_rt/
+  - runs/<bank>/optimize_prep/ftp_rates.npz  (fast-load cache, incl. market_rt/
     liq_spread breakdown, used by load_ftp_rates())
   - SQL opt_prep.ftp_rates              (report_date, cohort_id, market_rt,
     liq_spread, ftp_rate -- queryable breakdown, one full reset+reload per run)
@@ -19,9 +19,13 @@ import pandas as pd
 from bs_vector import BalanceSheetParams, CurveTensors
 from ftp_store import compute_ftp_components, REPORT_DATE, save_ftp_rates
 from sql_setup import reset_ftp_rates, write_ftp_rates
+import sys
+sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")))
+from labbank_common.bank_config import get_bank
+BANK_OUT_DIR = str(get_bank().output_dir("optimize_prep"))   # runs/<bank_id>/optimize_prep
 
 _HERE    = os.path.dirname(os.path.abspath(__file__))
-_OUT_DIR = os.path.normpath(os.path.join(_HERE, "..", "output"))
+_OUT_DIR = BANK_OUT_DIR
 _PARAMS  = os.path.join(_OUT_DIR, "product_params.npz")
 _CURVES  = os.path.join(_OUT_DIR, "curve_tensors.npz")
 

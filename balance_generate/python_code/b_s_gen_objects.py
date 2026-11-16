@@ -45,7 +45,8 @@ def get_calendar_from_currency(curr: str) -> ql.Calendar:
     currency_to_calendar = {
         'PLN': ql.Poland(),
         'EUR': ql.TARGET(),
-        'USD': ql.UnitedStates(ql.UnitedStates.NYSE)
+        'USD': ql.UnitedStates(ql.UnitedStates.NYSE),
+        'GBP': ql.UnitedKingdom(),
     }
     return currency_to_calendar.get(curr, ql.TARGET())
 
@@ -804,6 +805,49 @@ class LoansFloatGen(ProductGen):
         )
 
 
+class CreditCardsGen(LoansFloatGen):
+    """Drawn retail card receivables, with a separate undrawn facility limit.
+
+    maturity is a behavioural run-off horizon, not a contractual card expiry.
+    rate_type V uses the existing tariff beta (zero for interest-free transactors).
+    """
+    @classmethod
+    def create_from_row(cls, row):
+        from labbank_common.credit_cards import CardTerms
+        if row['bs_side'] != 'A' or row['payment_freq'] != '1M':
+            raise ValueError('credit cards require asset side and monthly payments')
+        if row['rate_type'] != 'V' or int(row['amort_type']) != 3:
+            raise ValueError('credit cards require V pricing and amort_type=3; tariff beta may be zero')
+        obj = super().create_from_row(row)
+        obj.card_terms = CardTerms.from_row(row)
+        if row['product_name'] == 'credit_card_transactor' and obj.card_terms.monthly_principal_rate != 1:
+            raise ValueError('transactors must repay all principal monthly')
+        return obj
+
+    def gen_set_of_transactions(self):
+        # Generate current drawn balances directly, not an amortising initial loan.
+        stats = config.stats_dict['credit_card'][self.client_type_id]
+        balances = generate_balances(self.balance_amt, **stats, round=100)
+        terms = self.card_terms
+        report = pd.Timestamp(config.report_date)
+        starts = generate_random_dates(max(pd.Timestamp(config.balance_start_date),
+                                      report - pd.DateOffset(years=3)), report, len(balances))
+        end = ql_date_to_pd_date(self.cal.advance(ql.Date.from_date(report.date()),
+                                                 ql.Period(self.maturity), ql.ModifiedFollowing))
+        return pd.DataFrame({'balance_amt': balances, 'init_balance_amt': balances,
+                             'start_date': starts, 'maturity_date': end,
+                             'margin': np.full(len(balances), 0.0),
+                             'credit_limit': np.asarray(balances) / terms.utilization,
+                             'undrawn_amt': np.asarray(balances) * terms.undrawn_per_drawn})
+
+    def add_parameters(self, transactions):
+        out = super().add_parameters(transactions)
+        out['credit_limit'] = transactions['credit_limit']
+        out['undrawn_amt'] = transactions['undrawn_amt']
+        out['card_monthly_principal_rate'] = self.card_terms.monthly_principal_rate
+        return out
+
+
 class BondsFixedGen(ProductGen):
     def __init__(self, product_name, product_code, bs_side, balance_amt, currency, client_type_id, rate_type,
                  amort_type, rate_index, payment_freq, fixing_freq, maturity,
@@ -821,10 +865,14 @@ class BondsFixedGen(ProductGen):
         stats = config.stats_dict[self.product_name][self.client_type_id]
         balances = generate_balances(self.balance_amt, stats['mean'], stats['std_dev'],
                                      stats['lower_bound'], stats['upper_bound'], round=5000)
+        # money-market bills (original maturity <= 12M, e.g. Bubills) are auctioned monthly,
+        # bonds on a quarterly grid; a monthly grid gives the bills a ladder of remaining maturities
+        _t = str(self.maturity).strip().upper()
+        _short = _t.endswith(("D", "W")) or (_t.endswith("M") and int(_t[:-1]) <= 12) or _t == "1Y"
         starting_dates = generate_random_bond_dates(max(config.balance_start_date,
                                                    _earliest_live_start(self.maturity)),
                                                config.report_date,
-                                               len(balances))
+                                               len(balances), freq="1M" if _short else "3M")
         starting_dates = [as_datetime(d) for d in starting_dates]
         maturity_dates = [ql_date_to_pd_date(self.cal.advance(ql.Date.from_date(pd.Timestamp(s_dt).date()),
                                                               ql.Period(self.maturity), ql.ModifiedFollowing)) for s_dt
@@ -1087,21 +1135,28 @@ class OneRowDummyProductGen(ProductGen):
 
 
 class CashGen(ProductGen):
-    """Single-row overnight cash position (central bank reserves / vault cash).
+    """Single-row overnight cash position. Two kinds, by rate_type in bank_data.xlsx:
 
-    IRRBB treatment: cash has no interest rate sensitivity — it reprices overnight.
-    Placed in the 1D bucket for both liquidity and IR gap.
-      - maturity_date = next business day (overnight)
-      - amort_type    = 0  (bullet: full balance returned overnight)
-      - rate_type     = 'F', client_rt ≈ 0  (non-interest bearing)
-    EVE impact ≈ face value (d_f ≈ 1.0 at overnight).
+      - 'F' non-remunerated cash (vault cash, minimum reserves -- 0% since Sep-2023):
+            client_rt = 0, no rate index, no rate pass-through
+      - 'V' remunerated central-bank cash (excess reserves at the ECB deposit facility):
+            overnight floating on the row's rate_index (an ON index, e.g. EUR_ASK_1D);
+            client_rt from compute_asset_rates (rate model in interest_rt.xlsx, e.g.
+            margin_pct = DFR - ON spread), so it reprices every day
+    Both: maturity_date = next business day, amort_type 0 (whole balance back overnight),
+    1D bucket for liquidity and IR gap, EVE ~ face value.
     Stored in financial_instruments so it flows through CF calc and IRRBB.
     """
     def __init__(self, product_name, product_code, bs_side, balance_amt, currency,
-                 client_type_id, rate_type, dc_conv, b_day_conv, disc_curve, fwd_curve):
+                 client_type_id, rate_type, dc_conv, b_day_conv, disc_curve, fwd_curve,
+                 rate_index=None):
         super().__init__(product_name, product_code, bs_side, balance_amt, currency,
                          client_type_id, rate_type, dc_conv, b_day_conv, disc_curve, fwd_curve)
         self.cal = get_calendar_from_currency(currency)
+        self.remunerated = rate_type == 'V'
+        if self.remunerated and not (isinstance(rate_index, str) and rate_index):
+            raise ValueError(f"cash {product_code}: rate_type 'V' (remunerated) needs a rate_index")
+        self.rate_index = rate_index if self.remunerated else None
 
     def gen_set_of_transactions(self):
         return pd.DataFrame({'balance_amt': [self.balance_amt]})
@@ -1130,15 +1185,16 @@ class CashGen(ProductGen):
             'maturity_date':  maturity_dt,
             'maturity':       '1D',
             'amort_type':     0,
-            'rate_index':     None,
+            'rate_index':     self.rate_index,
             'dc_conv':        self.dc_conv,
-            'fixing_freq':    '1M',
-            'payment_freq':   '1M',
+            'fixing_freq':    '1D' if self.remunerated else '1M',
+            'payment_freq':   '1D' if self.remunerated else '1M',
             'b_day_conv':     self.b_day_conv,
             'disc_curve':     self.disc_curve,
             'fwd_curve':      self.fwd_curve,
-            'client_rt':      0.0,
-            'index_rt':       0.0,
+            # remunerated: set by compute_asset_rates from the ON fixing at report_date
+            'client_rt':      np.nan if self.remunerated else 0.0,
+            'index_rt':       np.nan if self.remunerated else 0.0,
         })
 
     @classmethod
@@ -1155,6 +1211,7 @@ class CashGen(ProductGen):
             b_day_conv=row["b_day_conv"],
             disc_curve=row["disc_curve"],
             fwd_curve=row["fwd_curve"],
+            rate_index=row.get("rate_index"),
         )
 
 
@@ -1308,11 +1365,14 @@ def compute_asset_rates(
     """
     asset_names = {
         'mortgage_fixed', 'mortgage_float', 'cash_loan_fixed', 'cash_loan_float',
+        'credit_card_revolver', 'credit_card_transactor',
         'investment_loan_fixed', 'investment_loan_float', 'bond_fixed', 'bond_float',
-        'issued_bond', 'term_deposit',
+        'issued_bond', 'term_deposit', 't_bill',
     }
-    # liability-side term deposits are priced by compute_deposit_client_rt
-    asset_mask = (all_tx['product_name'].isin(asset_names)
+    # liability-side term deposits are priced by compute_deposit_client_rt;
+    # cash only when remunerated ('V': excess reserves on an ON index), vault cash stays 0%
+    asset_mask = ((all_tx['product_name'].isin(asset_names)
+                   | ((all_tx['product_name'] == 'cash') & (all_tx['rate_type'] == 'V')))
                   & ~((all_tx['product_name'] == 'term_deposit') & (all_tx['bs_side'] == 'L')))
 
     all_tx = all_tx.copy()
@@ -1406,16 +1466,106 @@ def compute_asset_rates(
         rt = rate_models.client_rate(idx_vals, spread.reindex(all_tx.index[rate_mask]).to_numpy(dtype=float), a, **lim)
         all_tx.loc[rate_mask, 'client_rt'] = np.where(np.isnan(idx_vals), np.nan, rt)
 
+    return add_security_holding_fields(all_tx)
+
+
+SECURITY_PRODUCTS = {'bond_fixed', 'bond_float', 't_bill'}
+
+
+def add_security_holding_fields(all_tx: pd.DataFrame) -> pd.DataFrame:
+    """Holding fields of securities, separate from the book value balance_amt:
+
+    nominal_amt       redemption amount. A bill (one payment at maturity) is bought at its
+                      purchase cost P = balance_amt and redeems N = P x (1 + y x d / basis);
+                      a coupon bond bought at issue at par has N = balance_amt.
+    acquisition_date  trade date of the holding -- every holding is bought at issue here,
+                      so start_date (issue / coupon schedule dates stay on start_date).
+    purchase_price    per 100 of nominal (100 for par purchases).
+
+    Rows that already carry them (aged holdings in a roll-forward) keep their values.
+    A t_bill must have a single payment at maturity (payment_freq == maturity): with more
+    periods its discount would be paid out as artificial interim coupons."""
+    for c in ('nominal_amt', 'purchase_price'):
+        if c not in all_tx.columns:
+            all_tx[c] = np.nan
+    if 'acquisition_date' not in all_tx.columns:
+        all_tx['acquisition_date'] = pd.NaT
+    sec = all_tx['product_name'].isin(SECURITY_PRODUCTS)
+    if not sec.any():
+        return all_tx
+    bills = sec & (all_tx['product_name'] == 't_bill')
+    bad = bills & (all_tx['payment_freq'].astype(str).str.upper() != all_tx['maturity'].astype(str).str.upper())
+    if bad.any():
+        raise ValueError(f"t_bill rows must pay once at maturity (payment_freq == maturity): "
+                         f"{all_tx.loc[bad, ['payment_freq', 'maturity']].drop_duplicates().to_dict('records')}")
+    todo = sec & all_tx['nominal_amt'].isna()
+    bal = all_tx['balance_amt'].astype(float)
+    nominal = bal.copy()
+    zb = todo & bills
+    if zb.any():
+        days = (pd.to_datetime(all_tx.loc[zb, 'maturity_date']) - pd.to_datetime(all_tx.loc[zb, 'start_date'])).dt.days
+        basis = np.where(all_tx.loc[zb, 'dc_conv'].astype(str).str.contains('360'), 360.0, 365.0)
+        nominal.loc[zb] = bal.loc[zb] * (1.0 + all_tx.loc[zb, 'client_rt'].astype(float) * days / basis)
+    all_tx.loc[todo, 'nominal_amt'] = nominal.loc[todo].round(2)
+    all_tx.loc[todo, 'acquisition_date'] = all_tx.loc[todo, 'start_date']
+    all_tx.loc[todo, 'purchase_price'] = (100.0 * bal.loc[todo] / nominal.loc[todo]).round(6)
     return all_tx
 
 
 # === Factory Class ===
+def decorate_from_bs_struct(all_tx: pd.DataFrame, df_bs_struct: pd.DataFrame) -> pd.DataFrame:
+    """own_name, amort_type and regulatory LCR/NSFR weights from bank_data.xlsx bs_structure."""
+    # Inject own_name, amort_type, and regulatory LCR/NSFR weights from bs_structure.
+    # Keyed by (product_code, bs_side) so dual-sided products (e.g. 7900) resolve correctly.
+    _reg_cols = ['own_name', 'amort_type', 'hqla_class', 'haircut', 'LCR', 'ASF', 'RSF']
+    _avail_reg = [c for c in _reg_cols if c in df_bs_struct.columns]
+    _meta = (
+        df_bs_struct[['product_code', 'bs_side'] + _avail_reg]
+        .drop_duplicates(['product_code', 'bs_side'])
+        .set_index(['product_code', 'bs_side'])
+    )
+    _idx = pd.MultiIndex.from_arrays(
+        [all_tx['product_code'].astype(int), all_tx['bs_side']],
+        names=['product_code', 'bs_side'],
+    )
+    all_tx['own_name']   = _meta['own_name'].reindex(_idx).values
+
+    # Regulatory weights — map bs_struct column names to target column names
+    _weight_map = {'hqla_class': 'hqla_class', 'haircut': 'haircut',
+                   'LCR': 'lcr_weight', 'ASF': 'asf_weight', 'RSF': 'rsf_weight'}
+    for src, dst in _weight_map.items():
+        if src in _meta.columns:
+            all_tx[dst] = _meta[src].reindex(_idx).values
+    # ensure amort_type is object dtype so mixed int/None assignment works
+    if 'amort_type' not in all_tx.columns:
+        all_tx['amort_type'] = None
+    all_tx['amort_type'] = all_tx['amort_type'].astype(object)
+    _amort_from_struct   = _meta['amort_type'].reindex(_idx).astype(object).values
+    # only fill where the product class did not set amort_type itself
+    _missing = all_tx['amort_type'].isna()
+    all_tx.loc[_missing, 'amort_type'] = _amort_from_struct[_missing]
+    return all_tx
+
+
+def seed_product(seed: int, product_code, bs_side: str) -> None:
+    """Re-seed numpy's global RNG for one product row (truncnorm.rvs, np.random.choice draw from it).
+
+    Each (product_code, bs_side) gets its own stream derived from the bank seed, so changing one
+    product's balance (more or fewer contracts = more or fewer draws) leaves every other
+    product's contracts identical. 7900 exists on both sides, hence bs_side in the key.
+    """
+    state = np.random.SeedSequence([int(seed), int(product_code), ord(str(bs_side)[0])]).generate_state(1)[0]
+    np.random.seed(int(state))
+
+
 class ProductFactory:
     class_registry = {
         "mortgage_fixed": LoansFixedGen,
         "mortgage_float": LoansFloatGen,
         "cash_loan_fixed": LoansFixedGen,
         "cash_loan_float": LoansFloatGen,
+        "credit_card_revolver": CreditCardsGen,
+        "credit_card_transactor": CreditCardsGen,
         "investment_loan_fixed": LoansFixedGen,
         "investment_loan_float": LoansFloatGen,
         "bond_fixed": BondsFixedGen,
@@ -1433,6 +1583,7 @@ class ProductFactory:
     table_registry = {
         LoansFixedGen: "loans",
         LoansFloatGen: "loans",
+        CreditCardsGen: "loans",
         SavingAccountsGen: "deposits",
         CurrentAccountsGen: "deposits",
         TermDepositsGen: "deposits",
@@ -1446,6 +1597,10 @@ class ProductFactory:
     def create(cls, row: pd.Series) -> ProductGen:
         ptype = row["product_name"]
         product_class = cls.class_registry[ptype]
+        # issued bonds come in both kinds: a fixed-coupon covered bond (rate_type 'F', e.g. the
+        # EUR bank) is generated like a fixed bond; the floating note stays the default
+        if ptype == "issued_bond" and row.get("rate_type") == "F":
+            product_class = BondsFixedGen
         return product_class.create_from_row(row)
 
     # @classmethod

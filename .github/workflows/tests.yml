@@ -20,7 +20,12 @@ jobs:
         # NumPy — no SQL Server, no pandas, no QuantLib. Keep this minimal so
         # the check stays fast and green without the full pipeline stack.
         # labbank_common's rate-model tests add pandas + openpyxl (Excel input check).
-        run: pip install numpy pandas openpyxl pytest
+        # irrbb_calc shock / fixing-rule tests add sqlalchemy (imported, never connected).
+        # balance_generate / cash_flow_calc tests add scipy + QuantLib, and pyodbc: their
+        # modules build the SQL engine at import (never connected; the runner has unixODBC).
+        run: pip install numpy pandas openpyxl sqlalchemy pyodbc scipy QuantLib pytest
 
       - name: Run test suites
-        run: pytest optimize_prep/tests/ labbank_common/tests/ -q
+        run: >-
+          pytest optimize_prep/tests/ labbank_common/tests/ irrbb_calc/tests/
+          balance_generate/tests/ cash_flow_calc/tests/ release_check/ -q

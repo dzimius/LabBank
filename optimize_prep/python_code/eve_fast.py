@@ -34,6 +34,10 @@ from __future__ import annotations
 
 import numpy as np
 from bs_vector import BalanceSheetParams, CurveTensors
+import os
+import sys
+sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")))
+from labbank_common.bank_config import home_ccy
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -198,7 +202,7 @@ def compute_eve_analytical_fast(
     params: BalanceSheetParams,
     curves: CurveTensors,
     scenario_id: str,
-    currency: str = "PLN",
+    currency: str | None = None,
 ) -> float:
     """EVE using analytical PV of annuities — level 3.
 
@@ -216,6 +220,7 @@ def compute_eve_analytical_fast(
     scenario_id : e.g. 'par_up', 'par_dn', 'base'
     currency    : currency for which to look up the disc curve
     """
+    currency = currency or home_ccy()
     disc_curve  = curves.get_disc_curve(scenario_id, currency)
     coupon_rate = np.abs(params.nii_unit_rate)   # effective rate per year
 

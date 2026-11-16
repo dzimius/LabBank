@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from product_map import _ProductMap, OPEX_RATE
+from product_map import _ProductMap, OPEX_RATE, opex_mask
 from nii_eve_cf_fast import compute_nii_cf_all
 from rwa_fast import compute_rwa_fast
 from ftp_store import (load_ftp_rates, margin_unit_rate, floating_ftp_rate,
@@ -125,7 +125,7 @@ def compute_ep_components(amounts, pm, params, cr, margin_rate, equity_benefit_r
     rwa = compute_rwa_fast(amounts, params)
     el = float(np.dot(amounts, params.el_unit))
     coc = rwa * params.cet1_target * params.coc_rate
-    opex = OPEX_RATE * float(np.sum(amounts[~params.is_equity]))
+    opex = OPEX_RATE * float(np.sum(amounts[opex_mask(params)]))
     acq_cost = (float(np.dot(pm.acq_cost_prod, np.maximum(0.0, x_w_prod - pm.base_prod_w)))
                 * params.total_assets)
     ep = margin + equity_benefit + fee - el - coc - opex - acq_cost

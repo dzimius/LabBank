@@ -49,7 +49,7 @@ hr { border: none; border-top: 1px solid #ddd; margin: 2.5rem 0; }
 <p>This guide gets you running in one of two ways: exploring the shipped demo bank in LabBank with nothing but Python, or standing up the full SQL-Server-backed pipeline so you can generate and explore your own balance sheet. Pick the path that matches what you want to do — you can always start with Path A and move to Path B later.</p>
 <h2 id="who-this-is-for">Who this is for</h2>
 <p>Practitioners, risk/ALM analysts, and students who want to see a complete ALM pipeline — from synthetic transaction generation through NII/EVE/EBA SOT/LCR/NSFR — and interact with the results rather than just read about them.</p>
-<p><img alt="LabBank pipeline overview" src="../visual_rep/beamer_assets/pipeline.png" /></p>
+<p><img alt="LabBank pipeline overview" src="images/pipeline.png" /></p>
 <hr />
 <h2 id="path-a-labbank-only-no-database-5-minutes">Path A — LabBank only (no database, ~5 minutes)</h2>
 <p>Use this if you want to explore the ALM concepts and stress a pre-built balance sheet interactively. Nothing here touches SQL Server.</p>
@@ -69,7 +69,7 @@ source venv/bin/activate
 <pre><code class="language-bash">pip install -r requirements.txt
 streamlit run sandbox/app.py
 </code></pre>
-<p>Streamlit opens a browser tab at <code>http://localhost:8501</code>. You'll see six tabs: Balance Sheet, ALM Metrics, Gap Analysis, Market Curves, NMD Stress, and IRS Book. Everything is computed from files already checked into the repo (<code>optimize_prep/output/*.npz</code>, <code>balance_generate/input_data/bank_data.xlsx</code>, and a few supporting Excel files) — no database, no credentials, no orchestration engine involved.</p>
+<p>Streamlit opens a browser tab at <code>http://localhost:8501</code>. You'll see six tabs: Balance Sheet, ALM Metrics, Gap Analysis, Market Curves, NMD Stress, and IRS Book. Everything is computed from files already checked into the repo (<code>runs/&lt;bank&gt;/optimize_prep/*.npz</code>, <code>inputs/pln/balance/bank_data.xlsx</code>, and a few supporting Excel files) — no database, no credentials, no orchestration engine involved.</p>
 <p><strong>What to try first:</strong> open the Balance Sheet tab, change a percentage in the "✏️ New %" column (both Assets and Liabilities+Equity must each sum to 100%), then check the ALM Metrics tab to see how NII, EVE, and the EBA Supervisory Outlier Test respond.</p>
 <h3 id="troubleshooting-path-a">Troubleshooting Path A</h3>
 <table>
@@ -99,33 +99,29 @@ streamlit run sandbox/app.py
 <p>Use this if you want to build a balance sheet from your own numbers rather than stress the shipped demo one. This path uses SQL Server as the integration/audit layer — every intermediate step (transactions, cash flows, IRRBB results) lands in a real database you can query directly, which is deliberate: being able to run your own SELECTs and aggregations against the data is part of the point, not just a means to an end.</p>
 <h3 id="1-install-sql-server-and-the-odbc-driver">1. Install SQL Server and the ODBC driver</h3>
 <p>Any edition works — <strong>SQL Server Developer Edition</strong> is free and full-featured, or use <strong>SQL Server Express</strong> for a lighter footprint. You also need the <strong>ODBC Driver 17 for SQL Server</strong> (or adjust the driver string in step 3 if you install a different version).</p>
-<p>Create an empty database named <code>bank_gen</code> (any tool works — SSMS, Azure Data Studio, or <code>sqlcmd</code>):</p>
-<pre><code class="language-sql">CREATE DATABASE bank_gen;
+<p>Create one empty database per bank — <code>bank_gen_pln</code> for the PLN bank (and <code>bank_gen_eur</code> if you also want the EUR bank). Any tool works — SSMS, Azure Data Studio, or <code>sqlcmd</code>:</p>
+<pre><code class="language-sql">CREATE DATABASE bank_gen_pln;
+CREATE DATABASE bank_gen_eur;   -- optional, only for the EUR bank
 </code></pre>
-<p>You do <strong>not</strong> need to create tables or schemas manually — each module creates its own schema and tables the first time it runs (see <code>sql_setup.py</code> → <code>reset_data(mode=0)</code> in each module).</p>
+<p>You do <strong>not</strong> need to create tables or schemas manually — each module creates its own schema and tables the first time it runs (see <code>sql_setup.py</code> → <code>reset_data(mode=0)</code> in each module). Both databases get the identical set of schemas and tables.</p>
 <h3 id="2-point-the-pipeline-at-your-database">2. Point the pipeline at your database</h3>
-<p>Every module has its own <code>python_code/sql_setup.py</code> with a hardcoded connection string:</p>
-<pre><code class="language-python">engine = create_engine(
-    &quot;mssql+pyodbc://maciek_d/bank_gen&quot;
-    &quot;?driver=ODBC+Driver+17+for+SQL+Server&quot;
-    &quot;&amp;Trusted_Connection=yes&quot;,
-    ...
-)
+<p>All connection settings live in one place, <code>labbank_common/bank_config.py</code> (<code>SqlCfg</code>):</p>
+<pre><code class="language-python">@dataclass(frozen=True)
+class SqlCfg:
+    db_name: str
+    server: str = &quot;localhost&quot;
+    driver: str = &quot;ODBC+Driver+17+for+SQL+Server&quot;
 </code></pre>
-<p>Replace <code>maciek_d</code> with your own SQL Server instance name (e.g. <code>localhost</code>, <code>localhost\SQLEXPRESS</code>, or a named instance) in <strong>all seven</strong> copies of this file:</p>
-<ul>
-<li><code>balance_generate/python_code/sql_setup.py</code></li>
-<li><code>balance_gen_add_data/python_code/sql_setup.py</code></li>
-<li><code>cash_flow_calc/python_code/sql_setup.py</code></li>
-<li><code>ir_derivatives/python_code/sql_setup.py</code></li>
-<li><code>irrbb_calc/python_code/sql_setup.py</code></li>
-<li><code>liq_calc/python_code/sql_setup.py</code></li>
-<li><code>optimize_prep/python_code/sql_setup.py</code></li>
-</ul>
-<p><em>(Yes, this is duplicated seven times rather than centralized — see the technical notes doc if you want to fix that instead of just editing all seven.)</em></p>
-<p>The connection uses Windows Trusted Authentication by default (no password stored anywhere). If your SQL Server uses SQL authentication instead, change <code>Trusted_Connection=yes</code> to <code>UID=...;PWD=...</code> in each file — don't commit real credentials if you do this in a shared repo.</p>
+<p>Change the <code>server</code> default to your own SQL Server instance name (e.g. <code>localhost</code>, <code>localhost\SQLEXPRESS</code>, or a named instance) and, if needed, the driver. Every module gets its engine from <code>get_engine()</code> in that file.</p>
+<p>The connection uses Windows Trusted Authentication by default (no password stored anywhere). If your SQL Server uses SQL authentication instead, change <code>Trusted_Connection=yes</code> to <code>UID=...;PWD=...</code> in <code>SqlCfg.url</code> — don't commit real credentials if you do this in a shared repo.</p>
+<h3 id="2b-choosing-the-bank-pln-eur">2b. Choosing the bank (PLN / EUR)</h3>
+<p>One codebase serves several banks. Each bank has its own SQL database and its own input/output folders (<code>inputs/&lt;bank&gt;/</code>, <code>runs/&lt;bank&gt;/&lt;module&gt;/</code>), and is defined in <code>labbank_common/bank_config.py</code>. The active bank comes from the <code>LABBANK_BANK</code> environment variable (<code>eur</code> by default; <code>pln</code> for the Polish bank):</p>
+<pre><code class="language-powershell">$env:LABBANK_BANK = &quot;pln&quot;
+python irrbb_calc\python_code\eve_calc_workflow.py
+</code></pre>
+<p>In Dagster every asset is partitioned by bank — pick the <code>pln</code> or <code>eur</code> partition when launching a job. The sandbox serves one bank per process: <code>streamlit run sandbox/app.py -- --bank pln</code>.</p>
 <h3 id="3-run-the-pipeline-via-dagster-recommended">3. Run the pipeline via Dagster (recommended)</h3>
-<pre><code class="language-bash">dagster dev
+<pre><code class="language-powershell">.\dagster_pipeline\start_dagster.ps1
 </code></pre>
 <p>Open the Dagster UI (usually <code>http://localhost:3000</code>) and launch a job:</p>
 <table>
@@ -165,18 +161,19 @@ streamlit run sandbox/app.py
 <p>Since the goal here is getting to LabBank, <code>labbank_data_job</code> is the only one you need for the loop below — the others are fine-grained shortcuts for narrower changes (see <code>README.md</code>'s full jobs table, which also lists <code>optimize_prep_job</code> for rebuilding LabBank's tensors on their own).</p>
 <h3 id="4-the-generate-your-own-balance-sheet-loop">4. The "generate your own balance sheet" loop</h3>
 <ol>
-<li>Edit <code>balance_generate/input_data/bank_data.xlsx</code> with your own product balances, rates, and currencies. For swaps, edit <code>ir_derivatives/input/irs_input.xlsx</code>. If you're changing which products exist (not just their weights), also check <code>balance_gen_add_data/input/interest_rt.xlsx</code> — the client-rate model: one row per <code>report_date</code> × product with <code>bs_side</code> (A / L / A/L, descriptive), <code>beta</code> (pass-through of the index), <code>margin_pct</code> (product-level margin in percentage points; blank/0 = loans keep their own contract margin), and optional <code>index_floor</code>/<code>index_cap</code>/<code>client_floor</code>/<code>client_cap</code> (see the methodology doc's "Rate floors and caps" section). The add_data stage loads it into SQL table <code>bs.models_rate</code>, which is what every later stage reads — so if you feed your own data straight into SQL, insert the rate model there instead of editing the Excel file. Every deposit product must have a row (the pipeline stops otherwise); a loan or instrument with no row gets beta = 1, its contract margin and no floor/cap. On asset rows <code>beta</code> and <code>margin_pct</code> may be left blank (= beta 1 + contract margin); liability rows must state <code>beta</code> explicitly.</li>
+<li>Edit <code>inputs/pln/balance/bank_data.xlsx</code> with your own product balances, rates, and currencies. For swaps, edit <code>inputs/pln/derivatives/derivatives.xlsx</code> (next to <code>bank_data.xlsx</code>). If you're changing which products exist (not just their weights), also check <code>inputs/pln/models/interest_rt.xlsx</code> — the client-rate model: one row per <code>report_date</code> × product with <code>bs_side</code> (A / L / A/L, descriptive), <code>beta</code> (pass-through of the index), <code>margin_pct</code> (product-level margin in percentage points; blank/0 = loans keep their own contract margin), and optional <code>index_floor</code>/<code>index_cap</code>/<code>client_floor</code>/<code>client_cap</code> (see the methodology doc's "Rate floors and caps" section). The add_data stage loads it into SQL table <code>bs.models_rate</code>, which is what every later stage reads — so if you feed your own data straight into SQL, insert the rate model there instead of editing the Excel file. Every deposit product must have a row (the pipeline stops otherwise); a loan or instrument with no row gets beta = 1, its contract margin and no floor/cap. On asset rows <code>beta</code> and <code>margin_pct</code> may be left blank (= beta 1 + contract margin); liability rows must state <code>beta</code> explicitly.</li>
 <li>Run <code>labbank_data_job</code> in Dagster.</li>
 <li>Open LabBank (<code>streamlit run sandbox/app.py</code>, or if it's already running, just refresh) and click <strong>"🔄 Reload my data"</strong> in the sidebar.</li>
 <li>LabBank now shows your balance sheet — Balance Sheet, ALM Metrics, Gap Analysis, etc. all reflect it.</li>
 </ol>
 <p>Repeat steps 1–3 as many times as you like; SQL Server stays up the whole time.</p>
+<p><strong>Products the bank can sell but does not hold (catalogue).</strong> A <code>bs_structure</code> row with <code>bs_percentage</code> 0 is a catalogue product: no contracts are generated, but the roll-forward can sell it (a positive <code>share_new_pct</code> in <code>inputs/&lt;bank&gt;/forecast/growth_plan.xlsx</code>) and the optimizers can buy it (one new-business unit cohort per product, <code>optimize_prep/python_code/catalogue_params.py</code>). Other tenors / fixing frequencies of a held product go in the <code>catalogue</code> sheet of <code>bank_data.xlsx</code>, one row per variant: <code>parent_code</code>, <code>bs_side</code>, <code>product_code</code> (a new 4-digit code), <code>own_name</code>, and only the terms that differ (<code>maturity</code>, <code>payment_freq</code>, <code>fixing_freq</code>, <code>rate_index</code>, <code>amort_type</code>; blank = the parent's). The variant inherits everything else from its parent: the bs_structure row (LCR / NSFR / RWA / PD / LGD / fees) and the client-rate, prepayment, term-deposit redemption and NMD models (<code>labbank_common/catalogue.py</code>), so it is the parent's product with other contract terms. The EUR bank ships 20 variants (term deposits 1M / 3M / 12M / 24M, mortgages 20Y / 25Y / 30Y fixed and 1M / 3M / 6M floating, 1M / 3M / 6M floating cash, SME and corporate loans). LabBank hides catalogue products — it shows the book the bank holds. After adding variants, rebuild the growth plan (<code>python balance_generate/python_code/make_growth_plan.py --bank eur</code>; existing shares are kept as today's composition, variants start at 0).</p>
 <h3 id="5-running-workflows-directly-without-dagster">5. Running workflows directly (without Dagster)</h3>
 <p>Each stage can also be run as a standalone script, in this order:</p>
 <pre><code class="language-bash">python balance_generate/python_code/b_s_gen_workflow.py
 python balance_gen_add_data/python_code/b_s_add_data_workflow.py
 python cash_flow_calc/python_code/cf_calc_workflow.py
-python ir_derivatives/python_code/irs_workflow.py
+python ir_derivatives/python_code/swap_workflow.py
 python irrbb_calc/python_code/nii_calc_workflow.py
 python irrbb_calc/python_code/eve_calc_workflow.py
 python irrbb_calc/python_code/eba_sot_workflow.py
@@ -203,7 +200,7 @@ python optimize_prep/python_code/opt_prep_workflow.py
 </tr>
 <tr>
 <td><code>IF NOT EXISTS ... CREATE SCHEMA</code> errors on first run</td>
-<td>Confirm the <code>bank_gen</code> database exists and your login has <code>db_owner</code> (or at least <code>CREATE SCHEMA</code>/<code>CREATE TABLE</code>) permission on it.</td>
+<td>Confirm the bank's database (<code>bank_gen_pln</code> / <code>bank_gen_eur</code>) exists and your login has <code>db_owner</code> (or at least <code>CREATE SCHEMA</code>/<code>CREATE TABLE</code>) permission on it.</td>
 </tr>
 <tr>
 <td>LabBank still shows the old balance sheet after <code>labbank_data_job</code></td>

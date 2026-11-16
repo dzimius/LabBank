@@ -13,12 +13,12 @@ Excel inputs → Python workflow scripts (orchestrated by Dagster) → SQL Serve
 | `balance_generate/` | `dbo.transactions`, `schemat.*` | `bank_data.xlsx` |
 | `balance_gen_add_data/` | `mkt.curves`, `mkt.fixings`, `bs.*` | market/behavioural Excel inputs |
 | `cash_flow_calc/` | `cf.products`, `irrbb.ir_gap_*` | `schemat.*`, `bs.*` |
-| `ir_derivatives/` | `cf.ir_swap_*`, merges into `irrbb.ir_gap_beh` | `irs_input.xlsx`, `mkt.curves` |
+| `ir_derivatives/` | `cf.ir_swap_*`, merges into `irrbb.ir_gap_beh` | `derivatives.xlsx`, `mkt.curves` |
 | `irrbb_calc/` | `irrbb.*`, `results.irrbb_report` | `cf.products`, `irrbb.ir_gap_beh` |
 | `liq_calc/` | `results.lcr_nsfr` | `cf.products`, `schemat.*` |
-| `optimize_prep/` | `optimize_prep/output/*.npz` | everything above (reads via SQL) |
-| `sandbox/` (LabBank) | nothing (read-only) | `optimize_prep/output/*.npz`, `bank_data.xlsx` |
-| `bs_optimization/` (private submodule — `LabBank-Optimization`) | `bs_optimization/output/*` | `optimize_prep/output/*.npz` |
+| `optimize_prep/` | `runs/<bank>/optimize_prep/*.npz` | everything above (reads via SQL) |
+| `sandbox/` (LabBank) | nothing (read-only) | `runs/<bank>/optimize_prep/*.npz`, `bank_data.xlsx` |
+| `bs_optimization/` | `runs/<bank>/bs_optimization/*` | `runs/<bank>/optimize_prep/*.npz` |
 | `dagster_pipeline/` | orchestration only | wraps all workflow scripts as subprocess calls (see §3) |
 
 Every module can be run two ways: as a standalone `python <module>/python_code/<x>_workflow.py` script, or as a Dagster asset that wraps the same script. Both paths execute identical code — Dagster adds scheduling, dependency order, and run history on top, nothing more (see §3).
@@ -59,19 +59,25 @@ The shock mechanics live in `eba_shock_curves.py`:
 
 One implementation detail worth knowing about if you're extending the Monte Carlo layer: an optional `base_floor_bps_fn` pre-shock floor (`:216`, `default_realistic_base_floor_bps`) exists purely to stop randomly-simulated curves from pinning at an implausible flat long end — it's explicitly *not* an EBA-defined figure, just a numerical guard for synthetic curve paths.
 
+`packed_pricing.py` reprices the same NII / EVE cash-flow rows on many curves at once: the rows are packed
+once per product into index arrays, and each curve is then array arithmetic on a matrix of discount factors.
+The functions take the array module as an argument (NumPy). It
+reproduces `compute_nii_shocked_schedule` and `compute_eve_shocked_schedule` to about 1e-14 relative; the Monte
+Carlo layer uses it as a faster backend.
+
 ### `optimize_prep/` — the fast-approximation tensor layer
 
 This is the part of the codebase most worth understanding well, because it's what lets the Streamlit sandbox run interactively with no database: every balance-sheet edit re-prices NII/EVE/LCR/NSFR in milliseconds against precomputed tensors instead of re-running the full SQL + QuantLib pipeline.
 
 - `BalanceSheetParams` (`bs_vector.py:35`, a frozen dataclass) — one row per cohort, holding parallel numpy arrays: unit rates, `d_mod` (modified duration), `delta_nii_unit`/`delta_eve_unit` per EBA scenario, and the LCR/NSFR/RWA/expected-loss factors needed for optimisation.
 - `CurveTensors` / `CohortRates` (`bs_vector.py:299, :357`) — precomputed discount/forward curve grids and a per-cohort `rate_matrix[n_cohorts, 12, n_scenarios]`.
-- `build_product_params()` (`extract_params.py:1882`) — the SQL → tensor ETL. Loads `bs_structure`, per-cohort cash-flow statistics, the substitution matrix, and rate coefficients, then asserts every `product_code` present in the balance sheet is covered by one of three hand-maintained registries (`COHORT_PRODUCT_CODES`, `SINGLE_ROW_PRODUCT_CODES`, `IRS_PRODUCT_CODES`) — a new product that's missing from all three fails the build loudly instead of silently vanishing from the tensors. `diagnose_accuracy.py` and `cohort_cf_drill.py` import these same three sets rather than keeping their own copies, so there's one place to update when a product is added.
+- `build_product_params()` (`extract_params.py:1882`) — the SQL → tensor ETL. Loads `bs_structure`, per-cohort cash-flow statistics, the substitution matrix, and rate coefficients, then asserts every `product_code` present in the balance sheet is covered by one of three hand-maintained registries (`COHORT_PRODUCT_CODES`, `SINGLE_ROW_PRODUCT_CODES`, `IRS_PRODUCT_CODES`) — a new product that's missing from all three fails the build loudly instead of silently vanishing from the tensors. `diagnostics/diagnose_accuracy.py` and `diagnostics/cohort_cf_drill.py` import these same three sets rather than keeping their own copies, so there's one place to update when a product is added.
 
 The approximation itself, in `nii_eve_cf_fast.py`:
 
 - **NII** is a single `einsum` (`_nii_cohort_matrix`, `:55`): `NII[cohort, scenario] = balance · sign · Σ_month (outstanding[cohort, month] · rate_matrix[cohort, month, scenario]) / 12` — O(cohorts × 12 × scenarios), microseconds for a book with under ~2,000 cohorts.
 - **EVE** offers two modes: a duration-based shortcut (`−sign · modified_duration · Δforward_rate`) for speed, or a full cash-flow-discounting mode for accuracy.
-- Both are corrected with a precalibrated additive bias term (`bias_nii`/`bias_eve`) — the gap between the fast approximation and the exact engine at the *base* scenario, assumed constant under shocked scenarios. That's a deliberate speed/accuracy tradeoff, not an oversight: `optimize_prep/output/approx_accuracy_report.xlsx` quantifies exactly how close the approximation stays across the full 7-scenario set, and `bias_store.py` degrades gracefully (recomputes if the cached bias's cohort count doesn't match the current tensors — see the cache-staleness note in §4).
+- Both are corrected with a precalibrated additive bias term (`bias_nii`/`bias_eve`) — the gap between the fast approximation and the exact engine at the *base* scenario, assumed constant under shocked scenarios. That's a deliberate speed/accuracy tradeoff, not an oversight: `runs/<bank>/optimize_prep/approx_accuracy_report.xlsx` quantifies exactly how close the approximation stays across the full 7-scenario set, and `bias_store.py` degrades gracefully (recomputes if the cached bias's cohort count doesn't match the current tensors — see the cache-staleness note in §4).
 
 In short: this layer trades a one-time calibration cost for O(1) scenario evaluation — a precomputed linear-operator cache standing in for SQL + QuantLib repricing.
 
@@ -81,7 +87,7 @@ In short: this layer trades a one-time calibration cost for O(1) scenario evalua
 
 One quirk worth knowing if you're reading the source top-to-bottom: the `with tab_*:` blocks are laid out in execution order (Market Curves → Balance Sheet → IRS Book → ALM Metrics → Gap Analysis → NMD Stress), which is not the tab-bar order above. The Market Curves body in particular executes first — before ALM Metrics — even though it renders fourth on the page, because its "hypothetical scenario" selectors need to resolve before the Metrics tab's NII/EVE recompute can use them. Streamlit re-runs the whole script top-to-bottom on every interaction, so this is a documented ordering workaround, not a bug.
 
-**Hypothetical-curve metrics are pre-computed exactly, not fast-approximated.** The 15 stylised curves are a fixed menu, so `sandbox/build_scenario_curves.py` (Dagster asset `hyp_scenario_curves`, in `optimize_prep_job` / `labbank_data_job`) runs the *production* `irrbb_calc` re-pricing functions once per curve — feeding the already-generated run-off / 12M cash-flow streams through `build_all_shocked_curves` + `compute_{eve,nii}_shocked_schedule` with that curve as the base — and writes per-product NII/EVE (base + 7 shocks) to `sandbox/scenario_curves.npz`. The app then does a dot product against the edited balance sheet — still no SQL at runtime. A `cohort_id` guard in the npz detects a stale product set and drops the app back to a self-contained analytical model in `hyp_engine.py` (rebuilds the client-rate matrix off the hypothetical forwards with floors applied at that level; EVE base via calibrated duration extrapolation). The caption on the ALM Metrics tab says which path is active.
+**Hypothetical-curve metrics are pre-computed exactly, not fast-approximated.** The 15 stylised curves are a fixed menu, so `sandbox/build_scenario_curves.py` (Dagster asset `hyp_scenario_curves`, in `optimize_prep_job` / `labbank_data_job`) runs the *production* `irrbb_calc` re-pricing functions once per curve — feeding the already-generated run-off / 12M cash-flow streams through `build_all_shocked_curves` + `compute_{eve,nii}_shocked_schedule` with that curve as the base — and writes per-product NII/EVE (base + 7 shocks) to `runs/<bank>/sandbox/scenario_curves.npz`. The app then does a dot product against the edited balance sheet — still no SQL at runtime. A `cohort_id` guard in the npz detects a stale product set and drops the app back to a self-contained analytical model in `hyp_engine.py` (rebuilds the client-rate matrix off the hypothetical forwards with floors applied at that level; EVE base via calibrated duration extrapolation). The caption on the ALM Metrics tab says which path is active.
 
 ### `dagster_pipeline/` — orchestration
 
@@ -89,9 +95,9 @@ Six asset files under `dagster_pipeline/assets/` (`balance_sheet.py`, `cash_flow
 
 This is a deliberate tradeoff, not a gap: keeping every workflow script independently runnable (`python <script>.py`, no Dagster required) was a higher priority than a tighter Dagster-native `IOManager` contract between stages. The cost is that a stage silently writing a differently-shaped table only surfaces as a downstream error, not a Dagster-visible schema violation — worth knowing if you're debugging an unexpected `KeyError` two stages downstream of where the actual change happened.
 
-### `bs_optimization/` — balance sheet optimiser (private submodule)
+### `bs_optimization/` — balance sheet optimiser
 
-Briefly, since the code itself isn't public: `bs_optimizer.py` formulates balance-sheet reweighting as a genuine Linear Program — the economic-profit objective and every EVE/NII-delta/LCR/NSFR constraint are linear in the product weights, because they're built from the precomputed unit-deltas in `BalanceSheetParams` (§2, `optimize_prep/`). It's solved via `scipy.optimize.linprog(method="highs")`, with a `scipy.optimize.minimize(method="SLSQP")` fallback for the rarer nonlinear case (price-volume elasticity). Regulatory floors (EVE/NII/NSFR/Tier-1-RWA) are hard inequality constraints by default, or move into a weighted-slack objective in "soft breach" mode — see the [project report](https://github.com/dzimius/LabBank/releases/download/v1/LabBank.pdf) for the full methodology and results.
+`joint_optimizer.py` (balance sheet + new par swaps) builds on the LP core of `bs_optimizer.py`, which formulates balance-sheet reweighting as a genuine Linear Program — the economic-profit objective and every EVE/NII-delta/LCR/NSFR constraint are linear in the product weights, because they're built from the precomputed unit-deltas in `BalanceSheetParams` (§2, `optimize_prep/`). It's solved via `scipy.optimize.linprog(method="highs")`, with a `scipy.optimize.minimize(method="SLSQP")` fallback for the rarer nonlinear case (price-volume elasticity). Regulatory floors (EVE/NII/NSFR/Tier-1-RWA) are hard inequality constraints by default, or move into a weighted-slack objective in "soft breach" mode — see the [project report](https://github.com/dzimius/LabBank/releases/download/v1/LabBank.pdf) for the full methodology and results.
 
 ## 3. Design decisions and rationale
 
@@ -108,8 +114,8 @@ Honest caveats about where this project simplifies, so they're not mistaken for 
 - **Prepayment is a static product×tenor lookup, not rate-dependent.** The CPR assigned to a cohort at cash-flow build time is reused unchanged across every EBA shock scenario — a par-down shock gets the same prepayment cash flows as a par-up shock. This means negative convexity (prepayment speeding up as rates fall) isn't modelled, which understates EVE sensitivity for fixed-rate mortgages in down-shock scenarios. A real fix would be a `CPR(Δr)` function; worth knowing if you're evaluating this project's rigor for a mortgage-heavy book specifically.
 - **No FX conversion layer**, despite per-currency curve/calendar scaffolding throughout the codebase. Currently a no-op because the synthetic balance sheet is 100% PLN — a multi-currency book would need an `exchange_rate` table and a conversion step before aggregation.
 - **Risk parameters (RWA weights, PD/LGD, LCR/ASF/RSF factors) are illustrative**, loosely shaped like real Basel/CRR and LCR/NSFR categories but not a precise regulatory calibration — see the product tables in the [Methodology doc](02_methodology.md#products-on-the-balance-sheet). They're plain Excel columns, meant to be replaced with your own institution's numbers.
-- **The fast-approximation layer's bias correction is calibrated once at the base scenario and held constant across shocks** (§2) — a documented speed/accuracy tradeoff, quantified in `optimize_prep/output/approx_accuracy_report.xlsx` rather than left unmeasured.
-- **Global constants (`TOTAL_ASSETS`, `REPORT_DATE`, the SQL connection string) are duplicated per module** rather than imported from one shared config — a straightforward centralization that just hasn't been prioritized yet, since every module needs to stay independently runnable (§3).
+- **The fast-approximation layer's bias correction is calibrated once at the base scenario and held constant across shocks** (§2) — a documented speed/accuracy tradeoff, quantified in `runs/<bank>/optimize_prep/approx_accuracy_report.xlsx` rather than left unmeasured.
+- **`TOTAL_ASSETS` and `REPORT_DATE` are still duplicated per module** rather than imported from one shared config. Bank-level settings — the SQL connection, input/output folders, home currency, generation distributions — are already centralized in `labbank_common/bank_config.py`; every module stays independently runnable (§3) because it resolves the bank from `LABBANK_BANK` itself.
 
 Behavioural models and the balance sheet itself are synthetic/illustrative by design — this project demonstrates *how* an ALM pipeline should be built and how its metrics relate to each other, not a validated, governed production risk system.
 

@@ -1,6 +1,7 @@
 # Virtual environments
 .venv/
 venv/
+venv_*/
 env/
 ENV/
 
@@ -45,12 +46,11 @@ htmlcov/
 ~$*.xlsx
 
 # Local backup copy of the private bs_optimization submodule — NEVER commit
-# (contains the private LabBank-Optimization source; a stray `git add .` would
+# (a stray `git add .` would
 #  publish it). Keep working backups outside the repo, or under this name.
 bs_optimization.bak/
 
-# Root-level scratch dirs (module-level output dirs like optimize_prep/output/
-# are tracked and unaffected by these anchored patterns)
+# Root-level scratch dirs
 /output/
 /tmp/
 
@@ -69,14 +69,28 @@ Diogo Gobira*.pdf
 # visual_rep/export_report.py, bs_optimization/notebooks/export_optimization_report.py,
 # or `jupyter nbconvert --to html <notebook>.ipynb` -- not tracked to avoid
 # committing duplicate rendered output alongside the notebook source.
-# (Hand-authored HTML like docs/*.html and optimize_prep/method_b_explainer.html
+# (Hand-authored HTML like docs/*.html, incl. docs/method_b_explainer.html,
 # is unaffected -- only these specific notebook-export paths are ignored.)
-# ALM_report.html / finance_report.html are the exception: committed as
-# static, viewable snapshots -- they will go stale until someone re-runs
-# export_report.py / make_finance_report.py and commits the refresh; they
-# are not auto-kept-in-sync.
 bs_optimization/notebooks/optimization_report.html
 bs_optimization/notebooks/optimization_report_clean.html
 # Raw per-tenor rate downloads (POLONIA/WIBOR from stooq) — the consolidated
-# balance_gen_add_data/input/wibor_all.xlsx is the tracked artefact.
-balance_gen_add_data/wibor_stooq/download/
+# wibor_stooq/wibor_all.xlsx next to it is the tracked artefact.
+inputs/market/*/wibor_stooq/download/
+
+# Full clearing settlement files (all currencies, ~60 MB): only the EUR/USD/PLN extract is tracked
+inputs/market/eur/euribor_raw/settlement-prices_*.csv
+
+# release check run logs
+release_check/logs/
+
+
+# Internal documents and backups never go into git (keep them outside the repository)
+*.docx
+*.pptx
+*.bak
+
+# Local Claude Code permissions (machine-specific paths)
+.claude/settings.local.json
+
+# Everything generated stays on disk, not in git: rerun the pipeline to rebuild it.
+/runs/

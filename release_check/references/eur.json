@@ -1,0 +1,598 @@
+{
+ "bank": "eur",
+ "files": {
+  "irrbb_calc/eba_sot_results.xlsx": {
+   "EVE_SOT_detail": "7c066542060c1b80",
+   "EVE_SOT_summary": "74da1e45e3e93321",
+   "NII_SOT_detail": "09d2d8b19eadcbb1",
+   "NII_SOT_summary": "051d6ab32a4c48eb"
+  },
+  "irrbb_calc/eve_results.xlsx": {
+   "EVE_base_detail": "77f35ef5b61279a6",
+   "EVE_base_summary": "e1f9eb4310b667c0",
+   "EVE_shocked_detail": "836c96db261d85a5",
+   "EVE_shocked_summary": "324f53f94a4c3f63"
+  },
+  "irrbb_calc/irrbb_report.xlsx": {
+   "Delta_EVE": "209de02a093c3392",
+   "Delta_NII": "ac3d80381d1dcef3",
+   "IRRBB_all": "ed56a01c631f937f"
+  },
+  "irrbb_calc/irrbb_shock_curves.xlsx": {
+   "Daily_EUR_disc_curve": "916373e59f273eb6",
+   "Daily_EUR_fwd_curve": "5c29f4fda53e2359",
+   "Daily_EUR_fwd_curve_1M": "10f135ab4b975e35",
+   "Daily_EUR_fwd_curve_1Y": "77c8ebdbbbf67c1f",
+   "Daily_EUR_fwd_curve_3M": "add71bed7510e304",
+   "Scenario_Shapes": "aa0bd19bfeb1e2d2",
+   "Shock_Params": "10075a68bd22ef3a"
+  },
+  "irrbb_calc/nii_results.xlsx": {
+   "NII_base_detail": "04f2010834d2c280",
+   "NII_base_summary": "2e323be73674cffc",
+   "NII_shocked_detail": "09d2d8b19eadcbb1",
+   "NII_shocked_summary": "c36bc1ed32afce2b",
+   "NII_simple_detail": "71fd1b9d4b238be8",
+   "NII_simple_summary": "78c5d843e5144e98"
+  },
+  "liq_calc/lcr_nsfr_report.xlsx": {
+   "Commitments": "533da23db7b10448",
+   "Drawdowns": "68e8b7aa6681da7a",
+   "LCR_NSFR": "f8d2efa9ec257b1f"
+  },
+  "liq_calc/liquidity_p2_report.xlsx": {
+   "Buffer": "3872f74154366848",
+   "Concentration": "5f64440d888fb017",
+   "HHI": "4394ddbebbbee7ca",
+   "Summary": "ace5698abbd42107",
+   "Survival_daily": "554cafaa72e1acae",
+   "Survival_points": "c776a41e76a449ad",
+   "Top10_depositors": "74c3649735e83f14",
+   "Wholesale_maturity": "57ebe4ecfa0868b7"
+  },
+  "optimize_prep/approx_accuracy_report.xlsx": {
+   "Base": "31094fa3fa07b5ea",
+   "Gradient": "a3a48fc04399bca7",
+   "LCR_NSFR": "758b3c4e6e940e6c",
+   "Scenarios": "a3cd05616bea7f9b",
+   "Summary": "d65c7415cd96786f"
+  },
+  "optimize_prep/bias_corrections.npz": {
+   "bias_eve_unit": "(661, 7):32e97ba387b9251e",
+   "bias_nii_unit": "(661, 7):698d03e0272acb5c",
+   "scenario_ids": "(7,):af5ed574204eef56"
+  },
+  "optimize_prep/curve_tensors.npz": {
+   "currencies": "(4,):35f7b907b40cafc8",
+   "curve_names": "(4,):09627e8ca45c3c79",
+   "disc_factors": "(12, 4, 360):d7c2ad270a7af5c1",
+   "fwd_rates": "(12, 4, 360):00bd2d4a40611589",
+   "n_months": "(1,):0ed8198686405a19",
+   "report_date": "(1,):1e60852bc9c03fa4",
+   "scenario_ids": "(12,):a260633d0d9a0e9b"
+  },
+  "optimize_prep/curves_inspection.xlsx": {
+   "Curves_EUR": "8c6472e964165f98",
+   "Curves_GBP": "18115630a1fcc979",
+   "Curves_PLN": "18115630a1fcc979",
+   "Curves_USD": "18115630a1fcc979",
+   "Fwd_rates_summary": "60f06f8eda1ff7f9"
+  },
+  "optimize_prep/ftp_rates.npz": {
+   "cohort_id": "(661,):d2668f2676e13829",
+   "ftp_rate": "(661,):fe43939a6a86ca28",
+   "liq_spread": "(661,):d0016b089b6ed9b0",
+   "market_rt": "(661,):8a23c4c0c4cd7c2d"
+  },
+  "optimize_prep/params_inspection.xlsx": {
+   "EVE_params": "0cb3f41b90949d57",
+   "LCR_NSFR_params": "e2c6a858de047cde",
+   "NII_params": "f3ec6aafea3fee2b",
+   "Overview": "48974559b3cf49f9",
+   "Repricing_params": "bd35100d55709872",
+   "Scenario_deltas_raw": "6f572440ee5a5d16"
+  },
+  "optimize_prep/product_params.npz": {
+   "acq_cost_rate": "(661,):de4514ff5a501f25",
+   "amort_frac_1y": "(661,):a6e6b206e6e5c9a2",
+   "asf_factor": "(661,):e91d58cda5cbebaa",
+   "balance_arr": "(661,):66d58f81ca93540b",
+   "bs_pct_current": "(661,):cf08bee056bcdaa7",
+   "bs_side": "(661,):e3fe2846627eba33",
+   "cet1_target": "(1,):700ae9cadfb18aca",
+   "client_cap": "(661,):4e9bc926f2f8c2bb",
+   "client_floor": "(661,):631169f2dffef4dc",
+   "coc_rate": "(1,):4da7f2c4eb3a5c13",
+   "coeff_a": "(661,):33645ee87a1c485b",
+   "coeff_b": "(661,):ac7f7c9e870ffaa0",
+   "cohort_capital_m": "(661, 12):91afc80a97af6a80",
+   "cohort_capital_remain_m": "(661, 12):37a0a14d865d4db4",
+   "cohort_id": "(661,):d2668f2676e13829",
+   "cohort_interest_yf_m": "(661, 12):f00efdb0d9b0095a",
+   "cohort_locked_rate": "(661,):eb14d03655c3eb47",
+   "cohort_outstanding_m": "(661, 12):4f387d6046249a55",
+   "cohort_t_first_m": "(661,):8d99ecc1b92a1a44",
+   "commit_el": "(1,):d0eb679c0ffbf40d",
+   "commit_lcr_outflow": "(1,):c06d18cf8ac48a4c",
+   "commit_rsf": "(1,):ae12474b35dcbc15",
+   "commit_rwa": "(1,):ccfa737fcd5b20b8",
+   "coupon_rate": "(661,):c4de3666cbb49cbf",
+   "cr_ccy_idx": "(661,):8733190a6c763849",
+   "cr_cf_capital_frac": "(661, 181):0000000000000000",
+   "cr_cf_fixed_int_frac": "(661, 181):40e633adc9fc9cf0",
+   "cr_cf_n_q": "(661,):7531da1da23f0111",
+   "cr_cf_yf": "(661, 181):af44cb8598802f9f",
+   "cr_cohort_disc_q": "(661, 181, 8):3e5d1aef61094dc9",
+   "cr_delta_eve_dur_unit": "(661, 8):dea251883d10e46a",
+   "cr_eve_pv_frac": "(661, 181, 8):fb7d906640ad6069",
+   "cr_rate_matrix": "(661, 12, 8):6d623f9163093d7c",
+   "cr_rate_scenario_ids": "(8,):165836dc9b1c77de",
+   "cr_renewal_rate_matrix": "(661, 12, 8):3cad9118bffd9241",
+   "currency": "(661,):14d00e2e09ce9843",
+   "d_mod": "(661,):0bf2dd681c559631",
+   "delta_eve_unit": "(661, 7):59f9a364a8546735",
+   "delta_nii_unit": "(661, 7):a37a0cb5e9229070",
+   "el_unit": "(661,):f5ed02ec8ab82a60",
+   "eve_pv_factor": "(661,):b9b9cfd54d3adab7",
+   "fee_unit_rate": "(661,):86ad59d68492c515",
+   "gap_reprice_frac_m": "(661, 16):fa8728f55857c354",
+   "hqla_factor": "(661,):a785b5131690824a",
+   "inflow_30d_frac": "(661,):13747abd5d739a4b",
+   "is_cohort": "(661,):ceec25cabbfcf772",
+   "lcr_runoff": "(661,):95fe3fca3da0ffcf",
+   "lgd_rate": "(661,):9c4dba9cde59e854",
+   "nii_unit_rate": "(661,):5b31973eb6da59d1",
+   "nii_unit_rate_new_biz": "(661,):5b31973eb6da59d1",
+   "pd_rate": "(661,):ad73ce22eed19a9c",
+   "product_code": "(661,):36356c8b6cd0ca8d",
+   "product_name": "(661,):fbe1cda3e3b053b5",
+   "rate_type": "(661,):c4e12b5de29323ae",
+   "report_date": "(1,):1e60852bc9c03fa4",
+   "repricing_tenor_m": "(661,):ef3332d9865d4b83",
+   "rsf_factor": "(661,):7b220a703d2524c9",
+   "rwa_factor": "(661,):f6858344205c8b17",
+   "scenario_ids": "(7,):af5ed574204eef56",
+   "sign": "(661,):7af3551823312100",
+   "start_month": "(661,):42e48bb28c91ca8d",
+   "start_year": "(661,):836af3bc4648ed03",
+   "subst_dst_pc": "(7,):0d4004cb0648b0d2",
+   "subst_dst_side": "(7,):99124996c6991609",
+   "subst_rates": "(7,):1c1fd915a3c522d2",
+   "subst_src_pc": "(7,):3834f0d3dec77bcf",
+   "subst_src_side": "(7,):99124996c6991609",
+   "total_assets": "(1,):61cae38c04e68a1c",
+   "vol_elasticity": "(661,):fc65191861c0f549"
+  },
+  "sandbox/scenario_curves.npz": {
+   "cohort_id": "(661,):d2668f2676e13829",
+   "curve_types": "(5,):671c71e0a28119d0",
+   "disc_factors": "(15, 360):55557eff0c2aaf11",
+   "fwd_rates": "(15, 360):93048365f43bb983",
+   "hyp_delta_eve_unit": "(15, 661, 7):88c853105797b1c7",
+   "hyp_delta_nii_unit": "(15, 661, 7):f2adf48ac8b28ff0",
+   "hyp_eve_pv_factor": "(15, 661):3348398419167016",
+   "hyp_nii_unit_rate": "(15, 661):d6e39a0f79399f03",
+   "hyp_shock_ids": "(7,):af5ed574204eef56",
+   "levels": "(3,):adac22d5d745426b",
+   "n_months": "(1,):0ed8198686405a19",
+   "scenario_ids": "(15,):89bd8f2c30836fdb"
+  }
+ },
+ "key_numbers": {
+  "balance_by_product": {
+   "1000/A": {
+    "balance": 4000000000.0,
+    "n": 6301
+   },
+   "1100/A": {
+    "balance": 200000000.0,
+    "n": 316
+   },
+   "2000/A": {
+    "balance": 800000000.0,
+    "n": 11704
+   },
+   "2100/A": {
+    "balance": 100000000.0,
+    "n": 1485
+   },
+   "2200/A": {
+    "balance": 300000000.0,
+    "n": 64982
+   },
+   "3000/A": {
+    "balance": 1800000000.0,
+    "n": 25
+   },
+   "3200/A": {
+    "balance": 500000000.0,
+    "n": 24
+   },
+   "3500/A": {
+    "balance": 100000000.0,
+    "n": 1
+   },
+   "3510/A": {
+    "balance": 400000000.0,
+    "n": 1
+   },
+   "4000/A": {
+    "balance": 600000000.0,
+    "n": 274
+   },
+   "4100/A": {
+    "balance": 700000000.0,
+    "n": 322
+   },
+   "4200/A": {
+    "balance": 300000000.0,
+    "n": 14
+   },
+   "5000/L": {
+    "balance": 1200000000.0,
+    "n": 15
+   },
+   "5100/E": {
+    "balance": 400000000.0,
+    "n": 1
+   },
+   "5300/E": {
+    "balance": 400000000.0,
+    "n": 1
+   },
+   "5400/E": {
+    "balance": 400000000.0,
+    "n": 1
+   },
+   "6000/L": {
+    "balance": 3900000000.0,
+    "n": 39587
+   },
+   "6300/L": {
+    "balance": 400000000.0,
+    "n": 1565
+   },
+   "6350/L": {
+    "balance": 300000000.0,
+    "n": 55
+   },
+   "7060/L": {
+    "balance": 1700000000.0,
+    "n": 41961
+   },
+   "7900/A": {
+    "balance": 200000000.0,
+    "n": 5
+   },
+   "7900/L": {
+    "balance": 400000000.0,
+    "n": 8
+   },
+   "8000/L": {
+    "balance": 900000000.0,
+    "n": 9097
+   }
+  },
+  "fast_metrics": {
+   "eve_base": 1903266078.89,
+   "lcr": 3.781652,
+   "nii_base": 342438708.69,
+   "nsfr": 1.546781,
+   "worst_delta_eve": -135773839.28,
+   "worst_delta_nii": -44986409.38
+  },
+  "irrbb": {
+   "base": {
+    "delta_eve": 0.0,
+    "delta_nii": 0.0,
+    "eve_base": 1903266078.89,
+    "nii_base": 342438708.69,
+    "sot_eve_pct": 0.0,
+    "sot_nii_pct": 0.0
+   },
+   "flat": {
+    "delta_eve": -1732148.15,
+    "delta_nii": 24908287.49,
+    "eve_base": 1903266078.89,
+    "nii_base": 342438708.69,
+    "sot_eve_pct": -0.1443,
+    "sot_nii_pct": 2.0757
+   },
+   "own": {
+    "delta_eve": 76712633.18,
+    "delta_nii": -22081351.43,
+    "eve_base": 1903266078.89,
+    "nii_base": 342438708.69,
+    "sot_eve_pct": 6.3927,
+    "sot_nii_pct": -1.8401
+   },
+   "par_dn": {
+    "delta_eve": 160143595.61,
+    "delta_nii": -44110746.38,
+    "eve_base": 1903266078.89,
+    "nii_base": 342438708.69,
+    "sot_eve_pct": 13.3453,
+    "sot_nii_pct": -3.6759
+   },
+   "par_up": {
+    "delta_eve": -135773835.28,
+    "delta_nii": 44319420.13,
+    "eve_base": 1903266078.89,
+    "nii_base": 342438708.69,
+    "sot_eve_pct": -11.3145,
+    "sot_nii_pct": 3.6933
+   },
+   "sr_dn": {
+    "delta_eve": 45702944.86,
+    "delta_nii": -36647359.24,
+    "eve_base": 1903266078.89,
+    "nii_base": 342438708.69,
+    "sot_eve_pct": 3.8086,
+    "sot_nii_pct": -3.0539
+   },
+   "sr_up": {
+    "delta_eve": -44293501.77,
+    "delta_nii": 36741869.49,
+    "eve_base": 1903266078.89,
+    "nii_base": 342438708.69,
+    "sot_eve_pct": -3.6911,
+    "sot_nii_pct": 3.0618
+   },
+   "steep": {
+    "delta_eve": -19016688.98,
+    "delta_nii": -17168788.89,
+    "eve_base": 1903266078.89,
+    "nii_base": 342438708.69,
+    "sot_eve_pct": -1.5847,
+    "sot_nii_pct": -1.4307
+   }
+  },
+  "liquidity": {
+   "EUR": {
+    "lcr": 3.7817,
+    "nsfr": 1.5468
+   }
+  }
+ },
+ "recorded": "2026-11-14T23:00:09",
+ "report_date": "2026-09-30",
+ "seed": 735191,
+ "sql": {
+  "acct.balance_sheet": {
+   "fingerprint": "9e8e5c86",
+   "rows": 11
+  },
+  "acct.derivatives": {
+   "fingerprint": "43a921e3",
+   "rows": 28
+  },
+  "acct.positions": {
+   "fingerprint": "0618b611",
+   "rows": 23
+  },
+  "acct.scenario_impact": {
+   "fingerprint": "5996b59d",
+   "rows": 6
+  },
+  "bs.models_deposit_ir": {
+   "fingerprint": "9ce14233",
+   "rows": 159
+  },
+  "bs.models_deposit_liq": {
+   "fingerprint": "96318253",
+   "rows": 351
+  },
+  "bs.models_deposit_tdrr": {
+   "fingerprint": "a5680053",
+   "rows": 7
+  },
+  "bs.models_loan": {
+   "fingerprint": "3e663098",
+   "rows": 5829
+  },
+  "bs.models_rate": {
+   "fingerprint": "48fa0641",
+   "rows": 56
+  },
+  "cf.eve_base_scenario": {
+   "fingerprint": "8db78d25",
+   "rows": 645122
+  },
+  "cf.eve_own_scenarios": {
+   "fingerprint": "21a675af",
+   "rows": 3870732
+  },
+  "cf.eve_par_scenarios": {
+   "fingerprint": "f2f02a5c",
+   "rows": 1290244
+  },
+  "cf.eve_short_scenarios": {
+   "fingerprint": "d1feb748",
+   "rows": 1290244
+  },
+  "cf.eve_step_flat_scenarios": {
+   "fingerprint": "161d43d4",
+   "rows": 1290244
+  },
+  "cf.ir_swap_beh": {
+   "fingerprint": "b7543927",
+   "rows": 545
+  },
+  "cf.ir_swap_orig": {
+   "fingerprint": "b7543927",
+   "rows": 545
+  },
+  "cf.nii_base_scenario": {
+   "fingerprint": "b20e90f8",
+   "rows": 84277
+  },
+  "cf.nii_own_scenarios": {
+   "fingerprint": "90223cc2",
+   "rows": 337108
+  },
+  "cf.nii_par_scenarios": {
+   "fingerprint": "0601f06c",
+   "rows": 168554
+  },
+  "cf.products": {
+   "fingerprint": "78ee1c5b",
+   "rows": 895798
+  },
+  "cf.products_liq": {
+   "fingerprint": "dfbecdbc",
+   "rows": 4255
+  },
+  "cf.products_scen": {
+   "fingerprint": "0efa602b",
+   "rows": 1326928
+  },
+  "dbo.transactions": {
+   "fingerprint": "96d17dc3",
+   "rows": 177745
+  },
+  "irrbb.curves": {
+   "fingerprint": "beeffa21",
+   "rows": 21660
+  },
+  "irrbb.eve_results": {
+   "fingerprint": "78c3563b",
+   "rows": 74912
+  },
+  "irrbb.ir_gap_beh": {
+   "fingerprint": "5c40f474",
+   "rows": 204
+  },
+  "irrbb.ir_gap_beh_a": {
+   "fingerprint": "2e233ff0",
+   "rows": 577
+  },
+  "irrbb.ir_gap_orig": {
+   "fingerprint": "41245cda",
+   "rows": 155
+  },
+  "irrbb.ir_swap_gap_beh": {
+   "fingerprint": "ef979c1b",
+   "rows": 70
+  },
+  "irrbb.irrbb_report": {
+   "fingerprint": "2712cf93",
+   "rows": 7
+  },
+  "irrbb.liq_gap_beh": {
+   "fingerprint": "4ea2cff9",
+   "rows": 257
+  },
+  "irrbb.liq_gap_orig": {
+   "fingerprint": "29094c4e",
+   "rows": 395
+  },
+  "irrbb.nii_results": {
+   "fingerprint": "f39729f7",
+   "rows": 57408
+  },
+  "irrbb.nii_results_bucket": {
+   "fingerprint": "9ab01a67",
+   "rows": 56
+  },
+  "mkt.curves": {
+   "fingerprint": "30180792",
+   "rows": 344755
+  },
+  "mkt.fixings": {
+   "fingerprint": "2af00000",
+   "rows": 100566
+  },
+  "opt_prep.ftp_rates": {
+   "fingerprint": "b1e6e718",
+   "rows": 661
+  },
+  "opt_prep.monthly_curves": {
+   "fingerprint": "8eda4651",
+   "rows": 17280
+  },
+  "opt_prep.product_params": {
+   "fingerprint": "0a593416",
+   "rows": 661
+  },
+  "opt_prep.product_scenario_params": {
+   "fingerprint": "175dd4a4",
+   "rows": 4627
+  },
+  "results.commitment_drawdowns": {
+   "fingerprint": "00000000",
+   "rows": 48
+  },
+  "results.irrbb_report": {
+   "fingerprint": "f535dc58",
+   "rows": 8
+  },
+  "results.lcr_nsfr": {
+   "fingerprint": "2b563682",
+   "rows": 1
+  },
+  "results.liq_p2_buffer": {
+   "fingerprint": "ced2e231",
+   "rows": 7
+  },
+  "results.liq_p2_concentration": {
+   "fingerprint": "f9f333e2",
+   "rows": 13
+  },
+  "results.liq_p2_summary": {
+   "fingerprint": "a6468fdb",
+   "rows": 15
+  },
+  "results.liq_p2_survival": {
+   "fingerprint": "a531e195",
+   "rows": 731
+  },
+  "results.liq_p2_top_depositors": {
+   "fingerprint": "621ddc85",
+   "rows": 10
+  },
+  "results.liq_p2_wholesale_maturity": {
+   "fingerprint": "00316000",
+   "rows": 4
+  },
+  "sched.deposits": {
+   "fingerprint": "6ec15dc4",
+   "rows": 142
+  },
+  "sched.fin_inst": {
+   "fingerprint": "be975177",
+   "rows": 37
+  },
+  "sched.ir_swaps": {
+   "fingerprint": "398be09e",
+   "rows": 56
+  },
+  "sched.loans": {
+   "fingerprint": "5759597b",
+   "rows": 6779
+  },
+  "schemat.commitments": {
+   "fingerprint": "54fced53",
+   "rows": 3
+  },
+  "schemat.deposits": {
+   "fingerprint": "0780b1b8",
+   "rows": 92278
+  },
+  "schemat.equity": {
+   "fingerprint": "9a377d45",
+   "rows": 3
+  },
+  "schemat.financial_instruments": {
+   "fingerprint": "e8f8b4e2",
+   "rows": 66
+  },
+  "schemat.ir_swaps": {
+   "fingerprint": "e39b0609",
+   "rows": 56
+  },
+  "schemat.loans": {
+   "fingerprint": "feaf8024",
+   "rows": 85398
+  }
+ }
+}

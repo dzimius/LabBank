@@ -10,8 +10,8 @@ the discount factors and derived annualised forward rates.
 Outputs
 -------
   SQL: opt_prep.monthly_curves      — 360 rows × n_scenarios × n_currencies
-  File: optimize_prep/output/curve_tensors.npz  — numpy tensor for hot path
-  File: optimize_prep/output/curves_inspection.xlsx — human-readable grid
+  File: runs/<bank>/optimize_prep/curve_tensors.npz  — numpy tensor for hot path
+  File: runs/<bank>/optimize_prep/curves_inspection.xlsx — human-readable grid
 """
 from __future__ import annotations
 
@@ -19,6 +19,10 @@ import os
 import numpy as np
 import pandas as pd
 from sqlalchemy import text
+import sys
+sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")))
+from labbank_common.bank_config import get_bank
+BANK_OUT_DIR = str(get_bank().output_dir("optimize_prep"))   # runs/<bank_id>/optimize_prep
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.join(BASE_DIR, "..", "..")
@@ -27,15 +31,15 @@ import sql_setup as opt_sql
 
 engine = opt_sql.engine
 
-REPORT_DATE  = pd.to_datetime("2026-06-30")
+REPORT_DATE  = pd.Timestamp(get_bank().report_date)
 N_MONTHS     = 360
-NPZ_OUT      = os.path.join(BASE_DIR, "..", "output", "curve_tensors.npz")
-EXCEL_OUT    = os.path.join(BASE_DIR, "..", "output", "curves_inspection.xlsx")
+NPZ_OUT      = os.path.join(BANK_OUT_DIR, "curve_tensors.npz")
+EXCEL_OUT    = os.path.join(BANK_OUT_DIR, "curves_inspection.xlsx")
 
 DISC_CURVE_MAP = {
     "PLN": "PLN_disc_curve",
     "EUR": "EUR_disc_curve",
-    "USD": "USD_disc_curve",
+    "USD": "USD_disc_curve", "GBP": "GBP_disc_curve",
 }
 
 # Month labels used in Excel (1M, 2M, ... 12M, 18M, 24M, ... 30Y)
@@ -98,6 +102,7 @@ def build_curve_tensors() -> None:
     n_scen = len(scenario_ids)
     n_ccy  = len(currencies)
 
+    _multi_curve = curves_df["curve_name"].str.contains("_fwd_curve_").any()
     disc_tensor = np.ones((n_scen, n_ccy, N_MONTHS), dtype=float)
     fwd_tensor  = np.zeros((n_scen, n_ccy, N_MONTHS), dtype=float)
 
@@ -113,6 +118,12 @@ def build_curve_tensors() -> None:
             disc = _interpolate_to_monthly(
                 ccy_df["n_days"], ccy_df["d_f"], N_MONTHS)
             fwd  = _disc_to_fwd(disc)
+            # multi-curve bank: forwards from the currency's projection curve (IBOR), discount
+            # factors from the discount curve (OIS) -- labbank_common/curves.py
+            if _multi_curve:
+                p_df = scen_df[scen_df["curve_name"] == f"{ccy}_fwd_curve"].sort_values("n_days")
+                if not p_df.empty:
+                    fwd = _disc_to_fwd(_interpolate_to_monthly(p_df["n_days"], p_df["d_f"], N_MONTHS))
             disc_tensor[s_idx, c_idx] = disc
             fwd_tensor[s_idx, c_idx]  = fwd
         print(f"  Interpolated scenario: {scen}")

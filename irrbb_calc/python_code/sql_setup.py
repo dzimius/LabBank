@@ -1,19 +1,24 @@
 from __future__ import annotations
 
+import os
+import sys
 import pandas as pd
-from sqlalchemy import create_engine, text, Table, Column, String, Date, MetaData
+from sqlalchemy import text, Table, Column, String, Date, MetaData
 from sqlalchemy.dialects.mssql import DECIMAL
 
 import config
 from nii_calc_objects import _apply_rt_limits
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))   # sibling fixing_engine
+import fixing_engine as fe  # noqa: E402
+from labbank_common.curves import forward_rate, renew_months  # noqa: E402
+from labbank_common.rate_models import nmd_product_codes  # noqa: E402
 
-engine = create_engine(
-    "mssql+pyodbc://maciek_d/bank_gen"
-    "?driver=ODBC+Driver+17+for+SQL+Server"
-    "&Trusted_Connection=yes",
-    fast_executemany=True,
-    future=True,
-)
+sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')))
+from labbank_common.bank_config import get_engine
+from labbank_common import run_store  # noqa: E402  history per (report_date, run_id), docs/04
+
+engine = get_engine()   # active bank's database (LABBANK_BANK, default eur)
 
 metadata = MetaData(schema=None)
 
@@ -91,7 +96,7 @@ def load_ir_gap_beh() -> pd.DataFrame:
     Columns: currency, bs_side, tenor_bucket, cf_end_dt, gap_cf, gap_cf_ca, gap_cf_irs.
       gap_cf     — total balance-sheet gap (loans + deposits + bonds incl. CA), NO IRS
       gap_cf_ca  — current-account portion of gap_cf (for 0%-floor in down shock)
-      gap_cf_irs — IRS gap (added by irs_workflow; 0 if irs_workflow not yet run)
+      gap_cf_irs — IRS gap (added by swap_workflow; 0 if not yet run)
     """
     query = text("""
         SELECT currency, bs_side, tenor_bucket,
@@ -119,8 +124,22 @@ def load_mkt_curves(report_date: pd.Timestamp) -> pd.DataFrame:
     return pd.read_sql_query(query, engine, params={"rd": report_date})
 
 
-def load_beh_schedules(report_date: pd.Timestamp, horizon_end: pd.Timestamp) -> pd.DataFrame:
+_BEH_TABLES = {"products": "", "products_scen": "p.gamma,"}
+
+
+def _beh_table(table: str) -> tuple[str, str]:
+    """(table name, extra select) for the baseline or scenario-variant CF table."""
+    if table not in _BEH_TABLES:
+        raise ValueError(f"table must be one of {list(_BEH_TABLES)}")
+    return table, _BEH_TABLES[table]
+
+
+def load_beh_schedules(report_date: pd.Timestamp, horizon_end: pd.Timestamp,
+                       table: str = "products") -> pd.DataFrame:
     """Load behavioral CF schedules for all products within (report_date, horizon_end].
+
+    table='products_scen' loads the EBA scenario variants instead (same columns + gamma);
+    combine with labbank_common.irrbb_behaviour.apply_variant per scenario.
 
     Queries cf.products (beh_* columns), joins sched.* for rate_type.
     Returns unified DataFrame with source column ('loans', 'deposits', 'fin_inst').
@@ -135,15 +154,22 @@ def load_beh_schedules(report_date: pd.Timestamp, horizon_end: pd.Timestamp) -> 
                    fixed  → int_pmt / (outstanding_bal * cf_yf)  i.e. contracted rate
                    float  → fwd_rt  (market forward rate, with floor applied upstream)
     """
+    tbl, extra = _beh_table(table)
     query = text("""
         WITH sched_rt AS (
-            SELECT schedule_id, ISNULL(rate_type, 'V') AS rate_type, 'L' AS product_type
+            SELECT schedule_id, ISNULL(rate_type, 'V') AS rate_type, 'L' AS product_type,
+                   CAST(fixing_freq AS VARCHAR(8)) AS fixing_freq,
+                   DATEDIFF(month, start_date, maturity_date) AS term_months
             FROM sched.loans
             UNION ALL
-            SELECT schedule_id, ISNULL(rate_type, 'V') AS rate_type, 'D' AS product_type
+            SELECT schedule_id, ISNULL(rate_type, 'V') AS rate_type, 'D' AS product_type,
+                   CAST(fixing_freq AS VARCHAR(8)) AS fixing_freq,
+                   DATEDIFF(month, start_date, maturity_date) AS term_months
             FROM sched.deposits
             UNION ALL
-            SELECT schedule_id, ISNULL(rate_type, 'F') AS rate_type, 'F' AS product_type
+            SELECT schedule_id, ISNULL(rate_type, 'F') AS rate_type, 'F' AS product_type,
+                   CAST(fixing_freq AS VARCHAR(8)) AS fixing_freq,
+                   DATEDIFF(month, start_date, maturity_date) AS term_months
             FROM sched.fin_inst
         )
         SELECT
@@ -158,6 +184,8 @@ def load_beh_schedules(report_date: pd.Timestamp, horizon_end: pd.Timestamp) -> 
             p.bs_side,
             p.currency,
             p.fixing_dt,
+            r.fixing_freq,
+            r.term_months,
             p.cf_start_dt,
             p.cf_end_dt,
             p.cf_yf,
@@ -167,21 +195,30 @@ def load_beh_schedules(report_date: pd.Timestamp, horizon_end: pd.Timestamp) -> 
             p.beh_capital_pmt                    AS capital_pmt,
             ISNULL(p.prepayment_pmt, 0.0)        AS prepayment_pmt,
             p.beh_interest_pmt                   AS int_pmt,
+            {extra}
             ISNULL(r.rate_type,
                    CASE p.product_type WHEN 'F' THEN 'F' ELSE 'V' END
             )                                    AS rate_type
-        FROM cf.products p
+        FROM cf.{tbl} p
         LEFT JOIN sched_rt r
             ON r.schedule_id = p.schedule_id
            AND r.product_type = p.product_type
         WHERE p.cf_end_dt > :rd
-          AND p.cf_end_dt <= :he
+          AND p.cf_start_dt < :he
           AND COALESCE(p.beh_total_pmt, 0) <> 0
         OPTION (MAXDOP 1)
-    """)
+    """.format(tbl=tbl, extra=extra))
     df = pd.read_sql_query(query, engine, params={"rd": report_date, "he": horizon_end})
     df["cf_start_dt"] = pd.to_datetime(df["cf_start_dt"])
     df["cf_end_dt"]   = pd.to_datetime(df["cf_end_dt"])
+    # repricing period a renewed contract keeps (constant-balance renewal, curves.renewal_market_rate)
+    df["renew_months"] = renew_months(df["fixing_freq"], df["rate_type"], df["term_months"])
+    # every coupon period overlapping the horizon (cf_start_dt < horizon end), with the
+    # share accrued inside it (fixing_engine.horizon_accrual) -- NII = income EARNED in the
+    # year, not coupons PAID in it; and post-reset coupons of fixed products are floating
+    fe.add_horizon_accrual(df, report_date, horizon_end)
+    # post-reset coupons float; NMD outstanding keeps today's rate (IR profile = repricing)
+    df["rate_type"] = fe.effective_rate_type(df, report_date, nmd_product_codes(engine, report_date))
 
     # eff_rate: actual client rate = int_pmt / (outstanding * cf_yf) for all products.
     # For fixed products this is the contracted rate (locked at origination).
@@ -220,11 +257,11 @@ def load_swap_beh_schedules(report_date: pd.Timestamp, horizon_end: pd.Timestamp
             b.capital_pmt,
             0.0                                                AS prepayment_pmt,
             b.int_pmt,
-            CASE s.leg_type WHEN 'FIXED' THEN 'F' ELSE 'V' END AS rate_type
+            CASE s.leg_type WHEN 'FLOAT' THEN 'V' ELSE 'F' END AS rate_type
         FROM cf.ir_swap_beh b
         JOIN sched.ir_swaps s ON CAST(s.schedule_id AS VARCHAR(8)) = CAST(b.schedule_id AS VARCHAR(8))
         WHERE b.cf_end_dt > :rd
-          AND b.cf_end_dt <= :he
+          AND b.cf_start_dt < :he
           AND ISNULL(b.total_pmt, 0) <> 0
     """)
     df = pd.read_sql_query(query, engine, params={"rd": report_date, "he": horizon_end})
@@ -232,6 +269,7 @@ def load_swap_beh_schedules(report_date: pd.Timestamp, horizon_end: pd.Timestamp
         return df
     df["cf_start_dt"] = pd.to_datetime(df["cf_start_dt"])
     df["cf_end_dt"]   = pd.to_datetime(df["cf_end_dt"])
+    fe.add_horizon_accrual(df, report_date, horizon_end)      # as load_beh_schedules
 
     denom = df["outstanding_bal"].fillna(0.0) * df["cf_yf"].fillna(0.0)
     contracted_rate = (
@@ -272,11 +310,8 @@ def load_eve_summary(report_date: pd.Timestamp) -> pd.DataFrame:
 
 
 def reset_nii_results() -> None:
-    """Drop and recreate irrbb.nii_results."""
-    with engine.begin() as conn:
-        conn.execute(text("DROP TABLE IF EXISTS irrbb.nii_results"))
-    with engine.begin() as conn:
-        metadata.create_all(bind=conn, tables=[NiiResults], checkfirst=False)
+    """Clear this run's rows of irrbb.nii_results (created when missing; history kept)."""
+    run_store.reset_table(engine, "nii_results", "irrbb", run_store.sa_create(metadata, NiiResults))
 
 
 def write_nii_results(df: pd.DataFrame, report_date: pd.Timestamp) -> None:
@@ -290,12 +325,15 @@ def write_nii_results(df: pd.DataFrame, report_date: pd.Timestamp) -> None:
         if c not in out.columns:
             out[c] = None
     out = out[cols].where(pd.notnull(out[cols]), None)
+    out = run_store.stamp(out, run_store.current_run())
     out.to_sql("nii_results", engine, schema="irrbb",
                if_exists="append", index=False, chunksize=10_000)
 
 
-def load_all_beh_schedules(report_date: pd.Timestamp) -> pd.DataFrame:
+def load_all_beh_schedules(report_date: pd.Timestamp, table: str = "products") -> pd.DataFrame:
     """Load ALL behavioral CF schedules beyond report_date (no horizon cutoff).
+
+    table='products_scen' loads the EBA scenario variants (same columns + gamma).
 
     Used for EVE calculation (run-off mode — existing book only, no renewal).
     Same column layout as load_beh_schedules() plus base_df (discount factor
@@ -308,15 +346,22 @@ def load_all_beh_schedules(report_date: pd.Timestamp) -> pd.DataFrame:
     outstanding_bal, capital_pmt, prepayment_pmt, int_pmt,
     rate_type, eff_rate
     """
+    tbl, extra = _beh_table(table)
     query = text("""
         WITH sched_rt AS (
-            SELECT schedule_id, ISNULL(rate_type, 'V') AS rate_type, 'L' AS product_type
+            SELECT schedule_id, ISNULL(rate_type, 'V') AS rate_type, 'L' AS product_type,
+                   CAST(fixing_freq AS VARCHAR(8)) AS fixing_freq,
+                   DATEDIFF(month, start_date, maturity_date) AS term_months
             FROM sched.loans
             UNION ALL
-            SELECT schedule_id, ISNULL(rate_type, 'V') AS rate_type, 'D' AS product_type
+            SELECT schedule_id, ISNULL(rate_type, 'V') AS rate_type, 'D' AS product_type,
+                   CAST(fixing_freq AS VARCHAR(8)) AS fixing_freq,
+                   DATEDIFF(month, start_date, maturity_date) AS term_months
             FROM sched.deposits
             UNION ALL
-            SELECT schedule_id, ISNULL(rate_type, 'F') AS rate_type, 'F' AS product_type
+            SELECT schedule_id, ISNULL(rate_type, 'F') AS rate_type, 'F' AS product_type,
+                   CAST(fixing_freq AS VARCHAR(8)) AS fixing_freq,
+                   DATEDIFF(month, start_date, maturity_date) AS term_months
             FROM sched.fin_inst
         )
         SELECT
@@ -331,6 +376,8 @@ def load_all_beh_schedules(report_date: pd.Timestamp) -> pd.DataFrame:
             p.bs_side,
             p.currency,
             p.fixing_dt,
+            r.fixing_freq,
+            r.term_months,
             p.cf_start_dt,
             p.cf_end_dt,
             p.cf_yf,
@@ -341,20 +388,24 @@ def load_all_beh_schedules(report_date: pd.Timestamp) -> pd.DataFrame:
             p.beh_capital_pmt                            AS capital_pmt,
             ISNULL(p.prepayment_pmt, 0.0)                AS prepayment_pmt,
             p.beh_interest_pmt                           AS int_pmt,
+            {extra}
             ISNULL(r.rate_type,
                    CASE p.product_type WHEN 'F' THEN 'F' ELSE 'V' END
             )                                            AS rate_type
-        FROM cf.products p
+        FROM cf.{tbl} p
         LEFT JOIN sched_rt r
             ON r.schedule_id = p.schedule_id
            AND r.product_type = p.product_type
         WHERE p.cf_end_dt > :rd
           AND COALESCE(p.beh_total_pmt, 0) <> 0
         OPTION (MAXDOP 1)
-    """)
+    """.format(tbl=tbl, extra=extra))
     df = pd.read_sql_query(query, engine, params={"rd": report_date})
     df["cf_start_dt"] = pd.to_datetime(df["cf_start_dt"])
     df["cf_end_dt"]   = pd.to_datetime(df["cf_end_dt"])
+    df["renew_months"] = renew_months(df["fixing_freq"], df["rate_type"], df["term_months"])
+    # post-reset coupons float; NMD outstanding keeps today's rate (IR profile = repricing)
+    df["rate_type"] = fe.effective_rate_type(df, report_date, nmd_product_codes(engine, report_date))
 
     # eff_rate: F=fixed → contracted rate (int_pmt / (outstanding * cf_yf))
     #           V=variable → fwd_rt (market index rate; margin preserved via reporting, not shock calc)
@@ -366,6 +417,24 @@ def load_all_beh_schedules(report_date: pd.Timestamp) -> pd.DataFrame:
     mask_fixed = df["rate_type"] == "F"
     df.loc[mask_fixed, "eff_rate"] = contracted_rate[mask_fixed]
     return df
+
+
+def load_beh_variants(report_date: pd.Timestamp,
+                      horizon_end: pd.Timestamp | None = None) -> pd.DataFrame:
+    """Scenario-variant CF rows (cf.products_scen) in the beh-loader layout + gamma.
+
+    horizon_end=None -> run-off layout of load_all_beh_schedules (EVE), else the
+    horizon-cut layout of load_beh_schedules (NII).  Returns an empty frame (with a
+    warning) when the table is missing -- every scenario then keeps baseline behaviour.
+    """
+    try:
+        if horizon_end is None:
+            return load_all_beh_schedules(report_date, table="products_scen")
+        return load_beh_schedules(report_date, horizon_end, table="products_scen")
+    except Exception as exc:
+        print(f"WARNING: cf.products_scen not loaded ({type(exc).__name__}) -- EBA CPR/TDRR "
+              "scenario multipliers NOT applied; rerun cash_flow_calc.")
+        return pd.DataFrame()
 
 
 def load_all_swap_beh_schedules(report_date: pd.Timestamp) -> pd.DataFrame:
@@ -391,7 +460,7 @@ def load_all_swap_beh_schedules(report_date: pd.Timestamp) -> pd.DataFrame:
             b.capital_pmt,
             0.0                                                AS prepayment_pmt,
             b.int_pmt,
-            CASE s.leg_type WHEN 'FIXED' THEN 'F' ELSE 'V' END AS rate_type
+            CASE s.leg_type WHEN 'FLOAT' THEN 'V' ELSE 'F' END AS rate_type
         FROM cf.ir_swap_beh b
         JOIN sched.ir_swaps s ON CAST(s.schedule_id AS VARCHAR(8)) = CAST(b.schedule_id AS VARCHAR(8))
         WHERE b.cf_end_dt > :rd
@@ -414,11 +483,8 @@ def load_all_swap_beh_schedules(report_date: pd.Timestamp) -> pd.DataFrame:
 
 
 def reset_eve_results() -> None:
-    """Drop and recreate irrbb.eve_results."""
-    with engine.begin() as conn:
-        conn.execute(text("DROP TABLE IF EXISTS irrbb.eve_results"))
-    with engine.begin() as conn:
-        metadata.create_all(bind=conn, tables=[EveResults], checkfirst=False)
+    """Clear this run's rows of irrbb.eve_results (created when missing; history kept)."""
+    run_store.reset_table(engine, "eve_results", "irrbb", run_store.sa_create(metadata, EveResults))
 
 
 def write_eve_results(df: pd.DataFrame, report_date: pd.Timestamp) -> None:
@@ -432,16 +498,14 @@ def write_eve_results(df: pd.DataFrame, report_date: pd.Timestamp) -> None:
         if c not in out.columns:
             out[c] = None
     out = out[cols].where(pd.notnull(out[cols]), None)
+    out = run_store.stamp(out, run_store.current_run())
     out.to_sql("eve_results", engine, schema="irrbb",
                if_exists="append", index=False, chunksize=10_000)
 
 
 def reset_irrbb_report() -> None:
-    """Drop and recreate irrbb.irrbb_report."""
-    with engine.begin() as conn:
-        conn.execute(text("DROP TABLE IF EXISTS irrbb.irrbb_report"))
-    with engine.begin() as conn:
-        metadata.create_all(bind=conn, tables=[IrrbbReport], checkfirst=False)
+    """Clear this run's rows of irrbb.irrbb_report (created when missing; history kept)."""
+    run_store.reset_table(engine, "irrbb_report", "irrbb", run_store.sa_create(metadata, IrrbbReport))
 
 
 def upsert_irrbb_report(
@@ -461,9 +525,10 @@ def upsert_irrbb_report(
     if mode == "nii":
         merge_sql = text("""
             MERGE irrbb.irrbb_report AS t
-            USING (VALUES (:rd, :sid, :ccy, :delta_nii, :sot_nii_pct, :delta_nii_reg, :sot_nii_pct_reg))
-                AS s(report_date, scenario_id, currency, delta_nii, sot_nii_pct, delta_nii_reg, sot_nii_pct_reg)
+            USING (VALUES (:rd, :run, :sid, :ccy, :delta_nii, :sot_nii_pct, :delta_nii_reg, :sot_nii_pct_reg))
+                AS s(report_date, run_id, scenario_id, currency, delta_nii, sot_nii_pct, delta_nii_reg, sot_nii_pct_reg)
             ON  t.report_date = s.report_date
+            AND t.run_id      = s.run_id
             AND t.scenario_id = s.scenario_id
             AND t.currency    = s.currency
             WHEN MATCHED THEN
@@ -472,13 +537,14 @@ def upsert_irrbb_report(
                            t.delta_nii_reg   = s.delta_nii_reg,
                            t.sot_nii_pct_reg = s.sot_nii_pct_reg
             WHEN NOT MATCHED THEN
-                INSERT (report_date, scenario_id, currency, delta_nii, sot_nii_pct, delta_nii_reg, sot_nii_pct_reg)
-                VALUES (s.report_date, s.scenario_id, s.currency, s.delta_nii, s.sot_nii_pct, s.delta_nii_reg, s.sot_nii_pct_reg);
+                INSERT (report_date, run_id, scenario_id, currency, delta_nii, sot_nii_pct, delta_nii_reg, sot_nii_pct_reg)
+                VALUES (s.report_date, s.run_id, s.scenario_id, s.currency, s.delta_nii, s.sot_nii_pct, s.delta_nii_reg, s.sot_nii_pct_reg);
         """)
         with engine.begin() as conn:
             for _, row in df.iterrows():
                 conn.execute(merge_sql, {
                     "rd":              report_date,
+                    "run":             run_store.current_run().run_id,
                     "sid":             row["scenario_id"],
                     "ccy":             row["currency"],
                     "delta_nii":       float(row["delta_nii"])       if pd.notna(row.get("delta_nii"))       else None,
@@ -490,9 +556,10 @@ def upsert_irrbb_report(
     elif mode == "eve":
         merge_sql = text("""
             MERGE irrbb.irrbb_report AS t
-            USING (VALUES (:rd, :sid, :ccy, :delta_eve, :sot_eve_pct, :delta_eve_reg, :sot_eve_pct_reg))
-                AS s(report_date, scenario_id, currency, delta_eve, sot_eve_pct, delta_eve_reg, sot_eve_pct_reg)
+            USING (VALUES (:rd, :run, :sid, :ccy, :delta_eve, :sot_eve_pct, :delta_eve_reg, :sot_eve_pct_reg))
+                AS s(report_date, run_id, scenario_id, currency, delta_eve, sot_eve_pct, delta_eve_reg, sot_eve_pct_reg)
             ON  t.report_date = s.report_date
+            AND t.run_id      = s.run_id
             AND t.scenario_id = s.scenario_id
             AND t.currency    = s.currency
             WHEN MATCHED THEN
@@ -501,13 +568,14 @@ def upsert_irrbb_report(
                            t.delta_eve_reg   = s.delta_eve_reg,
                            t.sot_eve_pct_reg = s.sot_eve_pct_reg
             WHEN NOT MATCHED THEN
-                INSERT (report_date, scenario_id, currency, delta_eve, sot_eve_pct, delta_eve_reg, sot_eve_pct_reg)
-                VALUES (s.report_date, s.scenario_id, s.currency, s.delta_eve, s.sot_eve_pct, s.delta_eve_reg, s.sot_eve_pct_reg);
+                INSERT (report_date, run_id, scenario_id, currency, delta_eve, sot_eve_pct, delta_eve_reg, sot_eve_pct_reg)
+                VALUES (s.report_date, s.run_id, s.scenario_id, s.currency, s.delta_eve, s.sot_eve_pct, s.delta_eve_reg, s.sot_eve_pct_reg);
         """)
         with engine.begin() as conn:
             for _, row in df.iterrows():
                 conn.execute(merge_sql, {
                     "rd":              report_date,
+                    "run":             run_store.current_run().run_id,
                     "sid":             row["scenario_id"],
                     "ccy":             row["currency"],
                     "delta_eve":       float(row["delta_eve"])       if pd.notna(row.get("delta_eve"))       else None,
@@ -526,12 +594,9 @@ def _ensure_results_schema() -> None:
 
 
 def reset_results_irrbb_report() -> None:
-    """Drop and recreate results.irrbb_report (base + shocked absolute values)."""
+    """Clear this run's rows of results.irrbb_report (base + shocked absolute values; history kept)."""
     _ensure_results_schema()
-    with engine.begin() as conn:
-        conn.execute(text("DROP TABLE IF EXISTS results.irrbb_report"))
-    with engine.begin() as conn:
-        _results_metadata.create_all(bind=conn, tables=[ResultsIrrbbReport], checkfirst=False)
+    run_store.reset_table(engine, "irrbb_report", "results", run_store.sa_create(_results_metadata, ResultsIrrbbReport))
 
 
 def write_results_irrbb_report(df: pd.DataFrame) -> None:
@@ -544,6 +609,7 @@ def write_results_irrbb_report(df: pd.DataFrame) -> None:
         if c not in out.columns:
             out[c] = None
     out = out[cols].where(pd.notnull(out[cols]), None)
+    out = run_store.stamp(out, run_store.current_run())
     out.to_sql("irrbb_report", engine, schema="results",
                if_exists="append", index=False, chunksize=10_000)
 
@@ -630,11 +696,18 @@ def reset_shocked_cf_products(table_name: str, table_type: str = "eve") -> None:
                 pv_interest      DECIMAL(18, 2)  NULL"""
 
     with engine.begin() as conn:
-        conn.execute(text(
-            f"IF OBJECT_ID('cf.{table_name}', 'U') IS NOT NULL DROP TABLE cf.[{table_name}]"
-        ))
+        exists = conn.execute(text(f"SELECT OBJECT_ID('cf.{table_name}', 'U')")).scalar() is not None
+    if exists and os.environ.get(run_store.REBUILD_ENV) == "1":
+        with engine.begin() as conn:
+            conn.execute(text(f"DROP TABLE cf.[{table_name}]"))
+        exists = False
+    if exists:                                   # history kept: only this run's rows go (docs/04)
+        run_store.reset_table(engine, table_name, "cf")
+        return
+    with engine.begin() as conn:
         conn.execute(text(f"""
             CREATE TABLE cf.[{table_name}] (
+                run_id           VARCHAR(20)     NOT NULL,
                 report_date      DATE            NOT NULL,
                 scenario_id      VARCHAR(10)     NOT NULL,
                 source           VARCHAR(10)     NOT NULL,
@@ -851,26 +924,11 @@ def write_shocked_cf_products(
             #   (fixing_dt → max(cf_end_dt) within (schedule_id, fixing_dt) group)
             # so that base and shocked renewal use the same period boundaries.
             # All other rows: individual CF period (cf_start_dt → cf_end_dt).
-            _period_start = out["cf_start_dt"].copy()
-            _period_end   = out["cf_end_dt"].copy()
+            # fixing block of floating rows (fixing_engine.block_periods: accrual start ->
+            # block end, index day basis), own coupon period otherwise
             _rate_type_fb = out.get("rate_type", pd.Series("V", index=out.index))
-            if "fixing_dt" in out.columns and "schedule_id" in out.columns:
-                _mask_var_fix = (
-                    _future_base_mask
-                    & (_rate_type_fb == "V")
-                    & out["fixing_dt"].notna()
-                )
-                if _mask_var_fix.any():
-                    _period_start.loc[_mask_var_fix] = pd.to_datetime(
-                        out.loc[_mask_var_fix, "fixing_dt"]
-                    )
-                    _period_end.loc[_mask_var_fix] = (
-                        out.loc[_mask_var_fix]
-                        .groupby(["schedule_id", "fixing_dt"])["cf_end_dt"]
-                        .transform("max")
-                    )
-
-            _cf_yf_period = (_period_end - _period_start).dt.days / 365.0
+            _period_start, _period_end, _cf_yf_period = fe.block_periods(
+                out, mask=_future_base_mask & (_rate_type_fb == "V"))
             _valid_fb = _future_base_mask & (_cf_yf_period > 0)
             if _valid_fb.any():
                 _d_f_start_fb = pd.Series(0.0, index=out.index)
@@ -904,12 +962,9 @@ def write_shocked_cf_products(
                 if _fb_ren_valid.any():
                     _fwd_ren[_fb_ren_valid] = np.maximum(
                         0.0,
-                        (
-                            _d_f_start_fb.to_numpy()[_fb_ren_valid]
-                            / _d_f_end_fb.to_numpy()[_fb_ren_valid]
-                            - 1.0
-                        )
-                        / _cf_yf_period.to_numpy()[_fb_ren_valid],
+                        forward_rate(_d_f_start_fb.to_numpy()[_fb_ren_valid],
+                                     _d_f_end_fb.to_numpy()[_fb_ren_valid],
+                                     _cf_yf_period.to_numpy()[_fb_ren_valid]),
                     )
 
         # ren_client_rt: per-product linear transform of fwd_rt at renewal
@@ -917,15 +972,23 @@ def write_shocked_cf_products(
         # Same transform used by compute_nii_base_schedule / compute_nii_shocked_schedule
         # (b = product spread, else the contract's own margin; A products follow the
         # same rate-model formula -- current accounts have beta=0 → 0%).
+        # Renewal rate: the shared definition (nii_calc_objects.renewal_forward -- forward from
+        # cf_end_dt to the horizon end on THIS table's curve), identical to irrbb.nii_results.
+        # _fwd_ren above is still used for the base interest override below.
+        if shocked_disc_df is not None and disc_curve_map is not None:
+            from nii_calc_objects import renewal_forward
+            _ren_fwd = renewal_forward(out, shocked_disc_df, disc_curve_map, horizon_end, 0.0)
+        else:
+            _ren_fwd = _fwd_ren
         if "product_code" in out.columns:
             _ren_rt = _apply_rt_limits(
-                _fwd_ren, out["product_code"],
+                _ren_fwd, out["product_code"],
                 caps_map=caps_map, floors_map=floors_map,
                 coeff_a_map=coeff_a_map, coeff_b_map=coeff_b_map,
                 contract_margin=_contract_margin,
             )
         else:
-            _ren_rt = _fwd_ren.copy()
+            _ren_rt = np.asarray(_ren_fwd, dtype=float).copy()
         out["ren_client_rt"] = _ren_rt
 
         # ── client_rt override for future-start variable base CFs ────────────────
@@ -939,7 +1002,7 @@ def write_shocked_cf_products(
         # Fix: apply the same stable-margin formula using the base market forward
         # (held in _fwd_ren for these rows after the future-base block above).
         # After this override, delta_nii_interest ≈ balance × shock × yf × sign.
-        if shocked_disc_df is not None:
+        if shocked_disc_df is not None and "nii_rate_consistent" not in out.columns:
             _fb_var_int_mask = _future_base_mask & (_rate_type == "V")
             if _fb_var_int_mask.any() and "product_code" in out.columns:
                 out.loc[_fb_var_int_mask, "client_rt"] = _apply_rt_limits(
@@ -961,6 +1024,7 @@ def write_shocked_cf_products(
             out.get("outstanding_bal", pd.Series(0.0, index=out.index)).fillna(0.0)
             * out["client_rt"]
             * out.get("cf_yf", pd.Series(0.0, index=out.index)).fillna(0.0)
+            * out.get("accr_frac", pd.Series(1.0, index=out.index)).fillna(1.0)  # earned in horizon
             * sign
         )
         out["nii_renewal"] = cap_total * out["ren_client_rt"] * out["remain_yf"] * sign
@@ -1024,6 +1088,7 @@ def write_shocked_cf_products(
     else:
         table_cols = _common_cols + ["pv_capital", "pv_interest"]
     out = out[[c for c in table_cols if c in out.columns]]
+    out = run_store.stamp(out, run_store.current_run())
     out.to_sql(table_name, engine, schema="cf",
                if_exists="append", index=False, chunksize=10_000)
 

@@ -53,8 +53,10 @@
 \setbeamertemplate{footline}[frame number]
 
 % ── Convenience macros ────────────────────────────────────────────────────────
+% shared diagrams (beamer_assets/) first, then the generated charts of the bank this deck shows
+\graphicspath{{beamer_assets/}{output/pln/beamer_assets/}}
 \newcommand{\imgfull}[2][0.96\textwidth]{%
-  \begin{center}\includegraphics[width=#1]{beamer_assets/#2}\end{center}}
+  \begin{center}\includegraphics[width=#1]{#2}\end{center}}
 \newcommand{\pos}[1]{\textcolor{labgrn}{\textbf{#1}}}
 \newcommand{\neg}[1]{\textcolor{labred}{\textbf{#1}}}
 \newcommand{\hi} [1]{\textcolor{labblue}{\textbf{#1}}}
