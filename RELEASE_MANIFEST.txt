@@ -1,7 +1,7 @@
 manifest release/manifest_2026-11.txt
-repo HEAD ae8868b
-bs_optimization HEAD 5e33944
-245 files, 52.5 MB
+repo HEAD 624656e
+bs_optimization HEAD ed3af8d
+247 files, 52.5 MB
 
 .github/workflows/tests.yml
 .gitignore
@@ -27,7 +27,9 @@ balance_generate/python_code/sql_setup.py
 balance_generate/tests/test_security_holdings.py
 bs_optimization/README.md
 bs_optimization/input/optimizer_config.xlsx
+bs_optimization/python_code/hedging/dated_swaps.py
 bs_optimization/python_code/hedging/hedge_optimizer.py
+bs_optimization/python_code/hedging/monthly_swap_plan.py
 bs_optimization/python_code/hedging/per_scenario_hedge.py
 bs_optimization/python_code/hedging/swap_ladder.py
 bs_optimization/python_code/optimizers/bs_optimizer.py

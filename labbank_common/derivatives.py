@@ -133,6 +133,13 @@ def validate_swaps(df: pd.DataFrame) -> None:
     unknown = set(df["swap_type"]) - SWAP_TYPES_ONE_CCY - SWAP_TYPES_TWO_CCY
     if unknown:
         raise ValueError(f"swap sheet: unknown swap_type {sorted(unknown)}")
+    if {"float_notional", "notional"} <= set(df.columns):      # both legs of a single-currency swap on one notional
+        n = pd.to_numeric(df["notional"], errors="coerce")
+        f = pd.to_numeric(df["float_notional"], errors="coerce").fillna(n)
+        off = df["swap_type"].isin(SWAP_TYPES_ONE_CCY) & ((f - n).abs() > 0.5)
+        if off.any():
+            raise ValueError("swap sheet: fixed and float leg notional differ on single-currency swaps: "
+                             f"{df.loc[off, 'swap_id'].tolist()}")
     one = df["swap_type"].isin(SWAP_TYPES_ONE_CCY) & (df["currency"] != df["float_currency"])
     if one.any():
         raise ValueError(f"swap sheet: IRS/OIS must have one currency: {df.loc[one, 'swap_id'].tolist()}")

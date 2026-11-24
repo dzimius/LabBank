@@ -60,6 +60,9 @@ _N_SFX = "" if N_CURVES == 500 else f"_n{N_CURVES}"   # another sample size neve
 OUT_JSON = ((f"btrm_mc500{_N_SFX}.json" if MC_SEED == TEST_SEED else f"btrm_mc500_seed{MC_SEED}{_N_SFX}.json")
             if MC_CENTER is None
             else f"btrm_mc_{MC_CENTER}{N_CURVES}.json")
+RUNS_NAME = os.environ.get("BTRM_RUNS", "btrm_article_runs")   # another runs file gets its own output names
+_R_SFX = RUNS_NAME.removeprefix("btrm_article_runs")
+OUT_JSON = OUT_JSON[:-5] + _R_SFX + ".json"
 _SEED_SFX = "" if MC_SEED == DESIGN_SEED else f"_s{MC_SEED}"   # seed-42 caches keep their old names
 _SEED_SFX += f"_{MC_CENTER}" if MC_CENTER else ""
 # by_product (default): every product priced once per curve (mc_by_product.py), each portfolio = weighted sum;
@@ -147,22 +150,30 @@ def overlay_deltas(mc_bank, run: dict, t1: float):
     from eba_shock_curves import get_shock_params
     from labbank_common.bank_config import home_ccy
     sp = get_shock_params(home_ccy())
-    legs = []
+    legs, strips = [], []
+    comps = run.get("swap_components") or {}
     for bid, n in run.get("swaps", {}).items():
+        if bid in comps:                       # a strip on its own trade dates (dated_swaps)
+            strips.append((-n if bid.startswith("SKIP") else n, comps[bid]))
+            continue
         k = run["swap_fixed"][bid]
         sign = -1.0 if bid.startswith(("SKIP", "AGED")) else 1.0          # AGED: an existing swap leaving the book
         T = float(bid.split("_")[1].rstrip("Y")) if bid.startswith(("NEW", "AGED")) else float(run.get("skip_tenor", 7.0))
         f = 6 if bid.endswith("_6M") else sl.FIXING_FREQ_M
         legs.append((sign * n, k, np.arange(f, T * 12 + 1e-9, f, dtype=float), f))
     E = np.zeros((len(mc_bank), len(psh.SCEN_ORDER))); N = np.zeros_like(E)
-    if not legs:
+    if not legs and not strips:
         return E, N
+    import dated_swaps as ds
     for ci, (_, c) in enumerate(mc_bank.iterrows()):
         beta = c[["beta0", "beta1", "beta2"]].to_numpy(float)
         base = sl._ns_disc_curve_monthly(beta, "base", sp)
         b = [(sl._price_bucket_eve(base, rm, k, freq_m=f), sl._price_bucket_nii(base, rm, freq_m=f)) for _, k, rm, f in legs]
         for si, s in enumerate(psh.SCEN_ORDER):
             sh = sl._ns_disc_curve_monthly(beta, s, sp)
+            for n, c_ in strips:
+                E[ci, si] += n * (ds.eve(sh, c_) - ds.eve(base, c_)) / t1 * 100.0
+                N[ci, si] += n * (ds.float_nii(sh, c_) - ds.float_nii(base, c_)) / t1 * 100.0
             for (n, k, rm, f), (e0, n0) in zip(legs, b):
                 E[ci, si] += n * (sl._price_bucket_eve(sh, rm, k, freq_m=f) - e0) / t1 * 100.0
                 # first floating period fixed at trade (as in the optimiser): only later periods move
@@ -196,8 +207,16 @@ def overlay_base_nii(bank, run: dict, ref_beta) -> np.ndarray:
     sp = get_shock_params(home_ccy())
     out = np.zeros(len(bank))
     ref = sl._ns_disc_curve_monthly(np.asarray(ref_beta, float), "base", sp)
+    import dated_swaps as ds
+    comps = run.get("swap_components") or {}
     for bid, n in run.get("swaps", {}).items():
         sign = -1.0 if bid.startswith(("SKIP", "AGED")) else 1.0          # AGED: an existing swap leaving the book
+        if bid in comps:
+            n0 = ds.float_nii(ref, comps[bid])
+            for ci, (_, c) in enumerate(bank.iterrows()):
+                d = sl._ns_disc_curve_monthly(c[["beta0", "beta1", "beta2"]].to_numpy(float), "base", sp)
+                out[ci] += sign * n * (ds.float_nii(d, comps[bid]) - n0)
+            continue
         T = float(bid.split("_")[1].rstrip("Y")) if bid.startswith(("NEW", "AGED")) else float(run.get("skip_tenor", 7.0))
         f = 6 if bid.endswith("_6M") else sl.FIXING_FREQ_M
         rm = np.arange(f, T * 12 + 1e-9, f, dtype=float)[1:]
@@ -213,8 +232,10 @@ def overlay_base_nii(bank, run: dict, ref_beta) -> np.ndarray:
 def portfolio_label(tag: str, run: dict) -> str:
     """Cache label tied to the portfolio's content and to the bank's inputs (product profiles, last pipeline
     EVE run), so neither a changed optimisation nor a re-run pipeline with new models can reuse a stale cache."""
-    h = hashlib.sha1(json.dumps([sorted(run["weights_new"].items()), sorted(run.get("swaps", {}).items())],
-                                default=float).encode())
+    key = [sorted(run["weights_new"].items()), sorted(run.get("swaps", {}).items())]
+    if run.get("swap_components"):
+        key.append(run["swap_components"])
+    h = hashlib.sha1(json.dumps(key, default=float).encode())
     for p in (os.path.join(psh.OPTPREP_OUT, "product_params.npz"),
               os.path.join(str(get_bank(BANK_ID).output_dir("irrbb_calc")), "eve_results.xlsx")):
         with open(p, "rb") as f:
@@ -226,7 +247,7 @@ def portfolio_label(tag: str, run: dict) -> str:
 
 
 def main() -> None:
-    runs = json.load(open(os.path.join(str(get_bank(BANK_ID).output_dir("bs_optimization")), "btrm_article_runs.json")))
+    runs = json.load(open(os.path.join(str(get_bank(BANK_ID).output_dir("bs_optimization")), f"{RUNS_NAME}.json")))
     params = BalanceSheetParams.load(os.path.join(psh.OPTPREP_OUT, "product_params.npz"))
     pm = _ProductMap(params)
     ta = params.total_assets

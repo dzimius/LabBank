@@ -95,3 +95,15 @@ def test_asset_swaps_mirror_their_bonds_and_hit_the_hedge_share():
     assert "x" not in set(d.build_asset_swaps(_rules(1.0), pd.concat([_bonds(), old]),
                                               "2026-09-30", seed=1)["hedged_transaction_id"])
     assert d.build_asset_swaps(_rules(0.0), _bonds(), "2026-09-30", seed=1).empty
+
+
+def test_single_currency_swap_legs_share_one_notional():
+    import pandas as pd
+    import pytest
+    from labbank_common.derivatives import validate_swaps
+    row = dict(swap_id="A", swap_type="IRS", pay_fixed=1, notional=43e6, currency="EUR", float_currency="EUR",
+               float_notional=43e6, fixed_rate=0.03, notional_exchange=0,
+               start_date=pd.Timestamp("2026-12-15"), maturity_date=pd.Timestamp("2033-12-15"))
+    validate_swaps(pd.DataFrame([row]))
+    with pytest.raises(ValueError, match="float leg notional"):
+        validate_swaps(pd.DataFrame([dict(row, float_notional=40e6)]))

@@ -32,7 +32,7 @@ TAGS = {"eur": ("current", "current_renewed", "lt_profit_only", "lt_target"), "e
 
 
 def main() -> None:
-    runs = json.load(open(os.path.join(str(mc.get_bank(mc.BANK_ID).output_dir("bs_optimization")), "btrm_article_runs.json")))
+    runs = json.load(open(os.path.join(str(mc.get_bank(mc.BANK_ID).output_dir("bs_optimization")), f"{mc.RUNS_NAME}.json")))
     params = mc.BalanceSheetParams.load(os.path.join(psh.OPTPREP_OUT, "product_params.npz"))
     pm = mc._ProductMap(params)
     t1 = mc.ase.aee.irrbb_sql_setup.load_tier1_capital(mc.ase.REPORT_DATE)
@@ -70,7 +70,7 @@ def main() -> None:
             print(f"[{tag}] {n:9s} EVE {v['eve']:+6.2f}" + (f" (LP {min(l['eve'].values()):+6.2f})" if l else "")
                   + f"  NII {v['nii']:+6.2f}" + (f" (LP {min(l['nii'].values()):+6.2f})" if l else "")
                   + f"  NII level {v['nii_level']:+6.1f}m" + (f" (LP EP {l['ep_delta'] / 1e6:+6.1f})" if l else ""))
-    with open(os.path.join(str(mc.get_bank(mc.BANK_ID).output_dir("bs_optimization")), "btrm_robust_check.json"), "w") as f:
+    with open(os.path.join(str(mc.get_bank(mc.BANK_ID).output_dir("bs_optimization")), f"btrm_robust_check{mc._R_SFX}.json"), "w") as f:
         json.dump(out, f, indent=1)
     print("saved")
 

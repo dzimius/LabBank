@@ -7,9 +7,11 @@ for one bank per process (module-level bank state in the optimisers):
     LABBANK_BANK=eur_y1 python btrm_article_runs.py
 
 Settings (JointOptions, see joint_optimizer.py):
-  - new pay-fixed swaps traded today only, at par, tenors 6M/2Y/5Y/7Y/10Y on a 3M or a 6M EURIBOR floating
-    leg; first-year carry in the objective. On the plan, the plan's own new payers (traded inside the plan
-    year) may be left out (SKIP_PLAN bucket) and replaced by other tenors / legs.
+  - new pay-fixed swaps at par + cost, tenors 6M/2Y/5Y/7Y/10Y on a 3M or a 6M EURIBOR floating leg; first-year
+    carry in the objective. On today's book they are traded today. On the plan, the plan's own new payers
+    (traded inside the plan year) may be left out (SKIP_PLAN bucket) and replaced by other tenors / legs
+    traded on the SAME dates, split like the plan's notionals (dated_swaps.py; LABBANK_SWAP_DATES=report
+    puts them all on the plan date instead, the rule until 2026-11-24).
   - product-family cap (a product and its variants move by <= max_shift in total)
   - contractual run-off floors: loans and the covered bond cannot fall below the balance of existing
     contracts still outstanding at the end of the horizon (3Y for the long-term target from today,
@@ -54,6 +56,7 @@ from bs_vector import BalanceSheetParams, CohortRates
 from optimizer_io import load_optimizer_config
 from product_map import _ProductMap, plan_year_start
 import joint_optimizer as jo
+import dated_swaps as ds  # noqa: E402
 import robust_curves as rc
 
 BASE_BANK = "eur"                       # the bank the plan starts from
@@ -87,6 +90,8 @@ LOAN_FAMS = ("100", "110", "200", "210", "220", "400", "410", "420", "430")
 DEPOSIT_FAMS = ("600", "630", "706", "707", "800")
 CONCESSION_BPS = 50.0
 ORGANIC_SHARE = 0.5                     # share of the plan's growth achievable at unchanged spreads
+SWAP_DATES = os.environ.get("LABBANK_SWAP_DATES", "plan")   # runs on the plan: "plan" dates or the "report" date
+RUNS_NAME = os.environ.get("BTRM_RUNS", "btrm_article_runs")  # output file stem
 LT_YEARS = 3                            # horizon of the long-term target
 GLIDE_TOL = 0.002                       # glide path: a first-year client family stays between the plan and
                                         # the long-term target, +/- 0.2% of assets (EUR 20m)
@@ -193,6 +198,44 @@ def planned_swaps() -> dict:
         return {}
     yrs = (pd.to_datetime(d["m"]) - RD).dt.days / 365.25
     return {"SKIP_PLAN": (round(float(np.average(yrs, weights=d["n"])) * 2) / 2, float(d["n"].sum()))}
+
+
+def dated_specs(tenors, reset_months) -> list:
+    """Swap specs of a run on the plan with every swap on the plan's trade dates: NEW_<T>Y[_6M] = a payer of T
+    years bought on the dates of the plan's own new payers (same split), at each date's par quote + the swap
+    cost; SKIP_PLAN = those planned payers left out, at their own fixed rates. The skip gives back the same
+    cost, so replacing a planned payer by another tenor is compared like for like."""
+    trades = ds.planned_trades(ENGINE, pd.Timestamp(get_bank(BASE_BANK).report_date))
+    if not trades:
+        return []
+    tot = sum(t["n"] for t in trades)
+    cost = jo.SWAP_BID_OFFER_BPS
+    specs = []
+    for f in reset_months:
+        for T in tenors:
+            if T < 2:                                   # a 6M swap of the plan year has matured or is all fixed
+                continue
+            comps = ds.strip([(t["start"], t["n"] / tot) for t in trades], T, f, cost)
+            specs.append(jo.dated_spec(f"NEW_{T:g}Y" + ("" if f == 3 else f"_{f}M"), T, f, comps))
+    comps = [ds.make(t["start"], t["maturity"], t["f"], t["k"] + cost / 1e4, t["n"] / tot, t["nf"] / t["n"])
+             for t in trades]
+    yrs = sum(c["w"] * c["reset_m"][-1] for c in comps) / 12.0
+    specs.append(jo.dated_spec("SKIP_PLAN", round(yrs, 2), trades[0]["f"], comps, -1.0))
+    return specs
+
+
+def swap_year(specs: list, notional: dict) -> list:
+    """Interest (EUR) of the run's swap changes in each month of the plan year: the new payers from their own
+    trade dates, the plan's payers left out with the sign flipped."""
+    base_rd = pd.Timestamp(get_bank(BASE_BANK).report_date)
+    n_m = (RD.year - base_rd.year) * 12 + RD.month - base_rd.month
+    ends = [base_rd + pd.offsets.MonthEnd(k) for k in range(1, n_m + 1)]
+    tot = np.zeros(n_m)
+    for sp in specs:
+        for c in sp[7]:
+            tot += sp[6] * notional.get(sp[0], 0.0) * c["w"] * ds.window_interest(
+                c["start"], c["f"], c["k"], ends, base_rd, c["ratio"])
+    return tot.tolist()
 
 
 def aged_swaps(years: int) -> dict:
@@ -399,10 +442,12 @@ def run(tag: str, max_shift: float, floors: tuple, floor_kind: str, allowance_ye
     bps = opt_over.pop("concession_bps", None)
     if bps is not None:
         rate = {k: bps / 1e4 for k in rate}
+    reset = opt_over.pop("swap_reset_months", RESET_MONTHS)
+    dated = dated_specs(TENORS, reset) if (skip and "SKIP_PLAN" in skip and SWAP_DATES == "plan") else None
     options = jo.JointOptions(
-        new_swaps_today_only=True, swap_carry_in_objective=True, family_cap=True,
+        new_swaps_today_only=True, dated_specs=dated or None, swap_carry_in_objective=True, family_cap=True,
         min_weights={k: v / ta for k, v in mins.items()},
-        concession_threshold=thr, concession_rate=rate, swap_reset_months=opt_over.pop("swap_reset_months", RESET_MONTHS),
+        concession_threshold=thr, concession_rate=rate, swap_reset_months=reset,
         skippable_swaps=skip, forced_swaps=forced or None,
         line_caps=LINES, lcr_min=LCR_MIN, family_max=family_caps(params, max_shift),
         # the EVE floor on the other curves gets the same model buffer as on today's curve (2026-10-28: the
@@ -432,6 +477,8 @@ def run(tag: str, max_shift: float, floors: tuple, floor_kind: str, allowance_ye
         weights_new={f"{pc}|{s}": float(w) for (pc, s), w in zip(pm.products, r.weights_bs_new)},
         swaps={k: v for k, v in r.swap_notional.items() if v > 1e3},
         swap_fixed=dict(zip(r.ladder["bucket_ids"], map(float, r.ladder["fixed_rate"]))),
+        swap_components={sp[0]: sp[7] for sp in (dated or []) if r.swap_notional.get(sp[0], 0.0) > 1e3},
+        swap_year=swap_year(dated, r.swap_notional) if dated else None,
         ep_ftp_old=r.ep_bs_old, ep_ftp_new=r.ep_total_new,
         ep_bank_old=r.whole_bank_ep(new=False), ep_bank_new=r.whole_bank_ep(new=True),
         nii_old=r.nii_base_old, nii_new=r.nii_base_new + r.ep_carry_swap,
@@ -558,8 +605,8 @@ def main() -> None:
     if only:
         assert all(kw["floors"] is not None for t, kw in runs if t in only), "same-risk runs need the full set"
         runs = [(t, kw) for t, kw in runs if t in only]
-        results = json.load(open(os.path.join(OUT_DIR, "btrm_article_runs.json")))
-        objs = pickle.load(open(os.path.join(OUT_DIR, "btrm_article_runs.pkl"), "rb"))
+        results = json.load(open(os.path.join(OUT_DIR, f"{RUNS_NAME}.json")))
+        objs = pickle.load(open(os.path.join(OUT_DIR, f"{RUNS_NAME}.pkl"), "rb"))
     base_sot = None
     for tag, kw in runs:
         kw = dict(kw)
@@ -580,11 +627,11 @@ def main() -> None:
         results[tag] = out; objs[tag] = r
         if base_sot is None:
             base_sot = dict(eve=r.sot_eve, nii=r.sot_nii)
-    with open(os.path.join(OUT_DIR, "btrm_article_runs.json"), "w") as f:
+    with open(os.path.join(OUT_DIR, f"{RUNS_NAME}.json"), "w") as f:
         json.dump(results, f, indent=1, default=float)
-    with open(os.path.join(OUT_DIR, "btrm_article_runs.pkl"), "wb") as f:
+    with open(os.path.join(OUT_DIR, f"{RUNS_NAME}.pkl"), "wb") as f:
         pickle.dump(objs, f)
-    print("saved", os.path.join(OUT_DIR, "btrm_article_runs.json"))
+    print("saved", os.path.join(OUT_DIR, f"{RUNS_NAME}.json"))
 
 
 if __name__ == "__main__":

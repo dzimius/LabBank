@@ -88,6 +88,7 @@ from rwa_fast  import compute_rwa_fast
 from bias_store import load_bias_corrections, apply_eve_bias, apply_nii_bias
 from ftp_store  import load_ftp_rates, margin_unit_rate, equity_benefit_unit_rate
 
+import dated_swaps as ds                # noqa: E402
 import swap_ladder as sl                                                   # noqa: E402
 from bs_optimizer import (                                                 # noqa: E402
     OptimizationConfig, ProductChange, OPEX_RATE,
@@ -130,6 +131,8 @@ class JointOptions:
                                             # upper bound
     forced_swaps:    dict | None = None     # bucket_id -> notional fixed in the solution (e.g. AGED_ buckets: the
                                             # existing swaps that mature inside the horizon leave the book)
+    dated_specs:     list | None = None     # prebuilt swap specs (dated_swaps.py: swaps on their own trade dates,
+                                            # seasoned at the plan date) used instead of today's par swaps
     line_caps:       dict | None = None     # business line -> (families, side): the line's total weight
                                             # moves by at most bs_config.max_shift (e.g. consumer loans +
                                             # floating consumer + cards together)
@@ -190,6 +193,31 @@ def _today_swap_specs(tenors: tuple, reset_months: tuple = (3,), skippable: dict
         # an existing swap that leaves the book (AGED_...) keeps its own fixed rate; a planned one is at par
         specs.append((bid, float(T), 0, rm, float(k[0]) if k and k[0] is not None else par, sl.FIXING_FREQ_M, -1.0))
     return specs
+
+
+def dated_spec(bid: str, years: float, freq_m: int, comps: list, sign: float = 1.0) -> tuple:
+    """Spec of a strip of seasoned swaps (dated_swaps.strip): the 8th entry holds its parts."""
+    k = float(sum(c["w"] * c["k"] for c in comps) / sum(c["w"] for c in comps))
+    return (bid, float(years), 0, np.array([years * 12.0]), k, int(freq_m), sign, comps)
+
+
+def _spec_eve(spec, disc) -> float:
+    if len(spec) > 7:
+        return ds.eve(disc, spec[7])
+    return sl._price_bucket_eve(disc, spec[3], spec[4], freq_m=spec[5] if len(spec) > 5 else sl.FIXING_FREQ_M)
+
+
+def _spec_nii(spec, disc, base) -> float:
+    """12M floating-leg interest; the coupon in progress (first period of a new swap) does not move."""
+    if len(spec) > 7:
+        return ds.float_nii(disc, spec[7])
+    return _nii_first_fixed(disc, base, spec[3], spec[5])
+
+
+def _spec_fixed(spec) -> float:
+    if len(spec) > 7:
+        return ds.fixed_nii(spec[7])
+    return spec[4] * min(12.0, float(spec[3][-1])) / 12.0
 
 
 @dataclass
@@ -351,20 +379,19 @@ def _price_specs_on_ns(specs: list, beta, scens: list[str], direction: float) ->
     n = len(specs)
     eve = np.zeros((len(scens), n)); nii = np.zeros((len(scens), n)); carry = np.zeros(n)
     for b, spec in enumerate(specs):
-        _bid, _T, _e, rm, k, f, sign = spec
-        d = direction * sign
-        e0 = sl._price_bucket_eve(base, rm, k, freq_m=f)
-        n0 = _nii_first_fixed(base, base, rm, f)
+        d = direction * spec[6]
+        e0 = _spec_eve(spec, base)
+        n0 = _spec_nii(spec, base, base)
         for i, s in enumerate(scens):
-            eve[i, b] = d * (sl._price_bucket_eve(disc[s], rm, k, freq_m=f) - e0)
-            nii[i, b] = d * (_nii_first_fixed(disc[s], base, rm, f) - n0)
-        carry[b] = d * n0 - d * k * (min(12.0, float(rm[-1])) / 12.0)
+            eve[i, b] = d * (_spec_eve(spec, disc[s]) - e0)
+            nii[i, b] = d * (_spec_nii(spec, disc[s], base) - n0)
+        carry[b] = d * (n0 - _spec_fixed(spec))
     return dict(eve=eve, nii=nii, carry=carry)
 
 
 def _price_ladder_vs_scenarios(shocked_scens: list[str], tenors: tuple, direction: float | None,
                                today_only: bool = False, reset_months: tuple = (3,),
-                               skippable: dict | None = None):
+                               skippable: dict | None = None, dated_specs: list | None = None):
     """Price every swap_ladder.py bucket's EVE/NII sensitivity against the SAME
     scenario set bs_optimizer.py uses (base + shocked_scens), via CurveTensors
     -- the exact machinery build_ladder_bank() uses, generalised to whatever
@@ -377,7 +404,9 @@ def _price_ladder_vs_scenarios(shocked_scens: list[str], tenors: tuple, directio
     ct = sl.CurveTensors.load(sl._CURVE_TENSORS_PATH)
     ccy_idx = ct.currency_index(sl.CURRENCY)
 
-    if today_only:
+    if dated_specs is not None:
+        specs, today_only = list(dated_specs), True
+    elif today_only:
         specs = _today_swap_specs(tenors, reset_months, skippable)
     else:
         panel = sl.load_historical_panel()
@@ -398,13 +427,12 @@ def _price_ladder_vs_scenarios(shocked_scens: list[str], tenors: tuple, directio
         d = direction * sign
         for s in all_scens:
             disc = disc_by_scen[s]
-            eve_level[s][bi] = d * sl._price_bucket_eve(disc, rm, fixed_rate, freq_m=freq)
+            eve_level[s][bi] = d * _spec_eve(spec, disc)
             if today_only:      # traded today: the first floating period is fixed at trade, a shock cannot move it
-                nii_level[s][bi] = d * _nii_first_fixed(disc, disc_by_scen["base"], rm, freq)
+                nii_level[s][bi] = d * _spec_nii(spec, disc, disc_by_scen["base"])
             else:
                 nii_level[s][bi] = d * sl._price_bucket_nii(disc, rm, freq_m=freq)
-        year_h = min(12.0, float(rm[-1]))
-        ep_carry[bi] = nii_level["base"][bi] - d * fixed_rate * (year_h / 12.0)
+        ep_carry[bi] = nii_level["base"][bi] - d * _spec_fixed(spec)
 
     delta_eve = {s: eve_level[s] - eve_level["base"] for s in shocked_scens}
     delta_nii = {s: nii_level[s] - nii_level["base"] for s in shocked_scens}
@@ -543,7 +571,7 @@ def optimize_bs_and_ladder(
     ladder = _price_ladder_vs_scenarios(shocked_scens, tenors, direction=None,
                                         today_only=opt.new_swaps_today_only,
                                         reset_months=opt.swap_reset_months,
-                                        skippable=opt.skippable_swaps)
+                                        skippable=opt.skippable_swaps, dated_specs=opt.dated_specs)
     bucket_ids = ladder["bucket_ids"]
     n_buckets  = len(bucket_ids)
     direction  = ladder["direction"]
@@ -684,7 +712,8 @@ def optimize_bs_and_ladder(
     robust_ep = []            # (curve, EUR per product weight, EUR per swap unit): EP_k - EP_today
     if opt.robust:
         rb = opt.robust
-        specs = _today_swap_specs(tenors, opt.swap_reset_months, opt.skippable_swaps)
+        specs = (list(opt.dated_specs) if opt.dated_specs is not None
+                 else _today_swap_specs(tenors, opt.swap_reset_months, opt.skippable_swaps))
         assert [s[0] for s in specs] == list(bucket_ids), "robust swap specs out of step with the ladder"
         fit = _price_specs_on_ns(specs, rb["beta_fit"], shocked_scens, direction)
         hyp_idx = [rb["shock_ids"].index(s) for s in shocked_scens]
